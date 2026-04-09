@@ -1,0 +1,40 @@
+# Secrets
+.env
+
+# Generated config
+config.json
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+.venv/
+
+# uv
+.python-version
+
+# Node
+node_modules/
+
+# Data (keep structure, ignore contents)
+data/cache/
+data/imports/*.csv
+data/imports/*.json
+data/imports/*.zip
+
+# Amazon order data
+amazon-orders-*.csv
+*.zip
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# History backups
+.history/
