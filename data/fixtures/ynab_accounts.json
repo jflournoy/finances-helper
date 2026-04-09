@@ -1,0 +1,40 @@
+{
+  "data": {
+    "accounts": [
+      {
+        "id": "bbbbbbbb-0000-0000-0000-000000000001",
+        "name": "Checking",
+        "type": "checking",
+        "on_budget": true,
+        "closed": false,
+        "balance": 150000,
+        "cleared_balance": 150000,
+        "uncleared_balance": 0,
+        "deleted": false
+      },
+      {
+        "id": "bbbbbbbb-0000-0000-0000-000000000002",
+        "name": "Amazon Visa",
+        "type": "creditCard",
+        "on_budget": true,
+        "closed": false,
+        "balance": -45230,
+        "cleared_balance": -45230,
+        "uncleared_balance": 0,
+        "deleted": false
+      },
+      {
+        "id": "bbbbbbbb-0000-0000-0000-000000000003",
+        "name": "Old Account",
+        "type": "checking",
+        "on_budget": true,
+        "closed": true,
+        "balance": 0,
+        "cleared_balance": 0,
+        "uncleared_balance": 0,
+        "deleted": true
+      }
+    ],
+    "server_knowledge": 100
+  }
+}

@@ -111,3 +111,19 @@ class YNABClient:
             raise YNABAPIError(response.status_code, detail="Response missing 'data' key")
 
         return body["data"]
+
+    def get_budgets(self) -> list:
+        """Get all budgets."""
+        data = self._get("/budgets")
+        return data.get("budgets", [])
+
+    def get_budget(self, budget_id: str) -> dict:
+        """Get a single budget by ID."""
+        data = self._get(f"/budgets/{budget_id}")
+        return data.get("budget", {})
+
+    def get_accounts(self, budget_id: str) -> list:
+        """Get accounts for a budget, filtering out deleted accounts."""
+        data = self._get(f"/budgets/{budget_id}/accounts")
+        accounts = data.get("accounts", [])
+        return [a for a in accounts if not a.get("deleted", False)]

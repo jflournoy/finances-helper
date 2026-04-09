@@ -3,6 +3,7 @@ import json
 import os
 import pytest
 import requests
+from pathlib import Path
 from unittest.mock import patch, Mock
 from ynab_client import (
     dollars_to_milliunits,
@@ -12,6 +13,19 @@ from ynab_client import (
     YNABNotFoundError,
     YNABRateLimitError,
 )
+
+FIXTURES = Path("data/fixtures")
+
+
+def load_fixture(name):
+    return json.loads((FIXTURES / name).read_text())
+
+
+def mock_get(client, fixture_data):
+    mock_resp = Mock()
+    mock_resp.status_code = 200
+    mock_resp.json.return_value = fixture_data
+    return patch.object(client.session, "get", return_value=mock_resp)
 
 
 def test_dollars_to_milliunits_positive():
@@ -154,3 +168,45 @@ def test_not_found_is_subclass_of_api_error():
 
 def test_rate_limit_is_subclass_of_api_error():
     assert issubclass(YNABRateLimitError, YNABAPIError)
+
+
+# Issue #4: Budget and account methods
+
+def test_get_budgets_returns_list(client):
+    fixture = load_fixture("ynab_budgets.json")
+    with mock_get(client, fixture):
+        budgets = client.get_budgets()
+    assert isinstance(budgets, list)
+    assert len(budgets) == 2
+    assert budgets[0]["name"] == "My Budget"
+
+
+def test_get_budgets_empty(client):
+    fixture = {"data": {"budgets": [], "default_budget": None}}
+    with mock_get(client, fixture):
+        budgets = client.get_budgets()
+    assert budgets == []
+
+
+def test_get_budget_single(client):
+    fixture = {"data": {"budget": {"id": "aaaaaaaa-0000-0000-0000-000000000001", "name": "My Budget"}}}
+    with mock_get(client, fixture):
+        budget = client.get_budget("aaaaaaaa-0000-0000-0000-000000000001")
+    assert budget["id"] == "aaaaaaaa-0000-0000-0000-000000000001"
+
+
+def test_get_accounts_filters_deleted(client):
+    fixture = load_fixture("ynab_accounts.json")
+    with mock_get(client, fixture):
+        accounts = client.get_accounts("aaaaaaaa-0000-0000-0000-000000000001")
+    assert len(accounts) == 2
+    assert all(not a["deleted"] for a in accounts)
+
+
+def test_get_accounts_has_expected_fields(client):
+    fixture = load_fixture("ynab_accounts.json")
+    with mock_get(client, fixture):
+        accounts = client.get_accounts("aaaaaaaa-0000-0000-0000-000000000001")
+    acct = accounts[0]
+    for field in ("id", "name", "type", "on_budget", "balance"):
+        assert field in acct, f"Missing field: {field}"

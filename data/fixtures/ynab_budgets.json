@@ -1,0 +1,17 @@
+{
+  "data": {
+    "budgets": [
+      {
+        "id": "aaaaaaaa-0000-0000-0000-000000000001",
+        "name": "My Budget",
+        "last_modified_on": "2026-01-15T00:00:00Z"
+      },
+      {
+        "id": "aaaaaaaa-0000-0000-0000-000000000002",
+        "name": "Savings",
+        "last_modified_on": "2026-01-15T00:00:00Z"
+      }
+    ],
+    "default_budget": null
+  }
+}
