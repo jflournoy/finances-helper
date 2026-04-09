@@ -281,3 +281,108 @@ def test_get_payees_has_id_and_name(client):
         payees = client.get_payees(BUDGET_ID)
     assert payees[0]["name"] == "Whole Foods"
     assert "id" in payees[0]
+
+
+# Issue #6: Transaction methods with delta sync
+
+ACCOUNT_ID = "bbbbbbbb-0000-0000-0000-000000000001"
+
+
+def test_get_transactions_returns_tuple(client):
+    fixture = load_fixture("ynab_transactions.json")
+    with mock_get(client, fixture):
+        result = client.get_transactions(BUDGET_ID)
+    assert isinstance(result, tuple)
+    txns, sk = result
+    assert isinstance(txns, list)
+    assert isinstance(sk, int)
+
+
+def test_get_transactions_filters_deleted(client):
+    fixture = load_fixture("ynab_transactions.json")
+    with mock_get(client, fixture):
+        txns, _ = client.get_transactions(BUDGET_ID)
+    assert len(txns) == 2
+    assert all(not t.get("deleted", False) for t in txns)
+
+
+def test_get_transactions_returns_server_knowledge(client):
+    fixture = load_fixture("ynab_transactions.json")
+    with mock_get(client, fixture):
+        _, sk = client.get_transactions(BUDGET_ID)
+    assert sk == 350
+
+
+def test_get_transactions_since_date_passed_as_param(client):
+    fixture = load_fixture("ynab_transactions.json")
+    mock_resp = Mock(status_code=200)
+    mock_resp.json.return_value = fixture
+    with patch.object(client.session, "get", return_value=mock_resp) as mock_session_get:
+        client.get_transactions(BUDGET_ID, since_date="2026-03-01")
+    call_kwargs = mock_session_get.call_args
+    params = call_kwargs[1].get("params", {})
+    assert params.get("since_date") == "2026-03-01"
+
+
+def test_get_transactions_type_param_passed(client):
+    fixture = load_fixture("ynab_transactions.json")
+    mock_resp = Mock(status_code=200)
+    mock_resp.json.return_value = fixture
+    with patch.object(client.session, "get", return_value=mock_resp) as mock_session_get:
+        client.get_transactions(BUDGET_ID, type="uncategorized")
+    call_kwargs = mock_session_get.call_args
+    params = call_kwargs[1].get("params", {})
+    assert params.get("type") == "uncategorized"
+
+
+def test_get_transactions_none_params_omitted(client):
+    fixture = load_fixture("ynab_transactions.json")
+    mock_resp = Mock(status_code=200)
+    mock_resp.json.return_value = fixture
+    with patch.object(client.session, "get", return_value=mock_resp) as mock_session_get:
+        client.get_transactions(BUDGET_ID)
+    call_kwargs = mock_session_get.call_args
+    params = call_kwargs[1].get("params")
+    # params should be None or empty dict when no optional params given
+    if params is not None:
+        assert "since_date" not in params
+        assert "type" not in params
+        assert "last_knowledge_of_server" not in params
+
+
+def test_get_transactions_transaction_fields(client):
+    fixture = load_fixture("ynab_transactions.json")
+    with mock_get(client, fixture):
+        txns, _ = client.get_transactions(BUDGET_ID)
+    t = txns[0]
+    for field in ("id", "date", "amount", "payee_name", "category_id", "memo", "cleared", "approved", "account_id"):
+        assert field in t, f"Missing field: {field}"
+
+
+def test_get_transactions_empty_returns_tuple(client):
+    fixture = {"data": {"transactions": [], "server_knowledge": 500}}
+    with mock_get(client, fixture):
+        txns, sk = client.get_transactions(BUDGET_ID)
+    assert txns == []
+    assert sk == 500
+
+
+def test_get_account_transactions_uses_account_path(client):
+    fixture = load_fixture("ynab_transactions.json")
+    mock_resp = Mock(status_code=200)
+    mock_resp.json.return_value = fixture
+    with patch.object(client.session, "get", return_value=mock_resp) as mock_session_get:
+        client.get_account_transactions(BUDGET_ID, ACCOUNT_ID)
+    call_url = mock_session_get.call_args[0][0]
+    assert f"/accounts/{ACCOUNT_ID}/transactions" in call_url
+
+
+def test_get_transactions_delta_sync_param(client):
+    fixture = load_fixture("ynab_transactions.json")
+    mock_resp = Mock(status_code=200)
+    mock_resp.json.return_value = fixture
+    with patch.object(client.session, "get", return_value=mock_resp) as mock_session_get:
+        client.get_transactions(BUDGET_ID, last_knowledge_of_server=300)
+    call_kwargs = mock_session_get.call_args
+    params = call_kwargs[1].get("params", {})
+    assert params.get("last_knowledge_of_server") == 300

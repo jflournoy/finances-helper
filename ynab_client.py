@@ -160,3 +160,74 @@ class YNABClient:
         data = self._get(f"/budgets/{budget_id}/payees")
         payees = data.get("payees", [])
         return [p for p in payees if not p.get("deleted", False)]
+
+    def get_transactions(
+        self,
+        budget_id: str,
+        since_date: str | None = None,
+        type: str | None = None,
+        last_knowledge_of_server: int | None = None,
+    ) -> tuple[list[dict], int]:
+        """Get transactions for a budget, returning (transactions, server_knowledge).
+
+        Args:
+            budget_id: Budget ID
+            since_date: Optional ISO 8601 date filter
+            type: Optional transaction type filter
+            last_knowledge_of_server: Optional server knowledge for delta sync
+
+        Returns:
+            Tuple of (filtered_transactions, server_knowledge)
+        """
+        params = {}
+        if since_date is not None:
+            params["since_date"] = since_date
+        if type is not None:
+            params["type"] = type
+        if last_knowledge_of_server is not None:
+            params["last_knowledge_of_server"] = last_knowledge_of_server
+
+        data = self._get(f"/budgets/{budget_id}/transactions", params=params if params else None)
+        transactions = data.get("transactions", [])
+        filtered = [t for t in transactions if not t.get("deleted", False)]
+        server_knowledge = data.get("server_knowledge", 0)
+
+        return filtered, server_knowledge
+
+    def get_account_transactions(
+        self,
+        budget_id: str,
+        account_id: str,
+        since_date: str | None = None,
+        type: str | None = None,
+        last_knowledge_of_server: int | None = None,
+    ) -> tuple[list[dict], int]:
+        """Get transactions for a specific account, returning (transactions, server_knowledge).
+
+        Args:
+            budget_id: Budget ID
+            account_id: Account ID
+            since_date: Optional ISO 8601 date filter
+            type: Optional transaction type filter
+            last_knowledge_of_server: Optional server knowledge for delta sync
+
+        Returns:
+            Tuple of (filtered_transactions, server_knowledge)
+        """
+        params = {}
+        if since_date is not None:
+            params["since_date"] = since_date
+        if type is not None:
+            params["type"] = type
+        if last_knowledge_of_server is not None:
+            params["last_knowledge_of_server"] = last_knowledge_of_server
+
+        data = self._get(
+            f"/budgets/{budget_id}/accounts/{account_id}/transactions",
+            params=params if params else None
+        )
+        transactions = data.get("transactions", [])
+        filtered = [t for t in transactions if not t.get("deleted", False)]
+        server_knowledge = data.get("server_knowledge", 0)
+
+        return filtered, server_knowledge

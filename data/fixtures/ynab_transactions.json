@@ -1,0 +1,55 @@
+{
+  "data": {
+    "transactions": [
+      {
+        "id": "ffffffff-0000-0000-0000-000000000001",
+        "date": "2026-03-15",
+        "amount": -4523,
+        "memo": "Groceries",
+        "cleared": "cleared",
+        "approved": true,
+        "payee_id": "eeeeeeee-0000-0000-0000-000000000001",
+        "payee_name": "Whole Foods",
+        "category_id": "dddddddd-0000-0000-0000-000000000003",
+        "category_name": "Groceries",
+        "account_id": "bbbbbbbb-0000-0000-0000-000000000001",
+        "account_name": "Checking",
+        "subtransactions": [],
+        "deleted": false
+      },
+      {
+        "id": "ffffffff-0000-0000-0000-000000000002",
+        "date": "2026-03-20",
+        "amount": -12300,
+        "memo": null,
+        "cleared": "uncleared",
+        "approved": false,
+        "payee_id": "eeeeeeee-0000-0000-0000-000000000002",
+        "payee_name": "Amazon",
+        "category_id": null,
+        "category_name": null,
+        "account_id": "bbbbbbbb-0000-0000-0000-000000000002",
+        "account_name": "Amazon Visa",
+        "subtransactions": [],
+        "deleted": false
+      },
+      {
+        "id": "ffffffff-0000-0000-0000-000000000003",
+        "date": "2026-03-10",
+        "amount": -5000,
+        "memo": "Old",
+        "cleared": "cleared",
+        "approved": true,
+        "payee_id": "eeeeeeee-0000-0000-0000-000000000001",
+        "payee_name": "Whole Foods",
+        "category_id": "dddddddd-0000-0000-0000-000000000003",
+        "category_name": "Groceries",
+        "account_id": "bbbbbbbb-0000-0000-0000-000000000001",
+        "account_name": "Checking",
+        "subtransactions": [],
+        "deleted": true
+      }
+    ],
+    "server_knowledge": 350
+  }
+}
