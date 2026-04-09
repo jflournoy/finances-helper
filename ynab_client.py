@@ -127,3 +127,36 @@ class YNABClient:
         data = self._get(f"/budgets/{budget_id}/accounts")
         accounts = data.get("accounts", [])
         return [a for a in accounts if not a.get("deleted", False)]
+
+    def get_categories(self, budget_id: str) -> list:
+        """Get category groups for a budget, with nested categories.
+
+        Returns list of category group dicts, each with a 'categories' list.
+        Filters out deleted category groups and deleted categories within groups.
+        Hidden categories are included (filtering is the caller's job).
+        """
+        data = self._get(f"/budgets/{budget_id}/categories")
+        category_groups = data.get("category_groups", [])
+
+        result = []
+        for group in category_groups:
+            if group.get("deleted", False):
+                continue
+
+            categories = group.get("categories", [])
+            filtered_categories = [c for c in categories if not c.get("deleted", False)]
+
+            result.append({
+                "id": group.get("id"),
+                "name": group.get("name"),
+                "hidden": group.get("hidden"),
+                "categories": filtered_categories,
+            })
+
+        return result
+
+    def get_payees(self, budget_id: str) -> list:
+        """Get payees for a budget, filtering out deleted payees."""
+        data = self._get(f"/budgets/{budget_id}/payees")
+        payees = data.get("payees", [])
+        return [p for p in payees if not p.get("deleted", False)]

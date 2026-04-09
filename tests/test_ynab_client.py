@@ -210,3 +210,74 @@ def test_get_accounts_has_expected_fields(client):
     acct = accounts[0]
     for field in ("id", "name", "type", "on_budget", "balance"):
         assert field in acct, f"Missing field: {field}"
+
+
+# Issue #5: Category and payee methods
+
+BUDGET_ID = "aaaaaaaa-0000-0000-0000-000000000001"
+
+
+def test_get_categories_returns_groups(client):
+    fixture = load_fixture("ynab_categories.json")
+    with mock_get(client, fixture):
+        groups = client.get_categories(BUDGET_ID)
+    assert len(groups) == 2
+    assert groups[0]["name"] == "Monthly Bills"
+
+
+def test_get_categories_groups_have_categories_list(client):
+    fixture = load_fixture("ynab_categories.json")
+    with mock_get(client, fixture):
+        groups = client.get_categories(BUDGET_ID)
+    assert "categories" in groups[0]
+    assert isinstance(groups[0]["categories"], list)
+
+
+def test_get_categories_filters_deleted_categories(client):
+    fixture = load_fixture("ynab_categories.json")
+    with mock_get(client, fixture):
+        groups = client.get_categories(BUDGET_ID)
+    # Monthly Bills group: 2 categories, 1 deleted → 1 remaining
+    monthly_bills = groups[0]
+    assert len(monthly_bills["categories"]) == 1
+    assert monthly_bills["categories"][0]["name"] == "Rent"
+
+
+def test_get_categories_includes_hidden_categories(client):
+    # Hidden ≠ deleted. Hidden categories must be included.
+    fixture = load_fixture("ynab_categories.json")
+    with mock_get(client, fixture):
+        groups = client.get_categories(BUDGET_ID)
+    # Rent is not hidden, verify hidden field is preserved
+    assert "hidden" in groups[0]["categories"][0]
+
+
+def test_get_categories_category_fields(client):
+    fixture = load_fixture("ynab_categories.json")
+    with mock_get(client, fixture):
+        groups = client.get_categories(BUDGET_ID)
+    cat = groups[0]["categories"][0]
+    for field in ("id", "category_group_id", "name", "hidden", "budgeted", "activity", "balance"):
+        assert field in cat, f"Missing field: {field}"
+
+
+def test_get_payees_returns_list(client):
+    fixture = load_fixture("ynab_payees.json")
+    with mock_get(client, fixture):
+        payees = client.get_payees(BUDGET_ID)
+    assert len(payees) == 2  # 3 in fixture, 1 deleted
+
+
+def test_get_payees_filters_deleted(client):
+    fixture = load_fixture("ynab_payees.json")
+    with mock_get(client, fixture):
+        payees = client.get_payees(BUDGET_ID)
+    assert all(not p.get("deleted", False) for p in payees)
+
+
+def test_get_payees_has_id_and_name(client):
+    fixture = load_fixture("ynab_payees.json")
+    with mock_get(client, fixture):
+        payees = client.get_payees(BUDGET_ID)
+    assert payees[0]["name"] == "Whole Foods"
+    assert "id" in payees[0]

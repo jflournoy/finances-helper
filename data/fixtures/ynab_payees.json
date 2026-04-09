@@ -1,0 +1,10 @@
+{
+  "data": {
+    "payees": [
+      {"id": "eeeeeeee-0000-0000-0000-000000000001", "name": "Whole Foods", "transfer_account_id": null, "deleted": false},
+      {"id": "eeeeeeee-0000-0000-0000-000000000002", "name": "Amazon", "transfer_account_id": null, "deleted": false},
+      {"id": "eeeeeeee-0000-0000-0000-000000000003", "name": "Old Payee", "transfer_account_id": null, "deleted": true}
+    ],
+    "server_knowledge": 200
+  }
+}

@@ -1,0 +1,26 @@
+{
+  "data": {
+    "category_groups": [
+      {
+        "id": "cccccccc-0000-0000-0000-000000000001",
+        "name": "Monthly Bills",
+        "hidden": false,
+        "deleted": false,
+        "categories": [
+          {"id": "dddddddd-0000-0000-0000-000000000001", "category_group_id": "cccccccc-0000-0000-0000-000000000001", "name": "Rent", "hidden": false, "budgeted": 200000000, "activity": -200000000, "balance": 0, "deleted": false},
+          {"id": "dddddddd-0000-0000-0000-000000000002", "category_group_id": "cccccccc-0000-0000-0000-000000000001", "name": "Old Category", "hidden": true, "budgeted": 0, "activity": 0, "balance": 0, "deleted": true}
+        ]
+      },
+      {
+        "id": "cccccccc-0000-0000-0000-000000000002",
+        "name": "Groceries & Dining",
+        "hidden": false,
+        "deleted": false,
+        "categories": [
+          {"id": "dddddddd-0000-0000-0000-000000000003", "category_group_id": "cccccccc-0000-0000-0000-000000000002", "name": "Groceries", "hidden": false, "budgeted": 50000000, "activity": -32000000, "balance": 18000000, "deleted": false}
+        ]
+      }
+    ],
+    "server_knowledge": 200
+  }
+}
