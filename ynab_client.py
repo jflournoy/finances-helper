@@ -83,10 +83,7 @@ class YNABClient:
             YNABAPIError: On other errors
         """
         url = f"{self.base_url}{path}"
-        try:
-            response = self.session.get(url, params=params)
-        except (requests.exceptions.ConnectionError, requests.exceptions.Timeout) as e:
-            raise e
+        response = self.session.get(url, params=params)
 
         # Parse response body
         try:
