@@ -297,7 +297,12 @@ Only use category IDs from the list above. Return ONLY the JSON array, no other 
 
     # Build results
     results = []
+    required_fields = {"category_id", "category_name", "confidence", "rationale"}
     for i, item in enumerate(data):
+        missing = required_fields - set(item.keys())
+        if missing:
+            raise ValueError(f"Response item {i} missing fields: {', '.join(sorted(missing))}")
+
         txn = transactions[i]
         results.append(CategoryResult(
             transaction_id=txn["id"],
@@ -352,10 +357,12 @@ def categorize_transactions(
         result.transaction_id = txn["id"]
         results.append(result)
 
-    # Batch tier 3 Claude call
+    # Batch tier 3 Claude calls in chunks of CLAUDE_BATCH_SIZE
     if tier3_pending:
-        tier3_results = claude_categorize(tier3_pending, categories, api_key)
-        results.extend(tier3_results)
+        for i in range(0, len(tier3_pending), CLAUDE_BATCH_SIZE):
+            batch = tier3_pending[i:i + CLAUDE_BATCH_SIZE]
+            tier3_results = claude_categorize(batch, categories, api_key)
+            results.extend(tier3_results)
 
     return results
 
