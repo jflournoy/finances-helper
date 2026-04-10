@@ -14,6 +14,7 @@ from categorizer import (
     history_lookup,
     fuzzy_match,
     claude_categorize,
+    categorize_transactions,
 )
 
 
@@ -426,3 +427,141 @@ def test_claude_categorize_with_fixture_response():
     assert len(result) == 1
     assert result[0].transaction_id == amazon_txn["id"]
     assert result[0].category_id == "dddddddd-0000-0000-0000-000000000003"
+
+
+# Orchestrator: categorize_transactions
+
+def test_categorize_transactions_tier1_hit_no_claude_call():
+    cache = {"whole foods": {"category_id": "cat1", "category_name": "Groceries"}}
+    transactions = [{"id": "txn1", "payee_name": "Whole Foods", "amount": -5000, "date": "2026-03-01"}]
+    categories = []
+
+    with patch("categorizer.anthropic.Anthropic") as mock_anthropic_class:
+        results = categorize_transactions(transactions, cache, categories, "test-key")
+
+    assert len(results) == 1
+    assert results[0].tier == "history"
+    assert results[0].category_id == "cat1"
+    # Verify Claude was not called
+    mock_anthropic_class.assert_not_called()
+
+
+def test_categorize_transactions_tier2_hit_no_claude_call():
+    cache = {"whole foods": {"category_id": "cat1", "category_name": "Groceries"}}
+    transactions = [{"id": "txn1", "payee_name": "Whole Foods Market #999", "amount": -5000, "date": "2026-03-01"}]
+    categories = []
+
+    with patch("categorizer.anthropic.Anthropic") as mock_anthropic_class:
+        results = categorize_transactions(transactions, cache, categories, "test-key")
+
+    assert len(results) == 1
+    assert results[0].tier == "fuzzy"
+    mock_anthropic_class.assert_not_called()
+
+
+def test_categorize_transactions_tier3_called_for_novel_payee():
+    cache = {}
+    transactions = [{"id": "txn1", "payee_name": "Unknown Store", "amount": -5000, "date": "2026-03-01"}]
+    categories = [{"id": "g1", "name": "Shopping", "categories": [{"id": "c1", "name": "Retail"}]}]
+
+    mock_response = Mock()
+    mock_response.content = [Mock(text='[{"payee_name": "Unknown Store", "category_id": "c1", "category_name": "Retail", "confidence": 0.7, "rationale": "r"}]')]
+
+    with patch("categorizer.anthropic.Anthropic") as mock_anthropic_class:
+        mock_client = Mock()
+        mock_anthropic_class.return_value = mock_client
+        mock_client.messages.create.return_value = mock_response
+        results = categorize_transactions(transactions, cache, categories, "test-key")
+
+    assert len(results) == 1
+    assert results[0].tier == "claude"
+    mock_anthropic_class.assert_called_once()
+
+
+def test_categorize_transactions_claude_called_once_for_batch():
+    cache = {}
+    transactions = [
+        {"id": "txn1", "payee_name": "Unknown1", "amount": -5000, "date": "2026-03-01"},
+        {"id": "txn2", "payee_name": "Unknown2", "amount": -6000, "date": "2026-03-01"},
+        {"id": "txn3", "payee_name": "Unknown3", "amount": -7000, "date": "2026-03-01"},
+    ]
+    categories = [{"id": "g1", "name": "Shopping", "categories": [{"id": "c1", "name": "Retail"}]}]
+
+    mock_response = Mock()
+    mock_response.content = [Mock(text='[{"payee_name": "Unknown1", "category_id": "c1", "category_name": "Retail", "confidence": 0.7, "rationale": "r"},{"payee_name": "Unknown2", "category_id": "c1", "category_name": "Retail", "confidence": 0.7, "rationale": "r"},{"payee_name": "Unknown3", "category_id": "c1", "category_name": "Retail", "confidence": 0.7, "rationale": "r"}]')]
+
+    with patch("categorizer.anthropic.Anthropic") as mock_anthropic_class:
+        mock_client = Mock()
+        mock_anthropic_class.return_value = mock_client
+        mock_client.messages.create.return_value = mock_response
+        results = categorize_transactions(transactions, cache, categories, "test-key")
+
+    assert len(results) == 3
+    # Claude should be called once with all 3 transactions
+    mock_anthropic_class.assert_called_once()
+
+
+def test_categorize_transactions_raises_on_missing_payee_name():
+    cache = {}
+    transactions = [{"id": "txn1", "payee_name": None, "amount": -5000, "date": "2026-03-01"}]
+    categories = []
+
+    with pytest.raises(ValueError):
+        categorize_transactions(transactions, cache, categories, "test-key")
+
+
+def test_categorize_transactions_mixed_tiers():
+    cache = {"whole foods": {"category_id": "cat1", "category_name": "Groceries"}}
+    transactions = [
+        {"id": "txn1", "payee_name": "Whole Foods", "amount": -5000, "date": "2026-03-01"},  # tier 1
+        {"id": "txn2", "payee_name": "Unknown Store", "amount": -6000, "date": "2026-03-01"},  # tier 3
+    ]
+    categories = [{"id": "g1", "name": "Shopping", "categories": [{"id": "c2", "name": "Retail"}]}]
+
+    mock_response = Mock()
+    mock_response.content = [Mock(text='[{"payee_name": "Unknown Store", "category_id": "c2", "category_name": "Retail", "confidence": 0.7, "rationale": "r"}]')]
+
+    with patch("categorizer.anthropic.Anthropic") as mock_anthropic_class:
+        mock_client = Mock()
+        mock_anthropic_class.return_value = mock_client
+        mock_client.messages.create.return_value = mock_response
+        results = categorize_transactions(transactions, cache, categories, "test-key")
+
+    assert len(results) == 2
+    # First result is from tier 1, second from tier 3
+    tiers = {r.transaction_id: r.tier for r in results}
+    assert tiers["txn1"] == "history"
+    assert tiers["txn2"] == "claude"
+
+
+def test_categorize_transactions_full_pipeline_with_fixtures():
+    cache = load_payee_cache("data/fixtures/payee_cache.json")
+    categories = json.loads(Path("data/fixtures/ynab_categories.json").read_text())["data"]["category_groups"]
+    transactions = json.loads(Path("data/fixtures/ynab_transactions.json").read_text())["data"]["transactions"]
+
+    # Use the uncategorized Amazon transaction but modify payee so it's not in cache
+    amazon_txn = next((t for t in transactions if t.get("payee_name") == "Amazon"), None)
+    assert amazon_txn is not None
+
+    # Create a novel transaction not in cache
+    novel_txn = {
+        "id": amazon_txn["id"],
+        "payee_name": "NewNovelStore",
+        "amount": amazon_txn["amount"],
+        "date": amazon_txn["date"],
+        "category_id": None,
+    }
+
+    mock_response = Mock()
+    mock_response.content = [Mock(text='[{"payee_name": "NewNovelStore", "category_id": "dddddddd-0000-0000-0000-000000000003", "category_name": "Groceries", "confidence": 0.85, "rationale": "test"}]')]
+
+    with patch("categorizer.anthropic.Anthropic") as mock_anthropic_class:
+        mock_client = Mock()
+        mock_anthropic_class.return_value = mock_client
+        mock_client.messages.create.return_value = mock_response
+        results = categorize_transactions([novel_txn], cache, categories, "test-key")
+
+    assert len(results) == 1
+    assert results[0].transaction_id == novel_txn["id"]
+    assert results[0].tier == "claude"
+    assert results[0].category_id == "dddddddd-0000-0000-0000-000000000003"

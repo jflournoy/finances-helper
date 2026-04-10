@@ -309,3 +309,142 @@ Only use category IDs from the list above. Return ONLY the JSON array, no other 
         ))
 
     return results
+
+
+def categorize_transactions(
+    transactions: list[dict],
+    cache: dict,
+    categories: list[dict],
+    api_key: str,
+) -> list[CategoryResult]:
+    """Orchestrate the three-tier categorization for a list of transactions.
+
+    Args:
+        transactions: List of uncategorized YNAB transaction dicts
+        cache: Payee cache dict
+        categories: List of category group dicts
+        api_key: Anthropic API key
+
+    Returns:
+        List of CategoryResult objects from all three tiers.
+
+    Raises:
+        ValueError: If any transaction lacks a payee_name.
+    """
+    results = []
+    tier3_pending = []
+
+    for txn in transactions:
+        payee = txn.get("payee_name")
+        if not payee:
+            raise ValueError(f"Transaction {txn.get('id')} has no payee_name")
+
+        # Try tier 1
+        result = history_lookup(payee, cache)
+        if result is None:
+            # Try tier 2
+            result = fuzzy_match(payee, cache)
+        if result is None:
+            # Queue for tier 3
+            tier3_pending.append(txn)
+            continue
+
+        result.transaction_id = txn["id"]
+        results.append(result)
+
+    # Batch tier 3 Claude call
+    if tier3_pending:
+        tier3_results = claude_categorize(tier3_pending, categories, api_key)
+        results.extend(tier3_results)
+
+    return results
+
+
+def main():
+    """CLI entrypoint for categorizing transactions."""
+    import argparse
+    import os
+    from dotenv import load_dotenv
+
+    load_dotenv()
+
+    parser = argparse.ArgumentParser(description="Categorize uncategorized YNAB transactions")
+    parser.add_argument("--days", type=int, required=True, help="How many days back to fetch")
+    args = parser.parse_args()
+
+    # Check environment variables
+    ynab_token = os.getenv("YNAB_API_TOKEN")
+    if not ynab_token:
+        raise ValueError("YNAB_API_TOKEN environment variable is required")
+
+    anthropic_key = os.getenv("ANTHROPIC_API_KEY")
+    if not anthropic_key:
+        raise ValueError("ANTHROPIC_API_KEY environment variable is required")
+
+    # Load config
+    config_path = Path("config.json")
+    if not config_path.exists():
+        raise ValueError("config.json not found. Run setup.py first.")
+
+    config = json.loads(config_path.read_text())
+    budget_id = config.get("budget_id")
+    if not budget_id:
+        raise ValueError("budget_id not found in config.json")
+
+    # Fetch data from YNAB
+    from ynab_client import YNABClient
+    from datetime import datetime, timedelta
+
+    client = YNABClient(token=ynab_token)
+    since_date = (datetime.now() - timedelta(days=args.days)).strftime("%Y-%m-%d")
+
+    transactions, _ = client.get_transactions(budget_id, since_date=since_date)
+    categories = client.get_categories(budget_id)
+
+    # Filter to uncategorized transactions
+    uncategorized = [t for t in transactions if t.get("category_id") is None]
+
+    if not uncategorized:
+        print("No uncategorized transactions found.")
+        return
+
+    # Load or bootstrap cache
+    cache = load_payee_cache()
+    if not cache:
+        print("Cache is empty. Bootstrapping from existing transactions...")
+        all_txns, _ = client.get_transactions(budget_id)
+        cache = build_cache_from_transactions(all_txns)
+        if cache:
+            save_payee_cache(cache)
+            print(f"Cache built with {len(cache)} payees")
+
+    # Categorize
+    results = categorize_transactions(uncategorized, cache, categories, anthropic_key)
+
+    # Print changeset
+    print(f"\nProposed categorizations ({len(results)} transactions):")
+    print("─" * 50)
+    for result in results:
+        tier_label = result.tier.upper()
+        conf = f"{result.confidence:.2f}"
+        reason = f" ({result.rationale})" if result.tier == "claude" else ""
+        print(f"[{tier_label}] {result.transaction_id} → {result.category_name} (confidence: {conf}){reason}")
+
+    # Update cache with new payees from Claude
+    for result in results:
+        if result.tier == "claude":
+            # Find original transaction for payee name
+            txn = next((t for t in uncategorized if t["id"] == result.transaction_id), None)
+            if txn:
+                normalized = normalize_payee(txn["payee_name"])
+                cache[normalized] = {
+                    "category_id": result.category_id,
+                    "category_name": result.category_name,
+                }
+
+    save_payee_cache(cache)
+    print(f"\nCache updated with {sum(1 for r in results if r.tier == 'claude')} new payees")
+
+
+if __name__ == "__main__":
+    main()
