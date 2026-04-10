@@ -34,10 +34,10 @@ def normalize_payee(name: str) -> str:
 
     1. Strip leading/trailing whitespace
     2. Lowercase
-    3. Strip #codes and *codes anywhere in the string
-    4. Strip trailing dash+number codes only (preserves dash+word like "- Portland")
+    3. Strip trailing #codes; strip trailing *codes only if code contains digits
+    4. Strip trailing dash+number codes (ASCII and unicode dashes; preserves dash+word)
     5. Collapse multiple spaces to single space
-    6. Strip trailing punctuation
+    6. Strip trailing punctuation (including dashes)
 
     Raises ValueError if name is None, empty, or whitespace-only after stripping.
     """
