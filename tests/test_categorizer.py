@@ -1121,6 +1121,55 @@ def test_main_updates_cache_with_claude_results(monkeypatch, tmp_path):
     assert saved_cache["newplace"]["total"] == 1
 
 
+def test_main_triggers_rebuild_on_v1_migration(monkeypatch, tmp_path, capsys):
+    """When load_payee_cache migrates v1→v2, main() triggers a full rebuild."""
+    monkeypatch.setenv("YNAB_API_TOKEN", "token")
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "key")
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "config.json").write_text(json.dumps({"budget_id": "b1"}))
+
+    # Write a v1 cache
+    cache_dir = tmp_path / "data" / "cache"
+    cache_dir.mkdir(parents=True)
+    v1_cache = {"starbucks": {"category_id": "c1", "category_name": "Coffee"}}
+    (cache_dir / "payee_lookup.json").write_text(json.dumps(v1_cache))
+
+    mock_ynab = Mock()
+    # First call: get recent transactions (one uncategorized)
+    # Second call: get ALL transactions for rebuild
+    mock_ynab.get_transactions.side_effect = [
+        ([{"id": "t1", "payee_name": "NewStore", "category_id": None, "amount": -5000, "date": "2026-03-01"}], {}),
+        ([
+            {"id": "t2", "payee_name": "Starbucks", "category_id": "c1", "category_name": "Coffee", "amount": -500, "date": "2026-01-01"},
+            {"id": "t3", "payee_name": "Starbucks", "category_id": "c1", "category_name": "Coffee", "amount": -500, "date": "2026-01-02"},
+            {"id": "t4", "payee_name": "Starbucks", "category_id": "c1", "category_name": "Coffee", "amount": -500, "date": "2026-01-03"},
+        ], {}),
+    ]
+    mock_ynab.get_categories.return_value = [
+        {"id": "g1", "name": "Food", "deleted": False, "hidden": False,
+         "categories": [{"id": "c1", "name": "Coffee", "deleted": False}]}
+    ]
+
+    mock_claude_result = CategoryResult(
+        transaction_id="t1", category_id="c1", category_name="Coffee",
+        confidence=0.9, rationale="test", tier="claude"
+    )
+
+    with patch("dotenv.load_dotenv"):
+        with patch("sys.argv", ["categorizer.py", "--days", "7"]):
+            with patch("ynab_client.YNABClient", return_value=mock_ynab):
+                with patch("categorizer.categorize_transactions", return_value=[mock_claude_result]):
+                    main()
+
+    out = capsys.readouterr().out
+    assert "Rebuilding" in out
+
+    # After rebuild, cache should have frequency counts > 1
+    rebuilt_cache = json.loads((cache_dir / "payee_lookup.json").read_text())
+    assert rebuilt_cache["_version"] == 2
+    assert rebuilt_cache["starbucks"]["total"] == 3
+
+
 # ── Cache format migration (v1 → v2) ─────────────────────────────────────────
 
 def test_load_payee_cache_v1_migration(tmp_path):

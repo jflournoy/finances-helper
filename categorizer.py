@@ -304,6 +304,7 @@ def load_payee_cache(path: str = "data/cache/payee_lookup.json") -> dict:
 
     if cache.get("_version") != 2:
         cache = _migrate_v1_to_v2(cache)
+        cache["_migrated_from_v1"] = True
         cache_path.parent.mkdir(parents=True, exist_ok=True)
         cache_path.write_text(json.dumps(cache, indent=2))
 
@@ -464,7 +465,12 @@ def fuzzy_match(
     if not cache:
         return None
 
-    matchable_keys = [k for k in cache if k != "_version" and "alias_of" not in cache.get(k, {})]
+    matchable_keys = [
+        k for k in cache
+        if k != "_version"
+        and isinstance(cache.get(k), dict)
+        and "alias_of" not in cache[k]
+    ]
     if not matchable_keys:
         return None
 
@@ -757,6 +763,13 @@ def main():
         if payee_count > 0:
             save_payee_cache(cache)
             print(f"Cache built with {payee_count} payees")
+    elif cache.get("_migrated_from_v1"):
+        print("Cache migrated from v1. Rebuilding from YNAB history for accurate frequency counts...")
+        all_txns, _ = client.get_transactions(budget_id)
+        cache = build_cache_from_transactions(all_txns)
+        save_payee_cache(cache)
+        payee_count = sum(1 for k in cache if k != "_version")
+        print(f"Cache rebuilt with {payee_count} payees")
 
     # Categorize
     results = categorize_transactions(uncategorized, cache, categories, anthropic_key, K=K)
