@@ -62,11 +62,49 @@ def test_normalize_payee_preserves_dash_word_location():
 
 
 def test_normalize_payee_strips_hash_then_preserves_dash_word():
-    assert normalize_payee("TRADER JOE'S #123 - Portland") == "trader joe's - portland"
+    assert normalize_payee("TRADER JOE'S #123 - Portland") == "trader joe's #123 - portland"
 
 
 def test_normalize_payee_preserves_hyphenated_name():
     assert normalize_payee("Chick-fil-A") == "chick-fil-a"
+
+
+# normalization — Issue #29 (star-prefix stripping)
+
+def test_normalize_payee_preserves_sq_prefix():
+    assert normalize_payee("SQ *COFFEE SHOP") == "sq *coffee shop"
+
+
+def test_normalize_payee_preserves_tst_prefix():
+    assert normalize_payee("TST*JOE PIZZA") == "tst*joe pizza"
+
+
+def test_normalize_payee_preserves_pp_prefix():
+    assert normalize_payee("PP*SPOTIFY") == "pp*spotify"
+
+
+def test_normalize_payee_preserves_att_prefix():
+    assert normalize_payee("AT&T*WIRELESS") == "at&t*wireless"
+
+
+def test_normalize_payee_strips_trailing_star_with_digits():
+    assert normalize_payee("AMZN MKTP US*1A2B3C") == "amzn mktp us"
+
+
+# normalization — Issue #30 (unicode dash + number codes)
+
+def test_normalize_payee_strips_endash_number():
+    assert normalize_payee("Transfer – 6190") == "transfer"
+
+
+def test_normalize_payee_strips_emdash_number():
+    assert normalize_payee("Transfer — 6190") == "transfer"
+
+
+# normalization — Issue #31 (trailing dash artifact)
+
+def test_normalize_payee_no_trailing_dash_artifact():
+    assert normalize_payee("REFUND - -500") == "refund"
 
 
 # normalization — no-ops
@@ -92,6 +130,22 @@ def test_normalize_payee_raises_on_empty_string():
 def test_normalize_payee_raises_on_whitespace_only():
     with pytest.raises(ValueError):
         normalize_payee("   ")
+
+
+# normalization — Integration tests (fuzzy matching with normalized payees)
+
+def test_fuzzy_match_sq_prefix_consistent():
+    norm1 = normalize_payee("SQ *COFFEE SHOP")
+    norm2 = normalize_payee("SQ *TACOS")
+    score = fuzzy_score(norm1, norm2)
+    assert score < 70
+
+
+def test_fuzzy_match_mid_hash_still_matches():
+    norm_with_hash = normalize_payee("TRADER JOE'S #123 - Portland")
+    norm_without_hash = normalize_payee("TRADER JOE'S - Portland")
+    score = fuzzy_score(norm_with_hash, norm_without_hash)
+    assert score >= 70
 
 
 # CategoryResult
