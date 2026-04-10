@@ -671,19 +671,3 @@ def test_build_cache_from_transactions_date_missing_in_existing_cache():
     # First txn has no date, second has date. The elif branch (line 151) should trigger and keep the second.
     assert cache["whole foods"]["category_id"] == "cat2"
 
-
-# CLI tests (main function) — requires environment and file setup
-
-
-def test_main_validate_payee_name_in_uncategorized_filter():
-    """Test that main() filters to uncategorized transactions (category_id is None)."""
-    # This is a logical test to verify the filtering behavior
-    uncategorized = [
-        t for t in [
-            {"id": "txn1", "category_id": "cat1"},
-            {"id": "txn2", "category_id": None},
-            {"id": "txn3", "category_id": "cat2"},
-        ] if t.get("category_id") is None
-    ]
-    assert len(uncategorized) == 1
-    assert uncategorized[0]["id"] == "txn2"
