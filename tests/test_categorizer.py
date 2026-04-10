@@ -11,6 +11,7 @@ from categorizer import (
     save_payee_cache,
     build_cache_from_transactions,
     history_lookup,
+    fuzzy_match,
 )
 
 
@@ -227,3 +228,64 @@ def test_history_lookup_normalizes_before_lookup():
     result = history_lookup("WHOLE FOODS #1234", cache)
     assert result is not None
     assert result.category_id == "cat1"
+
+
+# Tier 2: fuzzy_match
+
+def test_fuzzy_match_exact_returns_result():
+    cache = {"whole foods": {"category_id": "cat1", "category_name": "Groceries"}}
+    result = fuzzy_match("whole foods", cache)
+    assert result is not None
+    assert result.tier == "fuzzy"
+
+
+def test_fuzzy_match_close_variant_hits():
+    cache = {"whole foods": {"category_id": "cat1", "category_name": "Groceries"}}
+    result = fuzzy_match("whole foods market", cache)
+    assert result is not None
+    assert result.category_id == "cat1"
+
+
+def test_fuzzy_match_store_number_still_hits():
+    cache = {"whole foods": {"category_id": "cat1", "category_name": "Groceries"}}
+    result = fuzzy_match("whole foods #999", cache)
+    assert result is not None
+    assert result.category_id == "cat1"
+
+
+def test_fuzzy_match_below_threshold_returns_none():
+    cache = {"whole foods": {"category_id": "cat1", "category_name": "Groceries"}}
+    result = fuzzy_match("xyz abc def", cache)
+    assert result is None
+
+
+def test_fuzzy_match_empty_cache_returns_none():
+    result = fuzzy_match("whole foods", {})
+    assert result is None
+
+
+def test_fuzzy_match_confidence_is_fraction():
+    cache = {"whole foods": {"category_id": "cat1", "category_name": "Groceries"}}
+    result = fuzzy_match("whole foods market", cache)
+    assert 0.0 <= result.confidence <= 1.0
+    assert result.confidence > 0.8
+
+
+def test_fuzzy_match_tier_is_fuzzy():
+    cache = {"whole foods": {"category_id": "cat1", "category_name": "Groceries"}}
+    result = fuzzy_match("whole foods market", cache)
+    assert result.tier == "fuzzy"
+
+
+def test_fuzzy_match_threshold_boundary():
+    cache = {"target": {"category_id": "cat1", "category_name": "Retail"}}
+    result = fuzzy_match("target", cache)
+    assert result is not None
+    assert result.confidence == 1.0
+
+
+def test_fuzzy_match_with_fixture_cache():
+    cache = load_payee_cache("data/fixtures/payee_cache.json")
+    result = fuzzy_match("Whole Foods Market #555", cache)
+    assert result is not None
+    assert result.category_id == "dddddddd-0000-0000-0000-000000000003"

@@ -9,6 +9,7 @@ import re
 import json
 from dataclasses import dataclass
 from pathlib import Path
+from thefuzz import fuzz, process
 
 
 @dataclass
@@ -181,4 +182,37 @@ def history_lookup(payee_name: str, cache: dict) -> CategoryResult | None:
         confidence=1.0,
         rationale="Exact history match",
         tier="history",
+    )
+
+
+def fuzzy_match(payee_name: str, cache: dict, threshold: int = FUZZY_THRESHOLD) -> CategoryResult | None:
+    """Find a close match in the cache using fuzzy matching.
+
+    Args:
+        payee_name: Raw payee name to match
+        cache: Cache dict mapping normalized payee names to category info
+        threshold: Minimum score (0-100) to consider a match
+
+    Returns:
+        CategoryResult with confidence=score/100.0 if match found, None otherwise.
+    """
+    if not cache:
+        return None
+
+    normalized = normalize_payee(payee_name)
+    best_match, score = process.extractOne(
+        normalized, cache.keys(), scorer=fuzz.token_set_ratio
+    )
+
+    if score < threshold:
+        return None
+
+    entry = cache[best_match]
+    return CategoryResult(
+        transaction_id="",
+        category_id=entry["category_id"],
+        category_name=entry["category_name"],
+        confidence=score / 100.0,
+        rationale=f"Fuzzy match to '{best_match}' (score: {score})",
+        tier="fuzzy",
     )
