@@ -75,6 +75,31 @@ def normalize_payee(name: str) -> str:
     return name
 
 
+def normalize_import_payee(name: str) -> str:
+    """Normalize an import payee name (raw bank string) for cache lookups.
+
+    Extends normalize_payee() with bank-specific pattern stripping:
+    - ID: <code> patterns
+    - CO: <code> patterns
+    - ACH <code> patterns
+
+    Raises ValueError if name is None, empty, or whitespace-only after stripping.
+    """
+    name = normalize_payee(name)
+    # Strip bank-specific patterns
+    name = re.sub(r'\s*id:\s*\S+', '', name, flags=re.IGNORECASE)
+    name = re.sub(r'\s*co:\s*\S+', '', name, flags=re.IGNORECASE)
+    name = re.sub(r'\s*ach\s+\S+', '', name, flags=re.IGNORECASE)
+    # Clean up residual whitespace/punctuation
+    name = re.sub(r'\s+', ' ', name).strip()
+    name = name.rstrip('.,!?;:-').strip()
+
+    if not name:
+        raise ValueError("Import payee name is empty after normalization")
+
+    return name
+
+
 DEFAULT_CONFIDENCE_THRESHOLD = 0.5
 
 
@@ -155,11 +180,13 @@ def record_categorization(
     category_name: str,
     source: str,
     prior_strength: int = 1,
+    import_names: list[str] | None = None,
 ) -> None:
     """Record a categorization in the frequency cache.
 
     Creates or updates the frequency entry for the normalized payee name.
     Adds prior_strength counts to the category (not always 1).
+    Optionally creates alias entries for import names.
 
     Args:
         cache: The payee frequency cache (modified in place).
@@ -168,6 +195,7 @@ def record_categorization(
         category_name: Human-readable category name.
         source: Origin tier ("history", "fuzzy", "claude").
         prior_strength: Number of pseudo-observations to add (default 1).
+        import_names: Optional list of raw import payee names to create aliases for.
     """
     normalized = normalize_payee(payee_name)
 
@@ -180,6 +208,33 @@ def record_categorization(
 
     entry["categories"][category_id]["count"] += prior_strength
     entry["total"] += prior_strength
+
+    if import_names:
+        for raw_name in import_names:
+            if not raw_name:
+                continue
+            try:
+                norm_import = normalize_import_payee(raw_name)
+            except ValueError:
+                continue
+            if norm_import == normalized:
+                continue
+            if "aliases" not in entry:
+                entry["aliases"] = []
+            if norm_import not in entry["aliases"]:
+                entry["aliases"].append(norm_import)
+            cache[norm_import] = {"alias_of": normalized}
+
+
+def _resolve_alias(cache: dict, key: str) -> str:
+    """Resolve an alias to its primary key (max 1 hop).
+
+    If the entry at key has 'alias_of', return the target. Otherwise return key.
+    """
+    entry = cache.get(key)
+    if entry and "alias_of" in entry:
+        return entry["alias_of"]
+    return key
 
 
 def _dominant_category(entry: dict) -> tuple[str, str]:
@@ -289,38 +344,80 @@ def build_cache_from_transactions(transactions: list[dict]) -> dict:
         if not payee or not cat_id:
             continue
 
-        record_categorization(cache, payee, cat_id, cat_name, source="history")
+        import_names = []
+        for field in ("import_payee_name", "import_payee_name_original"):
+            val = txn.get(field)
+            if val:
+                import_names.append(val)
+
+        record_categorization(
+            cache, payee, cat_id, cat_name,
+            source="history",
+            import_names=import_names or None,
+        )
 
     return cache
 
 
-def history_lookup(payee_name: str, cache: dict) -> CategoryResult | None:
+def history_lookup(
+    payee_name: str,
+    cache: dict,
+    K: int | None = None,
+    confidence_threshold: float = DEFAULT_CONFIDENCE_THRESHOLD,
+    import_payee_name: str | None = None,
+    import_payee_name_original: str | None = None,
+) -> CategoryResult | None:
     """Look up a payee in the cache using exact match on normalized name.
+
+    Tries payee_name first, then import_payee_name, then import_payee_name_original.
+    All lookups resolve aliases. If K is provided, uses Bayesian confidence;
+    otherwise returns confidence=1.0 (legacy behavior).
 
     Args:
         payee_name: Raw payee name to look up
         cache: V2 frequency cache dict
+        K: Number of categories (for Bayesian confidence). None = legacy mode.
+        confidence_threshold: Minimum confidence to return a result (only used with K).
+        import_payee_name: Optional import payee name to try as fallback.
+        import_payee_name_original: Optional original import payee name to try.
 
     Returns:
-        CategoryResult with confidence=1.0 if found, None otherwise.
+        CategoryResult if found (and confidence >= threshold), None otherwise.
     """
-    normalized = normalize_payee(payee_name)
-    if normalized not in cache:
-        return None
+    candidates = [normalize_payee(payee_name)]
+    for raw in (import_payee_name, import_payee_name_original):
+        if raw:
+            try:
+                candidates.append(normalize_import_payee(raw))
+            except ValueError:
+                continue
 
-    entry = cache[normalized]
-    if entry.get("_version") or not entry.get("categories"):
-        return None
+    for candidate in candidates:
+        resolved_key = _resolve_alias(cache, candidate)
+        if resolved_key not in cache:
+            continue
+        entry = cache[resolved_key]
+        if entry.get("_version") or not entry.get("categories"):
+            continue
 
-    cat_id, cat_name = _dominant_category(entry)
-    return CategoryResult(
-        transaction_id="",
-        category_id=cat_id,
-        category_name=cat_name,
-        confidence=1.0,
-        rationale="Exact history match",
-        tier="history",
-    )
+        if K is not None:
+            cat_id, cat_name, confidence = compute_confidence(entry, K)
+            if confidence < confidence_threshold:
+                continue
+        else:
+            cat_id, cat_name = _dominant_category(entry)
+            confidence = 1.0
+
+        return CategoryResult(
+            transaction_id="",
+            category_id=cat_id,
+            category_name=cat_name,
+            confidence=confidence,
+            rationale="Exact history match",
+            tier="history",
+        )
+
+    return None
 
 
 def fuzzy_score(query: str, candidate: str) -> int:
@@ -338,43 +435,81 @@ def fuzzy_score(query: str, candidate: str) -> int:
     return score
 
 
-def fuzzy_match(payee_name: str, cache: dict, threshold: int = FUZZY_THRESHOLD) -> CategoryResult | None:
+def fuzzy_match(
+    payee_name: str,
+    cache: dict,
+    threshold: int = FUZZY_THRESHOLD,
+    K: int | None = None,
+    confidence_threshold: float = DEFAULT_CONFIDENCE_THRESHOLD,
+    import_payee_name: str | None = None,
+    import_payee_name_original: str | None = None,
+) -> CategoryResult | None:
     """Find a close match in the cache using fuzzy matching.
+
+    Tries all available name variants and picks the best fuzzy score.
+    If K is provided, also checks Bayesian confidence on the matched entry.
 
     Args:
         payee_name: Raw payee name to match
         cache: V2 frequency cache dict
-        threshold: Minimum score (0-100) to consider a match
+        threshold: Minimum fuzzy score (0-100) to consider a match
+        K: Number of categories (for Bayesian confidence). None = legacy mode.
+        confidence_threshold: Minimum Bayesian confidence (only used with K).
+        import_payee_name: Optional import payee name variant to try.
+        import_payee_name_original: Optional original import payee name variant.
 
     Returns:
-        CategoryResult with confidence=score/100.0 if match found, None otherwise.
+        CategoryResult if match found (and confidence >= threshold), None otherwise.
     """
     if not cache:
         return None
 
-    normalized = normalize_payee(payee_name)
-    matchable_keys = [k for k in cache if k != "_version"]
+    matchable_keys = [k for k in cache if k != "_version" and "alias_of" not in cache.get(k, {})]
     if not matchable_keys:
         return None
 
-    best_match, score = process.extractOne(
-        normalized, matchable_keys, scorer=fuzzy_score
-    )
+    # Collect all name variants to try
+    variants = [normalize_payee(payee_name)]
+    for raw in (import_payee_name, import_payee_name_original):
+        if raw:
+            try:
+                variants.append(normalize_import_payee(raw))
+            except ValueError:
+                continue
 
-    if score < threshold:
+    best_overall_match = None
+    best_overall_score = -1
+    for variant in variants:
+        match, score = process.extractOne(
+            variant, matchable_keys, scorer=fuzzy_score
+        )
+        if score > best_overall_score:
+            best_overall_score = score
+            best_overall_match = match
+
+    if best_overall_score < threshold:
         return None
 
-    entry = cache[best_match]
+    resolved_key = _resolve_alias(cache, best_overall_match)
+    entry = cache.get(resolved_key) or cache[best_overall_match]
     if not entry.get("categories"):
         return None
 
-    cat_id, cat_name = _dominant_category(entry)
+    if K is not None:
+        cat_id, cat_name, bayesian_conf = compute_confidence(entry, K)
+        confidence = min(best_overall_score / 100.0, bayesian_conf)
+        if confidence < confidence_threshold:
+            return None
+    else:
+        cat_id, cat_name = _dominant_category(entry)
+        confidence = best_overall_score / 100.0
+
     return CategoryResult(
         transaction_id="",
         category_id=cat_id,
         category_name=cat_name,
-        confidence=score / 100.0,
-        rationale=f"Fuzzy match to '{best_match}' (score: {score})",
+        confidence=confidence,
+        rationale=f"Fuzzy match to '{best_overall_match}' (score: {best_overall_score})",
         tier="fuzzy",
     )
 

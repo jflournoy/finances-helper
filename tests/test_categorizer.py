@@ -20,6 +20,8 @@ from categorizer import (
     compute_confidence,
     record_categorization,
     _dominant_category,
+    _resolve_alias,
+    normalize_import_payee,
 )
 
 
@@ -1372,4 +1374,170 @@ def test_record_then_compute_confidence():
     assert cat_id == "cat1"
     assert cat_name == "Groceries"
     assert conf > 0.5
+
+
+# ── normalize_import_payee ────────────────────────────────────────────────────
+
+def test_normalize_import_payee_strips_id_co():
+    result = normalize_import_payee("NEWREZ-SHELLPOIN ID: 6371542226 CO: NEWREZ-SHELLPOIN")
+    assert result == "newrez-shellpoin"
+
+
+def test_normalize_import_payee_strips_ach():
+    result = normalize_import_payee("PAYROLL ACH ACMECORP")
+    assert result == "payroll"
+
+
+def test_normalize_import_payee_passthrough():
+    result = normalize_import_payee("Whole Foods")
+    assert result == "whole foods"
+
+
+def test_normalize_import_payee_raises_on_empty():
+    with pytest.raises(ValueError):
+        normalize_import_payee("")
+
+
+# ── Alias system ─────────────────────────────────────────────────────────────
+
+def test_record_categorization_creates_alias():
+    cache = {}
+    record_categorization(
+        cache, "Transfer : Mortgage 4081", "c1", "Mortgage", "history",
+        import_names=["NEWREZ-SHELLPOIN ID: 6371542226 CO: NEWREZ-SHELLPOIN"],
+    )
+    assert "newrez-shellpoin" in cache
+    assert cache["newrez-shellpoin"]["alias_of"] == "transfer : mortgage 4081"
+    assert "newrez-shellpoin" in cache["transfer : mortgage 4081"]["aliases"]
+
+
+def test_record_categorization_dedup_alias():
+    """Import name that normalizes same as payee_name doesn't create alias."""
+    cache = {}
+    record_categorization(
+        cache, "Whole Foods", "c1", "Groceries", "history",
+        import_names=["WHOLE FOODS"],
+    )
+    assert "aliases" not in cache.get("whole foods", {})
+
+
+def test_resolve_alias():
+    cache = {"alias_key": {"alias_of": "primary"}, "primary": {"total": 1, "categories": {}}}
+    assert _resolve_alias(cache, "alias_key") == "primary"
+
+
+def test_resolve_alias_no_alias():
+    cache = {"primary": {"total": 1, "categories": {}}}
+    assert _resolve_alias(cache, "primary") == "primary"
+
+
+def test_record_categorization_multiple_import_names():
+    cache = {}
+    record_categorization(
+        cache, "Transfer : Mortgage 4081", "c1", "Mortgage", "history",
+        import_names=["NEWREZ-SHELLPOIN ID: 123", "SHELLPOINT MTG CO: ABC"],
+    )
+    primary = cache["transfer : mortgage 4081"]
+    assert "newrez-shellpoin" in primary["aliases"]
+    assert "shellpoint mtg" in primary["aliases"]
+    assert cache["newrez-shellpoin"]["alias_of"] == "transfer : mortgage 4081"
+    assert cache["shellpoint mtg"]["alias_of"] == "transfer : mortgage 4081"
+
+
+# ── history_lookup with import names ──────────────────────────────────────────
+
+def test_history_lookup_via_import_name():
+    """payee_name not in cache, but import_payee_name_original resolves via alias."""
+    cache = _v2_cache({"transfer : mortgage 4081": ("c1", "Mortgage", 10)})
+    cache["newrez-shellpoin"] = {"alias_of": "transfer : mortgage 4081"}
+    cache["transfer : mortgage 4081"]["aliases"] = ["newrez-shellpoin"]
+
+    result = history_lookup(
+        "Some New Payee Name", cache,
+        import_payee_name_original="NEWREZ-SHELLPOIN ID: 123 CO: NEWREZ-SHELLPOIN",
+    )
+    assert result is not None
+    assert result.category_id == "c1"
+    assert result.tier == "history"
+
+
+def test_history_lookup_confidence_threshold():
+    """With K, low-count entry fails threshold."""
+    cache = _v2_cache({"starbucks": ("c1", "Coffee", 1)})
+
+    result = history_lookup("Starbucks", cache, K=137, confidence_threshold=0.5)
+    assert result is None
+
+    cache_high = _v2_cache({"starbucks": ("c1", "Coffee", 200)})
+    result = history_lookup("Starbucks", cache_high, K=137, confidence_threshold=0.5)
+    assert result is not None
+
+
+def test_history_lookup_payee_name_preferred():
+    """When payee_name has a direct hit, import name is not needed."""
+    cache = _v2_cache({"whole foods": ("c1", "Groceries")})
+    result = history_lookup(
+        "Whole Foods", cache,
+        import_payee_name_original="SOMETHING ELSE",
+    )
+    assert result is not None
+    assert result.category_id == "c1"
+
+
+# ── fuzzy_match with import names ─────────────────────────────────────────────
+
+def test_fuzzy_match_tries_import_names():
+    cache = _v2_cache({"newrez-shellpoin": ("c1", "Mortgage")})
+    result = fuzzy_match(
+        "Unknown Payee", cache,
+        import_payee_name_original="NEWREZ-SHELLPOIN ID: 123 CO: NEWREZ-SHELLPOIN",
+    )
+    assert result is not None
+    assert result.category_id == "c1"
+
+
+def test_fuzzy_match_confidence_threshold():
+    """Good fuzzy score but low Bayesian confidence (count=1, K=137) returns None."""
+    cache = _v2_cache({"starbucks": ("c1", "Coffee", 1)})
+    result = fuzzy_match("Starbucks", cache, K=137, confidence_threshold=0.5)
+    assert result is None
+
+
+# ── build_cache_from_transactions with import names ───────────────────────────
+
+def test_build_cache_indexes_import_names():
+    txns = [
+        {
+            "payee_name": "Transfer : Mortgage 4081",
+            "category_id": "c1",
+            "category_name": "Mortgage",
+            "import_payee_name_original": "NEWREZ-SHELLPOIN ID: 123 CO: NEWREZ-SHELLPOIN",
+        }
+    ]
+    cache = build_cache_from_transactions(txns)
+    assert "newrez-shellpoin" in cache
+    assert cache["newrez-shellpoin"]["alias_of"] == "transfer : mortgage 4081"
+
+
+# ── Integration: import name end-to-end ───────────────────────────────────────
+
+def test_import_name_end_to_end():
+    """Build cache with import name, then look up via import name."""
+    txns = [
+        {
+            "payee_name": "Transfer : Mortgage 4081",
+            "category_id": "c1",
+            "category_name": "Mortgage",
+            "import_payee_name_original": "NEWREZ-SHELLPOIN ID: 6371542226 CO: NEWREZ-SHELLPOIN",
+        }
+    ] * 10
+    cache = build_cache_from_transactions(txns)
+
+    result = history_lookup(
+        "Some Unknown Payee", cache,
+        import_payee_name_original="NEWREZ-SHELLPOIN ID: 999 CO: NEWREZ-SHELLPOIN",
+    )
+    assert result is not None
+    assert result.category_id == "c1"
+    assert result.category_name == "Mortgage"
 
