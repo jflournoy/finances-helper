@@ -37,11 +37,35 @@ def test_normalize_payee_strips_star_code():
 
 
 def test_normalize_payee_strips_dash_location():
-    assert normalize_payee("TRADER JOE'S - Portland") == "trader joe's"
+    assert normalize_payee("TRADER JOE'S - Portland") == "trader joe's - portland"
 
 
 def test_normalize_payee_strips_multiple_codes():
-    assert normalize_payee("TRADER JOE'S #123 - Portland") == "trader joe's"
+    assert normalize_payee("TRADER JOE'S #123 - Portland") == "trader joe's - portland"
+
+
+def test_normalize_payee_preserves_transfer_with_account_number():
+    assert normalize_payee("Transfer : Classic Checking -- 6190") == "transfer : classic checking"
+
+
+def test_normalize_payee_preserves_transfer_with_card_number():
+    assert normalize_payee("Transfer : Alaska Airlines Visa Signature - 1783") == "transfer : alaska airlines visa signature"
+
+
+def test_normalize_payee_preserves_transfer_no_trailing_code():
+    assert normalize_payee("Transfer : Delta SkyMiles Platinum") == "transfer : delta skymiles platinum"
+
+
+def test_normalize_payee_preserves_dash_word_location():
+    assert normalize_payee("TRADER JOE'S - Portland") == "trader joe's - portland"
+
+
+def test_normalize_payee_strips_hash_then_preserves_dash_word():
+    assert normalize_payee("TRADER JOE'S #123 - Portland") == "trader joe's - portland"
+
+
+def test_normalize_payee_preserves_hyphenated_name():
+    assert normalize_payee("Chick-fil-A") == "chick-fil-a"
 
 
 # normalization — no-ops

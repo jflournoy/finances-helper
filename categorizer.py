@@ -49,11 +49,13 @@ def normalize_payee(name: str) -> str:
 
     name = name.lower()
 
-    # Iteratively remove trailing codes (#1234, *1A2B, - NYC)
-    prev = None
-    while prev != name:
-        prev = name
-        name = re.sub(r'\s*[#*-]\s*\S+$', '', name)
+    # Strip # codes anywhere (WHOLE FOODS #1234, TRADER JOE'S #123 - Portland)
+    name = re.sub(r'\s*#\w+', '', name)
+    # Strip * codes anywhere (Amazon.com*1A2B3C)
+    name = re.sub(r'\s*\*\w+', '', name)
+    # Strip trailing dash+number codes only (-- 6190, - 1783)
+    # Does NOT strip dash+word (- Portland) to preserve location info
+    name = re.sub(r'\s+-{1,2}\s*\d[\w]*$', '', name)
 
     # Collapse multiple spaces
     name = re.sub(r'\s+', ' ', name).strip()
