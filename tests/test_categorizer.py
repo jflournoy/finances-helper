@@ -794,6 +794,64 @@ def test_build_cache_from_transactions_date_missing_in_existing_cache():
     assert cache["whole foods"]["category_id"] == "cat2"
 
 
+# Regression tests: bug #22 — transfer payee miscategorization
+
+def test_fixture_cache_has_transfer_entry():
+    cache = load_payee_cache("data/fixtures/payee_cache.json")
+    assert "transfer" in cache
+    assert cache["transfer"]["category_name"] == "Water (addup)"
+
+
+def test_regression_bug22_transfer_payees_not_miscategorized():
+    """End-to-end: transfer payees must NOT fuzzy-match to 'transfer' in cache."""
+    cache = load_payee_cache("data/fixtures/payee_cache.json")
+    transfer_transactions = [
+        {"id": "txn1", "payee_name": "Transfer : Classic Checking -- 6190", "amount": -50000, "date": "2026-03-01"},
+        {"id": "txn2", "payee_name": "Transfer : Alaska Airlines Visa Signature - 1783", "amount": -25000, "date": "2026-03-01"},
+        {"id": "txn3", "payee_name": "Transfer : Delta SkyMiles Platinum", "amount": -10000, "date": "2026-03-01"},
+    ]
+    categories = [{"id": "g1", "name": "Bills", "categories": [{"id": "c1", "name": "Water"}]}]
+
+    mock_response = Mock()
+    mock_response.content = [Mock(text=json.dumps([
+        {"payee_name": t["payee_name"], "category_id": "c1", "category_name": "Water", "confidence": 0.7, "rationale": "r"}
+        for t in transfer_transactions
+    ]))]
+
+    with patch("categorizer.anthropic.Anthropic") as mock_anthropic_class:
+        mock_client = Mock()
+        mock_anthropic_class.return_value = mock_client
+        mock_client.messages.create.return_value = mock_response
+        results = categorize_transactions(transfer_transactions, cache, categories, "test-key")
+
+    assert len(results) == 3
+    for result in results:
+        assert result.tier == "claude", f"Transaction {result.transaction_id} matched via {result.tier}, expected claude"
+        assert result.category_name != "Water (addup)", f"Transaction {result.transaction_id} incorrectly matched to Water (addup)"
+
+
+def test_categorize_transactions_legitimate_transfer_exact_match():
+    """A bare 'Transfer' payee should still match 'transfer' in cache via history lookup."""
+    cache = {"transfer": {"category_id": "water_id", "category_name": "Water (addup)"}}
+    transactions = [{"id": "txn1", "payee_name": "Transfer", "amount": -5000, "date": "2026-03-01"}]
+    categories = []
+
+    with patch("categorizer.anthropic.Anthropic") as mock_anthropic_class:
+        results = categorize_transactions(transactions, cache, categories, "test-key")
+
+    assert len(results) == 1
+    assert results[0].tier == "history"
+    assert results[0].category_name == "Water (addup)"
+    mock_anthropic_class.assert_not_called()
+
+
+def test_fuzzy_match_with_fixture_cache_no_transfer_false_positive():
+    """Integration: fixture cache with 'transfer' entry, transfer payee should NOT match."""
+    cache = load_payee_cache("data/fixtures/payee_cache.json")
+    result = fuzzy_match("Transfer : Classic Checking -- 6190", cache)
+    assert result is None
+
+
 # CLI main() tests
 
 from categorizer import main

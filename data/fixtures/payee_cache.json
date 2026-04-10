@@ -6,5 +6,9 @@
   "amazon": {
     "category_id": "dddddddd-0000-0000-0000-000000000002",
     "category_name": "Online Shopping"
+  },
+  "transfer": {
+    "category_id": "dddddddd-0000-0000-0000-000000000099",
+    "category_name": "Water (addup)"
   }
 }
