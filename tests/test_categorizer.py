@@ -1,6 +1,16 @@
 """Tests for categorizer.py — payee normalization, tier routing."""
+import json
 import pytest
-from categorizer import CategoryResult, normalize_payee, FUZZY_THRESHOLD, CLAUDE_BATCH_SIZE
+from pathlib import Path
+from categorizer import (
+    CategoryResult,
+    normalize_payee,
+    FUZZY_THRESHOLD,
+    CLAUDE_BATCH_SIZE,
+    load_payee_cache,
+    save_payee_cache,
+    build_cache_from_transactions,
+)
 
 
 # normalization — basic
@@ -83,3 +93,83 @@ def test_category_result_tier_values():
             tier=tier
         )
         assert result.tier == tier
+
+
+# Cache I/O
+
+def test_load_payee_cache_returns_empty_dict_when_missing(tmp_path):
+    path = tmp_path / "missing_cache.json"
+    result = load_payee_cache(str(path))
+    assert result == {}
+
+
+def test_load_payee_cache_loads_fixture():
+    result = load_payee_cache("data/fixtures/payee_cache.json")
+    assert "whole foods" in result
+    assert result["whole foods"]["category_id"] == "dddddddd-0000-0000-0000-000000000003"
+    assert result["whole foods"]["category_name"] == "Groceries"
+
+
+def test_load_payee_cache_raises_on_invalid_json(tmp_path):
+    path = tmp_path / "bad.json"
+    path.write_text("not valid json {")
+    with pytest.raises(ValueError):
+        load_payee_cache(str(path))
+
+
+def test_save_payee_cache_writes_file(tmp_path):
+    cache = {"test": {"category_id": "abc", "category_name": "Test"}}
+    path = tmp_path / "cache.json"
+    save_payee_cache(cache, str(path))
+    assert path.exists()
+
+
+def test_save_payee_cache_roundtrip(tmp_path):
+    original = {
+        "whole foods": {"category_id": "id1", "category_name": "Groceries"},
+        "amazon": {"category_id": "id2", "category_name": "Shopping"}
+    }
+    path = tmp_path / "cache.json"
+    save_payee_cache(original, str(path))
+    loaded = load_payee_cache(str(path))
+    assert loaded == original
+
+
+def test_build_cache_from_transactions_basic():
+    transactions = json.loads(Path("data/fixtures/ynab_transactions.json").read_text())["data"]["transactions"]
+    cache = build_cache_from_transactions(transactions)
+    assert isinstance(cache, dict)
+    # Whole Foods is categorized, should be in cache
+    assert "whole foods" in cache or len(cache) > 0
+
+
+def test_build_cache_from_transactions_skips_uncategorized():
+    transactions = json.loads(Path("data/fixtures/ynab_transactions.json").read_text())["data"]["transactions"]
+    cache = build_cache_from_transactions(transactions)
+    # Amazon transaction is uncategorized (category_id=null), should be skipped
+    assert "amazon" not in cache
+
+
+def test_build_cache_from_transactions_skips_no_payee():
+    transactions = [
+        {"payee_name": None, "category_id": "cat1", "category_name": "Cat1", "date": "2026-03-01"},
+        {"payee_name": "Valid", "category_id": "cat2", "category_name": "Cat2", "date": "2026-03-02"},
+    ]
+    cache = build_cache_from_transactions(transactions)
+    assert "valid" in cache
+    assert len(cache) == 1
+
+
+def test_build_cache_from_transactions_uses_most_recent():
+    transactions = [
+        {"payee_name": "Whole Foods", "category_id": "cat1", "category_name": "OldCat", "date": "2026-03-01"},
+        {"payee_name": "Whole Foods", "category_id": "cat2", "category_name": "NewCat", "date": "2026-03-15"},
+    ]
+    cache = build_cache_from_transactions(transactions)
+    assert cache["whole foods"]["category_id"] == "cat2"
+    assert cache["whole foods"]["category_name"] == "NewCat"
+
+
+def test_build_cache_from_transactions_empty_list():
+    cache = build_cache_from_transactions([])
+    assert cache == {}

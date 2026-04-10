@@ -6,7 +6,9 @@ Three-tier categorization strategy:
 3. Claude (Haiku, batched) — genuinely novel payees only
 """
 import re
+import json
 from dataclasses import dataclass
+from pathlib import Path
 
 
 @dataclass
@@ -60,3 +62,98 @@ def normalize_payee(name: str) -> str:
         raise ValueError("Payee name cannot be empty after normalization")
 
     return name
+
+
+def load_payee_cache(path: str = "data/cache/payee_lookup.json") -> dict:
+    """Load the payee cache from disk.
+
+    Args:
+        path: Path to the cache JSON file
+
+    Returns:
+        Cache dict mapping normalized payee names to category info.
+        Returns empty dict if file doesn't exist (first-run case).
+
+    Raises:
+        ValueError: If file exists but contains invalid JSON.
+    """
+    cache_path = Path(path)
+    if not cache_path.exists():
+        return {}
+
+    try:
+        content = cache_path.read_text()
+        return json.loads(content)
+    except json.JSONDecodeError as e:
+        raise ValueError(f"Invalid JSON in cache file {path}: {e}")
+
+
+def save_payee_cache(cache: dict, path: str = "data/cache/payee_lookup.json") -> None:
+    """Save the payee cache to disk.
+
+    Args:
+        cache: Cache dict to save
+        path: Path to write the cache JSON file
+    """
+    cache_path = Path(path)
+    cache_path.parent.mkdir(parents=True, exist_ok=True)
+    cache_path.write_text(json.dumps(cache, indent=2))
+
+
+def build_cache_from_transactions(transactions: list[dict]) -> dict:
+    """Build a payee cache from already-categorized YNAB transactions.
+
+    Filters to transactions with both payee_name and category_id,
+    groups by normalized payee name, and takes the most recent
+    category assignment for each payee.
+
+    Args:
+        transactions: List of YNAB transaction dicts
+
+    Returns:
+        Cache dict mapping normalized payee names to category info.
+    """
+    cache = {}
+
+    # Filter and group by normalized payee name
+    for txn in transactions:
+        payee = txn.get("payee_name")
+        cat_id = txn.get("category_id")
+        cat_name = txn.get("category_name")
+        date = txn.get("date")
+
+        # Skip uncategorized or missing payee
+        if not payee or not cat_id:
+            continue
+
+        # Normalize the payee name
+        normalized = normalize_payee(payee)
+
+        # Store or update if this is more recent
+        if normalized not in cache:
+            cache[normalized] = {
+                "category_id": cat_id,
+                "category_name": cat_name,
+                "date": date,  # Track for sorting
+            }
+        else:
+            # Keep the most recent
+            if date and cache[normalized].get("date"):
+                if date > cache[normalized]["date"]:
+                    cache[normalized] = {
+                        "category_id": cat_id,
+                        "category_name": cat_name,
+                        "date": date,
+                    }
+            elif date:
+                cache[normalized] = {
+                    "category_id": cat_id,
+                    "category_name": cat_name,
+                    "date": date,
+                }
+
+    # Remove the date field from final cache
+    for key in cache:
+        del cache[key]["date"]
+
+    return cache
