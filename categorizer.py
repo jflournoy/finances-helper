@@ -490,8 +490,7 @@ def fuzzy_match(
     if best_overall_score < threshold:
         return None
 
-    resolved_key = _resolve_alias(cache, best_overall_match)
-    entry = cache.get(resolved_key) or cache[best_overall_match]
+    entry = cache[best_overall_match]
     if not entry.get("categories"):
         return None
 
