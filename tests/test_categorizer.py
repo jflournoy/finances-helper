@@ -42,7 +42,7 @@ def test_normalize_payee_strips_dash_location():
 
 
 def test_normalize_payee_strips_multiple_codes():
-    assert normalize_payee("TRADER JOE'S #123 - Portland") == "trader joe's - portland"
+    assert normalize_payee("TRADER JOE'S #123 - Portland") == "trader joe's #123 - portland"
 
 
 def test_normalize_payee_preserves_transfer_with_account_number():

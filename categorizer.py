@@ -50,19 +50,23 @@ def normalize_payee(name: str) -> str:
 
     name = name.lower()
 
-    # Strip # codes anywhere (WHOLE FOODS #1234, TRADER JOE'S #123 - Portland)
-    name = re.sub(r'\s*#\w+', '', name)
-    # Strip * codes anywhere (Amazon.com*1A2B3C)
-    name = re.sub(r'\s*\*\w+', '', name)
-    # Strip trailing dash+number codes only (-- 6190, - 1783)
-    # Does NOT strip dash+word (- Portland) to preserve location info
-    name = re.sub(r'\s+-{1,2}\s*\d[\w]*$', '', name)
+    # Strip trailing # codes (WHOLE FOODS #1234, TARGET #1234)
+    name = re.sub(r'\s*#\w+$', '', name)
+    # NOTE (#32): Mid-string # codes (e.g. "TRADER JOE'S #123 - Portland") are intentionally
+    # NOT stripped. End-anchoring avoids destroying POS prefixes. The fuzzy matcher handles
+    # residual store numbers (fuzzy_score gives 91 for #123 vs no-#123 variants).
+    # Location variants (Portland vs Seattle) are separate cache entries by design.
 
-    # Collapse multiple spaces
+    # Strip trailing * codes only if code contains digits (AMZN*1A2B3C)
+    # Preserves PP*SPOTIFY, AT&T*WIRELESS (pure alpha after *)
+    name = re.sub(r'\s*\*(?=\w*\d)\w+$', '', name)
+    # Strip trailing dash+number codes (ASCII + unicode dashes)
+    name = re.sub(r'\s+[-\u2013\u2014]{1,2}\s*\d[\w]*$', '', name)
+
+    # Collapse spaces
     name = re.sub(r'\s+', ' ', name).strip()
-
-    # Remove trailing punctuation
-    name = name.rstrip('.,!?;:')
+    # Strip trailing punctuation (including dash for artifacts like "refund -")
+    name = name.rstrip('.,!?;:-').strip()
 
     if not name:
         raise ValueError("Payee name cannot be empty after normalization")
