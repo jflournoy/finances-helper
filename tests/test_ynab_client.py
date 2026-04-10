@@ -221,6 +221,7 @@ def test_get_categories_returns_groups(client):
     fixture = load_fixture("ynab_categories.json")
     with mock_get(client, fixture):
         groups = client.get_categories(BUDGET_ID)
+    # Fixture has 3 groups, 1 deleted → 2 returned
     assert len(groups) == 2
     assert groups[0]["name"] == "Monthly Bills"
 
@@ -259,6 +260,15 @@ def test_get_categories_category_fields(client):
     cat = groups[0]["categories"][0]
     for field in ("id", "category_group_id", "name", "hidden", "budgeted", "activity", "balance"):
         assert field in cat, f"Missing field: {field}"
+
+
+def test_get_categories_filters_deleted_groups(client):
+    fixture = load_fixture("ynab_categories.json")
+    with mock_get(client, fixture):
+        groups = client.get_categories(BUDGET_ID)
+    # Fixture has 3 groups, 1 deleted → 2 returned
+    assert len(groups) == 2
+    assert all(not g.get("deleted", False) for g in groups)
 
 
 def test_get_payees_returns_list(client):

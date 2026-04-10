@@ -19,6 +19,15 @@
         "categories": [
           {"id": "dddddddd-0000-0000-0000-000000000003", "category_group_id": "cccccccc-0000-0000-0000-000000000002", "name": "Groceries", "hidden": false, "budgeted": 50000000, "activity": -32000000, "balance": 18000000, "deleted": false}
         ]
+      },
+      {
+        "id": "cccccccc-0000-0000-0000-000000000003",
+        "name": "Deleted Group",
+        "hidden": false,
+        "deleted": true,
+        "categories": [
+          {"id": "dddddddd-0000-0000-0000-000000000004", "category_group_id": "cccccccc-0000-0000-0000-000000000003", "name": "Gone", "hidden": false, "budgeted": 0, "activity": 0, "balance": 0, "deleted": false}
+        ]
       }
     ],
     "server_knowledge": 200
