@@ -25,7 +25,7 @@ class CategoryResult:
     tier: str              # "history", "fuzzy", or "claude"
 
 
-FUZZY_THRESHOLD = 85   # thefuzz token_set_ratio score (0-100)
+FUZZY_THRESHOLD = 70   # thefuzz token_sort_ratio score (0-100), lowered from 85
 CLAUDE_BATCH_SIZE = 50
 
 
@@ -189,6 +189,21 @@ def history_lookup(payee_name: str, cache: dict) -> CategoryResult | None:
     )
 
 
+def fuzzy_score(query: str, candidate: str) -> int:
+    """Score two strings for similarity using token_sort_ratio with length penalty.
+
+    Uses token_sort_ratio (order-independent, full-sequence comparison) with a
+    length-ratio penalty when one string is less than half the length of the other.
+    This prevents short strings from falsely matching long ones (e.g., "transfer"
+    matching "transfer : classic checking").
+    """
+    score = fuzz.token_sort_ratio(query, candidate)
+    len_ratio = min(len(query), len(candidate)) / max(len(query), len(candidate))
+    if len_ratio < 0.5:
+        score = int(score * len_ratio)
+    return score
+
+
 def fuzzy_match(payee_name: str, cache: dict, threshold: int = FUZZY_THRESHOLD) -> CategoryResult | None:
     """Find a close match in the cache using fuzzy matching.
 
@@ -205,7 +220,7 @@ def fuzzy_match(payee_name: str, cache: dict, threshold: int = FUZZY_THRESHOLD) 
 
     normalized = normalize_payee(payee_name)
     best_match, score = process.extractOne(
-        normalized, cache.keys(), scorer=fuzz.token_set_ratio
+        normalized, cache.keys(), scorer=fuzzy_score
     )
 
     if score < threshold:

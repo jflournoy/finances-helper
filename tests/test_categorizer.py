@@ -6,6 +6,7 @@ from unittest.mock import patch, Mock
 from categorizer import (
     CategoryResult,
     normalize_payee,
+    fuzzy_score,
     FUZZY_THRESHOLD,
     CLAUDE_BATCH_SIZE,
     load_payee_cache,
@@ -295,7 +296,7 @@ def test_fuzzy_match_confidence_is_fraction():
     cache = {"whole foods": {"category_id": "cat1", "category_name": "Groceries"}}
     result = fuzzy_match("whole foods market", cache)
     assert 0.0 <= result.confidence <= 1.0
-    assert result.confidence > 0.8
+    assert result.confidence > 0.7
 
 
 def test_fuzzy_match_tier_is_fuzzy():
@@ -316,6 +317,61 @@ def test_fuzzy_match_with_fixture_cache():
     result = fuzzy_match("Whole Foods Market #555", cache)
     assert result is not None
     assert result.category_id == "dddddddd-0000-0000-0000-000000000003"
+
+
+# fuzzy_score function
+
+def test_fuzzy_score_identical_strings():
+    assert fuzzy_score("whole foods", "whole foods") == 100
+
+
+def test_fuzzy_score_similar_strings():
+    score = fuzzy_score("whole foods market", "whole foods")
+    assert score >= 70
+
+
+def test_fuzzy_score_penalizes_length_mismatch():
+    score = fuzzy_score("transfer : classic checking", "transfer")
+    assert score < 50
+
+
+def test_fuzzy_score_no_penalty_for_similar_length():
+    score = fuzzy_score("trader joe's - portland", "trader joe's")
+    assert score >= 70
+
+
+# fuzzy_match — transfer false-positive prevention
+
+def test_fuzzy_match_transfer_does_not_match_generic_transfer():
+    cache = {"transfer": {"category_id": "x", "category_name": "Water (addup)"}}
+    result = fuzzy_match("Transfer : Classic Checking -- 6190", cache)
+    assert result is None
+
+
+def test_fuzzy_match_transfer_does_not_match_different_transfer():
+    cache = {"transfer : savings": {"category_id": "x", "category_name": "Savings"}}
+    result = fuzzy_match("Transfer : Classic Checking -- 6190", cache)
+    assert result is None
+
+
+def test_categorize_transactions_transfer_not_miscategorized():
+    cache = {"transfer": {"category_id": "water_id", "category_name": "Water (addup)"}}
+    transactions = [
+        {"id": "txn1", "payee_name": "Transfer : Classic Checking -- 6190", "amount": -5000, "date": "2026-03-01"},
+    ]
+    categories = [{"id": "g1", "name": "Bills", "categories": [{"id": "c1", "name": "Water"}]}]
+
+    mock_response = Mock()
+    mock_response.content = [Mock(text='[{"payee_name": "Transfer : Classic Checking -- 6190", "category_id": "c1", "category_name": "Water", "confidence": 0.7, "rationale": "r"}]')]
+
+    with patch("categorizer.anthropic.Anthropic") as mock_anthropic_class:
+        mock_client = Mock()
+        mock_anthropic_class.return_value = mock_client
+        mock_client.messages.create.return_value = mock_response
+        results = categorize_transactions(transactions, cache, categories, "test-key")
+
+    assert len(results) == 1
+    assert results[0].tier == "claude"
 
 
 # Tier 3: claude_categorize
