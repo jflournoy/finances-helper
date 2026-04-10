@@ -10,6 +10,8 @@ import json
 from dataclasses import dataclass
 from pathlib import Path
 from thefuzz import fuzz, process
+import anthropic
+from ynab_client import milliunits_to_dollars
 
 
 @dataclass
@@ -216,3 +218,94 @@ def fuzzy_match(payee_name: str, cache: dict, threshold: int = FUZZY_THRESHOLD) 
         rationale=f"Fuzzy match to '{best_match}' (score: {score})",
         tier="fuzzy",
     )
+
+
+def claude_categorize(transactions: list[dict], categories: list[dict], api_key: str) -> list[CategoryResult]:
+    """Categorize transactions using Claude Haiku.
+
+    Args:
+        transactions: List of YNAB transaction dicts to categorize
+        categories: List of YNAB category group dicts (for context)
+        api_key: Anthropic API key
+
+    Returns:
+        List of CategoryResult objects in same order as input transactions.
+
+    Raises:
+        ValueError: If JSON response is unparseable or length mismatch.
+    """
+    if not transactions:
+        return []
+
+    # Build category list for system prompt
+    category_text = ""
+    for group in categories:
+        category_text += f"{group['name']}:\n"
+        for cat in group.get("categories", []):
+            category_text += f"  - {cat['name']} (ID: {cat['id']})\n"
+
+    # Build user message with transactions
+    txn_list = ""
+    for i, txn in enumerate(transactions, 1):
+        payee = txn.get("payee_name", "Unknown")
+        amount = milliunits_to_dollars(txn.get("amount", 0))
+        date = txn.get("date", "Unknown")
+        txn_list += f"{i}. Payee: {payee}, Amount: ${amount:.2f}, Date: {date}\n"
+
+    system_prompt = f"""You are a financial transaction categorizer. Given a list of transactions, assign each one to the most appropriate budget category.
+
+Available categories:
+{category_text}
+
+Respond with a JSON array, one object per transaction, in the same order as provided:
+[
+  {{
+    "payee_name": "the payee name from the transaction",
+    "category_id": "the category UUID",
+    "category_name": "the category name",
+    "confidence": 0.95,
+    "rationale": "brief reason for this category"
+  }},
+  ...
+]
+
+Only use category IDs from the list above. Return ONLY the JSON array, no other text."""
+
+    user_message = f"Categorize these transactions:\n{txn_list}"
+
+    # Call Claude Haiku
+    client = anthropic.Anthropic(api_key=api_key)
+    response = client.messages.create(
+        model="claude-haiku-4-5-20251001",
+        max_tokens=1024,
+        system=system_prompt,
+        messages=[{"role": "user", "content": user_message}]
+    )
+
+    # Parse response
+    response_text = response.content[0].text
+    try:
+        data = json.loads(response_text)
+    except json.JSONDecodeError as e:
+        raise ValueError(f"Claude returned unparseable JSON: {e}")
+
+    if not isinstance(data, list):
+        raise ValueError("Claude response is not a JSON array")
+
+    if len(data) != len(transactions):
+        raise ValueError(f"Claude returned {len(data)} results for {len(transactions)} transactions")
+
+    # Build results
+    results = []
+    for i, item in enumerate(data):
+        txn = transactions[i]
+        results.append(CategoryResult(
+            transaction_id=txn["id"],
+            category_id=item["category_id"],
+            category_name=item["category_name"],
+            confidence=item["confidence"],
+            rationale=item["rationale"],
+            tier="claude",
+        ))
+
+    return results

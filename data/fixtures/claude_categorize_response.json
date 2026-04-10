@@ -1,0 +1,14 @@
+{
+  "id": "msg_01XXXXXX",
+  "type": "message",
+  "role": "assistant",
+  "content": [
+    {
+      "type": "text",
+      "text": "[{\"payee_name\": \"Amazon\", \"category_id\": \"dddddddd-0000-0000-0000-000000000003\", \"category_name\": \"Groceries\", \"confidence\": 0.85, \"rationale\": \"Amazon purchases often include household items\"}]"
+    }
+  ],
+  "model": "claude-haiku-4-5-20251001",
+  "stop_reason": "end_turn",
+  "usage": {"input_tokens": 150, "output_tokens": 80}
+}

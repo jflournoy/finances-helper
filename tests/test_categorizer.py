@@ -2,6 +2,7 @@
 import json
 import pytest
 from pathlib import Path
+from unittest.mock import patch, Mock
 from categorizer import (
     CategoryResult,
     normalize_payee,
@@ -12,6 +13,7 @@ from categorizer import (
     build_cache_from_transactions,
     history_lookup,
     fuzzy_match,
+    claude_categorize,
 )
 
 
@@ -289,3 +291,138 @@ def test_fuzzy_match_with_fixture_cache():
     result = fuzzy_match("Whole Foods Market #555", cache)
     assert result is not None
     assert result.category_id == "dddddddd-0000-0000-0000-000000000003"
+
+
+# Tier 3: claude_categorize
+
+def test_claude_categorize_empty_input_returns_empty():
+    categories = []
+    with patch("categorizer.anthropic.Anthropic") as mock_anthropic:
+        result = claude_categorize([], categories, "test-key")
+    assert result == []
+    # Verify API was not called
+    mock_anthropic.assert_not_called()
+
+
+def test_claude_categorize_parses_valid_response():
+    transactions = [
+        {
+            "id": "txn1",
+            "payee_name": "Amazon",
+            "amount": -12300,
+            "date": "2026-03-20"
+        }
+    ]
+    categories = [
+        {
+            "id": "cccccccc-0000-0000-0000-000000000002",
+            "name": "Online",
+            "categories": [
+                {"id": "dddddddd-0000-0000-0000-000000000002", "name": "Online Shopping"}
+            ]
+        }
+    ]
+
+    mock_response = Mock()
+    mock_response.content = [Mock(text='[{"payee_name": "Amazon", "category_id": "dddddddd-0000-0000-0000-000000000002", "category_name": "Online Shopping", "confidence": 0.9, "rationale": "test"}]')]
+
+    with patch("categorizer.anthropic.Anthropic") as mock_anthropic_class:
+        mock_client = Mock()
+        mock_anthropic_class.return_value = mock_client
+        mock_client.messages.create.return_value = mock_response
+
+        result = claude_categorize(transactions, categories, "test-key")
+
+    assert len(result) == 1
+    assert result[0].transaction_id == "txn1"
+    assert result[0].category_id == "dddddddd-0000-0000-0000-000000000002"
+    assert result[0].confidence == 0.9
+
+
+def test_claude_categorize_tier_is_claude():
+    transactions = [{"id": "txn1", "payee_name": "Amazon", "amount": -12300, "date": "2026-03-20"}]
+    categories = [{"id": "g1", "name": "Online", "categories": [{"id": "c1", "name": "Shopping"}]}]
+
+    mock_response = Mock()
+    mock_response.content = [Mock(text='[{"payee_name": "Amazon", "category_id": "c1", "category_name": "Shopping", "confidence": 0.8, "rationale": "r"}]')]
+
+    with patch("categorizer.anthropic.Anthropic") as mock_anthropic_class:
+        mock_client = Mock()
+        mock_anthropic_class.return_value = mock_client
+        mock_client.messages.create.return_value = mock_response
+        result = claude_categorize(transactions, categories, "test-key")
+
+    assert result[0].tier == "claude"
+
+
+def test_claude_categorize_raises_on_invalid_json():
+    transactions = [{"id": "txn1", "payee_name": "Amazon", "amount": -12300, "date": "2026-03-20"}]
+    categories = []
+
+    mock_response = Mock()
+    mock_response.content = [Mock(text='not valid json {')]
+
+    with patch("categorizer.anthropic.Anthropic") as mock_anthropic_class:
+        mock_client = Mock()
+        mock_anthropic_class.return_value = mock_client
+        mock_client.messages.create.return_value = mock_response
+        with pytest.raises(ValueError):
+            claude_categorize(transactions, categories, "test-key")
+
+
+def test_claude_categorize_raises_on_length_mismatch():
+    transactions = [
+        {"id": "txn1", "payee_name": "A", "amount": -100, "date": "2026-03-20"},
+        {"id": "txn2", "payee_name": "B", "amount": -200, "date": "2026-03-20"}
+    ]
+    categories = []
+
+    mock_response = Mock()
+    mock_response.content = [Mock(text='[{"payee_name": "A", "category_id": "c1", "category_name": "Cat", "confidence": 0.8, "rationale": "r"}]')]
+
+    with patch("categorizer.anthropic.Anthropic") as mock_anthropic_class:
+        mock_client = Mock()
+        mock_anthropic_class.return_value = mock_client
+        mock_client.messages.create.return_value = mock_response
+        with pytest.raises(ValueError):
+            claude_categorize(transactions, categories, "test-key")
+
+
+def test_claude_categorize_uses_haiku_model():
+    transactions = [{"id": "txn1", "payee_name": "Amazon", "amount": -12300, "date": "2026-03-20"}]
+    categories = [{"id": "g1", "name": "Online", "categories": [{"id": "c1", "name": "Shopping"}]}]
+
+    mock_response = Mock()
+    mock_response.content = [Mock(text='[{"payee_name": "Amazon", "category_id": "c1", "category_name": "Shopping", "confidence": 0.8, "rationale": "r"}]')]
+
+    with patch("categorizer.anthropic.Anthropic") as mock_anthropic_class:
+        mock_client = Mock()
+        mock_anthropic_class.return_value = mock_client
+        mock_client.messages.create.return_value = mock_response
+        claude_categorize(transactions, categories, "test-key")
+
+    call_kwargs = mock_client.messages.create.call_args[1]
+    assert call_kwargs["model"] == "claude-haiku-4-5-20251001"
+
+
+def test_claude_categorize_with_fixture_response():
+    fixture = json.loads(Path("data/fixtures/claude_categorize_response.json").read_text())
+    categories = json.loads(Path("data/fixtures/ynab_categories.json").read_text())["data"]["category_groups"]
+    transactions = json.loads(Path("data/fixtures/ynab_transactions.json").read_text())["data"]["transactions"]
+
+    # Get the uncategorized Amazon transaction
+    amazon_txn = next((t for t in transactions if t.get("payee_name") == "Amazon"), None)
+    assert amazon_txn is not None
+
+    mock_response = Mock()
+    mock_response.content = [Mock(text=fixture["content"][0]["text"])]
+
+    with patch("categorizer.anthropic.Anthropic") as mock_anthropic_class:
+        mock_client = Mock()
+        mock_anthropic_class.return_value = mock_client
+        mock_client.messages.create.return_value = mock_response
+        result = claude_categorize([amazon_txn], categories, "test-key")
+
+    assert len(result) == 1
+    assert result[0].transaction_id == amazon_txn["id"]
+    assert result[0].category_id == "dddddddd-0000-0000-0000-000000000003"
