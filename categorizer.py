@@ -544,7 +544,11 @@ def claude_categorize(transactions: list[dict], categories: list[dict], api_key:
         payee = txn.get("payee_name", "Unknown")
         amount = milliunits_to_dollars(txn.get("amount", 0))
         date = txn.get("date", "Unknown")
-        txn_list += f"{i}. Payee: {payee}, Amount: ${amount:.2f}, Date: {date}\n"
+        txn_list += f"{i}. Payee: {payee}, Amount: ${amount:.2f}, Date: {date}"
+        import_name = txn.get("import_payee_name_original")
+        if import_name:
+            txn_list += f", Bank description: {import_name}"
+        txn_list += "\n"
 
     system_prompt = f"""You are a financial transaction categorizer. Given a list of transactions, assign each one to the most appropriate budget category.
 
@@ -558,10 +562,18 @@ Respond with a JSON array, one object per transaction, in the same order as prov
     "category_id": "the category UUID",
     "category_name": "the category name",
     "confidence": 0.95,
-    "rationale": "brief reason for this category"
+    "rationale": "brief reason for this category",
+    "prior_strength": 15
   }},
   ...
 ]
+
+prior_strength is an integer from 1 to 20 indicating how confident you are that future transactions from this payee will be in the same category:
+- 1-3: Very uncertain (e.g., "Square Payment" could be anything)
+- 4-7: Somewhat uncertain (e.g., "Amazon" spans multiple categories)
+- 8-12: Fairly confident (e.g., "Starbucks" is almost always Coffee/Dining)
+- 13-17: Very confident (e.g., "Netflix" is clearly Entertainment)
+- 18-20: Absolutely certain (e.g., "Mortgage Payment" is always Mortgage)
 
 Only use category IDs from the list above. Return ONLY the JSON array, no other text."""
 
@@ -593,11 +605,17 @@ Only use category IDs from the list above. Return ONLY the JSON array, no other 
 
     # Build results
     results = []
-    required_fields = {"category_id", "category_name", "confidence", "rationale"}
+    required_fields = {"category_id", "category_name", "confidence", "rationale", "prior_strength"}
     for i, item in enumerate(data):
         missing = required_fields - set(item.keys())
         if missing:
             raise ValueError(f"Response item {i} missing fields: {', '.join(sorted(missing))}")
+
+        ps = item["prior_strength"]
+        if not isinstance(ps, int) or ps < 1 or ps > 20:
+            raise ValueError(
+                f"Response item {i} has invalid prior_strength: {ps!r} (must be integer 1-20)"
+            )
 
         txn = transactions[i]
         results.append(CategoryResult(
@@ -607,6 +625,7 @@ Only use category IDs from the list above. Return ONLY the JSON array, no other 
             confidence=item["confidence"],
             rationale=item["rationale"],
             tier="claude",
+            prior_strength=ps,
         ))
 
     return results
@@ -617,6 +636,8 @@ def categorize_transactions(
     cache: dict,
     categories: list[dict],
     api_key: str,
+    K: int | None = None,
+    confidence_threshold: float = DEFAULT_CONFIDENCE_THRESHOLD,
 ) -> list[CategoryResult]:
     """Orchestrate the three-tier categorization for a list of transactions.
 
@@ -625,6 +646,8 @@ def categorize_transactions(
         cache: Payee cache dict
         categories: List of category group dicts
         api_key: Anthropic API key
+        K: Number of categories for Bayesian confidence. None = legacy mode.
+        confidence_threshold: Minimum confidence for tiers 1 and 2.
 
     Returns:
         List of CategoryResult objects from all three tiers.
@@ -640,11 +663,22 @@ def categorize_transactions(
         if not payee:
             raise ValueError(f"Transaction {txn.get('id')} has no payee_name")
 
+        import_payee = txn.get("import_payee_name")
+        import_payee_orig = txn.get("import_payee_name_original")
+
         # Try tier 1
-        result = history_lookup(payee, cache)
+        result = history_lookup(
+            payee, cache, K=K, confidence_threshold=confidence_threshold,
+            import_payee_name=import_payee,
+            import_payee_name_original=import_payee_orig,
+        )
         if result is None:
             # Try tier 2
-            result = fuzzy_match(payee, cache)
+            result = fuzzy_match(
+                payee, cache, K=K, confidence_threshold=confidence_threshold,
+                import_payee_name=import_payee,
+                import_payee_name_original=import_payee_orig,
+            )
         if result is None:
             # Queue for tier 3
             tier3_pending.append(txn)

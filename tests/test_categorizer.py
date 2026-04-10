@@ -450,7 +450,7 @@ def test_categorize_transactions_transfer_not_miscategorized():
     categories = [{"id": "g1", "name": "Bills", "categories": [{"id": "c1", "name": "Water"}]}]
 
     mock_response = Mock()
-    mock_response.content = [Mock(text='[{"payee_name": "Transfer : Classic Checking -- 6190", "category_id": "c1", "category_name": "Water", "confidence": 0.7, "rationale": "r"}]')]
+    mock_response.content = [Mock(text='[{"payee_name": "Transfer : Classic Checking -- 6190", "category_id": "c1", "category_name": "Water", "confidence": 0.7, "rationale": "r", "prior_strength": 10}]')]
 
     with patch("categorizer.anthropic.Anthropic") as mock_anthropic_class:
         mock_client = Mock()
@@ -493,7 +493,7 @@ def test_claude_categorize_parses_valid_response():
     ]
 
     mock_response = Mock()
-    mock_response.content = [Mock(text='[{"payee_name": "Amazon", "category_id": "dddddddd-0000-0000-0000-000000000002", "category_name": "Online Shopping", "confidence": 0.9, "rationale": "test"}]')]
+    mock_response.content = [Mock(text='[{"payee_name": "Amazon", "category_id": "dddddddd-0000-0000-0000-000000000002", "category_name": "Online Shopping", "confidence": 0.9, "rationale": "test", "prior_strength": 10}]')]
 
     with patch("categorizer.anthropic.Anthropic") as mock_anthropic_class:
         mock_client = Mock()
@@ -513,7 +513,7 @@ def test_claude_categorize_tier_is_claude():
     categories = [{"id": "g1", "name": "Online", "categories": [{"id": "c1", "name": "Shopping"}]}]
 
     mock_response = Mock()
-    mock_response.content = [Mock(text='[{"payee_name": "Amazon", "category_id": "c1", "category_name": "Shopping", "confidence": 0.8, "rationale": "r"}]')]
+    mock_response.content = [Mock(text='[{"payee_name": "Amazon", "category_id": "c1", "category_name": "Shopping", "confidence": 0.8, "rationale": "r", "prior_strength": 10}]')]
 
     with patch("categorizer.anthropic.Anthropic") as mock_anthropic_class:
         mock_client = Mock()
@@ -547,7 +547,7 @@ def test_claude_categorize_raises_on_length_mismatch():
     categories = []
 
     mock_response = Mock()
-    mock_response.content = [Mock(text='[{"payee_name": "A", "category_id": "c1", "category_name": "Cat", "confidence": 0.8, "rationale": "r"}]')]
+    mock_response.content = [Mock(text='[{"payee_name": "A", "category_id": "c1", "category_name": "Cat", "confidence": 0.8, "rationale": "r", "prior_strength": 10}]')]
 
     with patch("categorizer.anthropic.Anthropic") as mock_anthropic_class:
         mock_client = Mock()
@@ -562,7 +562,7 @@ def test_claude_categorize_uses_haiku_model():
     categories = [{"id": "g1", "name": "Online", "categories": [{"id": "c1", "name": "Shopping"}]}]
 
     mock_response = Mock()
-    mock_response.content = [Mock(text='[{"payee_name": "Amazon", "category_id": "c1", "category_name": "Shopping", "confidence": 0.8, "rationale": "r"}]')]
+    mock_response.content = [Mock(text='[{"payee_name": "Amazon", "category_id": "c1", "category_name": "Shopping", "confidence": 0.8, "rationale": "r", "prior_strength": 10}]')]
 
     with patch("categorizer.anthropic.Anthropic") as mock_anthropic_class:
         mock_client = Mock()
@@ -583,7 +583,7 @@ def test_claude_categorize_max_tokens_scales_with_batch_size():
 
     mock_response = Mock()
     mock_response.content = [Mock(text=json.dumps([
-        {"payee_name": f"Store{i}", "category_id": "c1", "category_name": "Shopping", "confidence": 0.8, "rationale": "r"}
+        {"payee_name": f"Store{i}", "category_id": "c1", "category_name": "Shopping", "confidence": 0.8, "rationale": "r", "prior_strength": 10}
         for i in range(20)
     ]))]
 
@@ -603,7 +603,7 @@ def test_claude_categorize_max_tokens_has_minimum():
     categories = [{"id": "g1", "name": "Online", "categories": [{"id": "c1", "name": "Shopping"}]}]
 
     mock_response = Mock()
-    mock_response.content = [Mock(text='[{"payee_name": "Amazon", "category_id": "c1", "category_name": "Shopping", "confidence": 0.8, "rationale": "r"}]')]
+    mock_response.content = [Mock(text='[{"payee_name": "Amazon", "category_id": "c1", "category_name": "Shopping", "confidence": 0.8, "rationale": "r", "prior_strength": 10}]')]
 
     with patch("categorizer.anthropic.Anthropic") as mock_anthropic_class:
         mock_client = Mock()
@@ -645,7 +645,7 @@ def test_claude_categorize_raises_on_missing_fields():
 
     mock_response = Mock()
     # Missing 'confidence' field
-    mock_response.content = [Mock(text='[{"payee_name": "Amazon", "category_id": "c1", "category_name": "Shopping", "rationale": "r"}]')]
+    mock_response.content = [Mock(text='[{"payee_name": "Amazon", "category_id": "c1", "category_name": "Shopping", "rationale": "r", "prior_strength": 10}]')]
 
     with patch("categorizer.anthropic.Anthropic") as mock_anthropic_class:
         mock_client = Mock()
@@ -707,7 +707,7 @@ def test_categorize_transactions_tier3_called_for_novel_payee():
     categories = [{"id": "g1", "name": "Shopping", "categories": [{"id": "c1", "name": "Retail"}]}]
 
     mock_response = Mock()
-    mock_response.content = [Mock(text='[{"payee_name": "Unknown Store", "category_id": "c1", "category_name": "Retail", "confidence": 0.7, "rationale": "r"}]')]
+    mock_response.content = [Mock(text='[{"payee_name": "Unknown Store", "category_id": "c1", "category_name": "Retail", "confidence": 0.7, "rationale": "r", "prior_strength": 10}]')]
 
     with patch("categorizer.anthropic.Anthropic") as mock_anthropic_class:
         mock_client = Mock()
@@ -730,7 +730,7 @@ def test_categorize_transactions_claude_called_once_for_batch():
     categories = [{"id": "g1", "name": "Shopping", "categories": [{"id": "c1", "name": "Retail"}]}]
 
     mock_response = Mock()
-    mock_response.content = [Mock(text='[{"payee_name": "Unknown1", "category_id": "c1", "category_name": "Retail", "confidence": 0.7, "rationale": "r"},{"payee_name": "Unknown2", "category_id": "c1", "category_name": "Retail", "confidence": 0.7, "rationale": "r"},{"payee_name": "Unknown3", "category_id": "c1", "category_name": "Retail", "confidence": 0.7, "rationale": "r"}]')]
+    mock_response.content = [Mock(text='[{"payee_name": "Unknown1", "category_id": "c1", "category_name": "Retail", "confidence": 0.7, "rationale": "r", "prior_strength": 10},{"payee_name": "Unknown2", "category_id": "c1", "category_name": "Retail", "confidence": 0.7, "rationale": "r", "prior_strength": 10},{"payee_name": "Unknown3", "category_id": "c1", "category_name": "Retail", "confidence": 0.7, "rationale": "r", "prior_strength": 10}]')]
 
     with patch("categorizer.anthropic.Anthropic") as mock_anthropic_class:
         mock_client = Mock()
@@ -761,7 +761,7 @@ def test_categorize_transactions_mixed_tiers():
     categories = [{"id": "g1", "name": "Shopping", "categories": [{"id": "c2", "name": "Retail"}]}]
 
     mock_response = Mock()
-    mock_response.content = [Mock(text='[{"payee_name": "Unknown Store", "category_id": "c2", "category_name": "Retail", "confidence": 0.7, "rationale": "r"}]')]
+    mock_response.content = [Mock(text='[{"payee_name": "Unknown Store", "category_id": "c2", "category_name": "Retail", "confidence": 0.7, "rationale": "r", "prior_strength": 10}]')]
 
     with patch("categorizer.anthropic.Anthropic") as mock_anthropic_class:
         mock_client = Mock()
@@ -795,7 +795,7 @@ def test_categorize_transactions_full_pipeline_with_fixtures():
     }
 
     mock_response = Mock()
-    mock_response.content = [Mock(text='[{"payee_name": "NewNovelStore", "category_id": "dddddddd-0000-0000-0000-000000000003", "category_name": "Groceries", "confidence": 0.85, "rationale": "test"}]')]
+    mock_response.content = [Mock(text='[{"payee_name": "NewNovelStore", "category_id": "dddddddd-0000-0000-0000-000000000003", "category_name": "Groceries", "confidence": 0.85, "rationale": "test", "prior_strength": 10}]')]
 
     with patch("categorizer.anthropic.Anthropic") as mock_anthropic_class:
         mock_client = Mock()
@@ -825,7 +825,8 @@ def test_categorize_transactions_splits_large_batch():
             "category_id": "c1",
             "category_name": "Retail",
             "confidence": 0.7,
-            "rationale": "r"
+            "rationale": "r",
+            "prior_strength": 10,
         }
         for i in range(50)
     ])
@@ -837,7 +838,8 @@ def test_categorize_transactions_splits_large_batch():
             "category_id": "c1",
             "category_name": "Retail",
             "confidence": 0.7,
-            "rationale": "r"
+            "rationale": "r",
+            "prior_strength": 10,
         }
         for i in range(50, 60)
     ])
@@ -904,7 +906,7 @@ def test_regression_bug22_transfer_payees_not_miscategorized():
 
     mock_response = Mock()
     mock_response.content = [Mock(text=json.dumps([
-        {"payee_name": t["payee_name"], "category_id": "c1", "category_name": "Water", "confidence": 0.7, "rationale": "r"}
+        {"payee_name": t["payee_name"], "category_id": "c1", "category_name": "Water", "confidence": 0.7, "rationale": "r", "prior_strength": 10}
         for t in transfer_transactions
     ]))]
 
@@ -1540,4 +1542,120 @@ def test_import_name_end_to_end():
     assert result is not None
     assert result.category_id == "c1"
     assert result.category_name == "Mortgage"
+
+
+# ── Claude prior_strength and import name in prompt (#38) ─────────────────────
+
+def test_claude_response_with_prior_strength():
+    """Mock response includes prior_strength → parsed into CategoryResult."""
+    transactions = [{"id": "txn1", "payee_name": "Starbucks", "amount": -5000, "date": "2026-03-01"}]
+    categories = [{"id": "g1", "name": "Food", "categories": [{"id": "c1", "name": "Coffee"}]}]
+    mock_response = Mock()
+    mock_response.content = [Mock(text='[{"payee_name": "Starbucks", "category_id": "c1", "category_name": "Coffee", "confidence": 0.9, "rationale": "coffee shop", "prior_strength": 15}]')]
+
+    with patch("categorizer.anthropic.Anthropic") as mock_cls:
+        mock_cls.return_value.messages.create.return_value = mock_response
+        results = claude_categorize(transactions, categories, "key")
+
+    assert results[0].prior_strength == 15
+
+
+def test_claude_response_missing_prior_strength():
+    """Mock response omits prior_strength → raises ValueError."""
+    transactions = [{"id": "txn1", "payee_name": "X", "amount": -1000, "date": "2026-03-01"}]
+    categories = [{"id": "g1", "name": "G", "categories": [{"id": "c1", "name": "C"}]}]
+    mock_response = Mock()
+    mock_response.content = [Mock(text='[{"payee_name": "X", "category_id": "c1", "category_name": "C", "confidence": 0.8, "rationale": "r"}]')]
+
+    with patch("categorizer.anthropic.Anthropic") as mock_cls:
+        mock_cls.return_value.messages.create.return_value = mock_response
+        with pytest.raises(ValueError, match="missing fields.*prior_strength"):
+            claude_categorize(transactions, categories, "key")
+
+
+def test_claude_response_invalid_prior_strength():
+    """prior_strength out of range → raises ValueError."""
+    for bad_val in [0, 25, "high"]:
+        transactions = [{"id": "txn1", "payee_name": "X", "amount": -1000, "date": "2026-03-01"}]
+        categories = [{"id": "g1", "name": "G", "categories": [{"id": "c1", "name": "C"}]}]
+        mock_response = Mock()
+        mock_response.content = [Mock(text=json.dumps([{
+            "payee_name": "X", "category_id": "c1", "category_name": "C",
+            "confidence": 0.8, "rationale": "r", "prior_strength": bad_val,
+        }]))]
+        with patch("categorizer.anthropic.Anthropic") as mock_cls:
+            mock_cls.return_value.messages.create.return_value = mock_response
+            with pytest.raises(ValueError, match="invalid prior_strength"):
+                claude_categorize(transactions, categories, "key")
+
+
+def test_claude_prompt_includes_import_name():
+    """When transaction has import_payee_name_original, prompt contains it."""
+    transactions = [{"id": "txn1", "payee_name": "Mortgage", "amount": -100000,
+                     "date": "2026-03-01", "import_payee_name_original": "NEWREZ ID:123"}]
+    categories = [{"id": "g1", "name": "Bills", "categories": [{"id": "c1", "name": "Mortgage"}]}]
+    mock_response = Mock()
+    mock_response.content = [Mock(text='[{"payee_name": "Mortgage", "category_id": "c1", "category_name": "Mortgage", "confidence": 0.95, "rationale": "r", "prior_strength": 18}]')]
+
+    with patch("categorizer.anthropic.Anthropic") as mock_cls:
+        mock_client = Mock()
+        mock_cls.return_value = mock_client
+        mock_client.messages.create.return_value = mock_response
+        claude_categorize(transactions, categories, "key")
+
+    call_args = mock_client.messages.create.call_args
+    user_msg = call_args[1]["messages"][0]["content"]
+    assert "NEWREZ ID:123" in user_msg
+
+
+def test_claude_prompt_without_import_name():
+    """When transaction lacks import_payee_name_original, prompt still works."""
+    transactions = [{"id": "txn1", "payee_name": "Starbucks", "amount": -5000, "date": "2026-03-01"}]
+    categories = [{"id": "g1", "name": "Food", "categories": [{"id": "c1", "name": "Coffee"}]}]
+    mock_response = Mock()
+    mock_response.content = [Mock(text='[{"payee_name": "Starbucks", "category_id": "c1", "category_name": "Coffee", "confidence": 0.9, "rationale": "r", "prior_strength": 15}]')]
+
+    with patch("categorizer.anthropic.Anthropic") as mock_cls:
+        mock_client = Mock()
+        mock_cls.return_value = mock_client
+        mock_client.messages.create.return_value = mock_response
+        results = claude_categorize(transactions, categories, "key")
+
+    assert len(results) == 1
+    call_args = mock_client.messages.create.call_args
+    user_msg = call_args[1]["messages"][0]["content"]
+    assert "Bank description" not in user_msg
+
+
+def test_orchestrator_passes_import_names_to_lookup():
+    """Verify import name fields are threaded to history_lookup."""
+    cache = _v2_cache({"whole foods": ("c1", "Groceries", 50)})
+    cache["wf market"] = {"alias_of": "whole foods"}
+    cache["whole foods"]["aliases"] = ["wf market"]
+
+    txns = [{"id": "t1", "payee_name": "Unknown", "amount": -5000, "date": "2026-03-01",
+             "import_payee_name_original": "WF MARKET"}]
+
+    with patch("categorizer.anthropic.Anthropic") as mock_cls:
+        results = categorize_transactions(txns, cache, [], "key")
+
+    assert len(results) == 1
+    assert results[0].tier in ("history", "fuzzy")
+    mock_cls.assert_not_called()
+
+
+def test_orchestrator_records_claude_with_strength():
+    """After Claude categorizes, record_categorization is called with prior_strength."""
+    cache = {"_version": 2}
+    txns = [{"id": "t1", "payee_name": "NewStore", "amount": -5000, "date": "2026-03-01"}]
+    categories = [{"id": "g1", "name": "G", "categories": [{"id": "c1", "name": "C"}]}]
+    mock_response = Mock()
+    mock_response.content = [Mock(text='[{"payee_name": "NewStore", "category_id": "c1", "category_name": "C", "confidence": 0.8, "rationale": "r", "prior_strength": 12}]')]
+
+    with patch("categorizer.anthropic.Anthropic") as mock_cls:
+        mock_cls.return_value.messages.create.return_value = mock_response
+        results = categorize_transactions(txns, cache, categories, "key")
+
+    assert results[0].prior_strength == 12
+
 
