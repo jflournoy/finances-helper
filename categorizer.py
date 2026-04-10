@@ -182,14 +182,56 @@ def record_categorization(
     entry["total"] += prior_strength
 
 
+def _dominant_category(entry: dict) -> tuple[str, str]:
+    """Extract the dominant category_id and category_name from a v2 cache entry.
+
+    Returns the category with the highest count. Ties broken by alphabetical
+    category_id (matching compute_confidence behavior).
+    """
+    categories = entry["categories"]
+    max_count = -1
+    dominant_id = None
+    dominant_name = None
+    for cat_id, info in sorted(categories.items()):
+        if info["count"] > max_count:
+            max_count = info["count"]
+            dominant_id = cat_id
+            dominant_name = info["name"]
+    return dominant_id, dominant_name
+
+
+def _migrate_v1_to_v2(cache: dict) -> dict:
+    """Migrate a v1 (flat) cache to v2 (frequency) format.
+
+    V1 entries: {"category_id": "...", "category_name": "..."}
+    V2 entries: {"total": N, "categories": {"cat_id": {"name": "...", "count": N}}}
+    """
+    import logging
+    logging.warning("Migrating payee cache from v1 to v2 format")
+
+    new_cache = {"_version": 2}
+    for key, entry in cache.items():
+        if key == "_version":
+            continue
+        cat_id = entry["category_id"]
+        cat_name = entry["category_name"]
+        new_cache[key] = {
+            "total": 1,
+            "categories": {
+                cat_id: {"name": cat_name, "count": 1}
+            }
+        }
+    return new_cache
+
+
 def load_payee_cache(path: str = "data/cache/payee_lookup.json") -> dict:
-    """Load the payee cache from disk.
+    """Load the payee cache from disk. Auto-migrates v1 to v2 format.
 
     Args:
         path: Path to the cache JSON file
 
     Returns:
-        Cache dict mapping normalized payee names to category info.
+        Cache dict in v2 frequency format.
         Returns empty dict if file doesn't exist (first-run case).
 
     Raises:
@@ -201,9 +243,16 @@ def load_payee_cache(path: str = "data/cache/payee_lookup.json") -> dict:
 
     try:
         content = cache_path.read_text()
-        return json.loads(content)
+        cache = json.loads(content)
     except json.JSONDecodeError as e:
         raise ValueError(f"Invalid JSON in cache file {path}: {e}")
+
+    if cache.get("_version") != 2:
+        cache = _migrate_v1_to_v2(cache)
+        cache_path.parent.mkdir(parents=True, exist_ok=True)
+        cache_path.write_text(json.dumps(cache, indent=2))
+
+    return cache
 
 
 def save_payee_cache(cache: dict, path: str = "data/cache/payee_lookup.json") -> None:
@@ -219,60 +268,28 @@ def save_payee_cache(cache: dict, path: str = "data/cache/payee_lookup.json") ->
 
 
 def build_cache_from_transactions(transactions: list[dict]) -> dict:
-    """Build a payee cache from already-categorized YNAB transactions.
+    """Build a v2 frequency payee cache from already-categorized YNAB transactions.
 
     Filters to transactions with both payee_name and category_id,
-    groups by normalized payee name, and takes the most recent
-    category assignment for each payee.
+    and accumulates category frequency counts per normalized payee name.
 
     Args:
         transactions: List of YNAB transaction dicts
 
     Returns:
-        Cache dict mapping normalized payee names to category info.
+        Cache dict in v2 frequency format with _version key.
     """
-    cache = {}
+    cache = {"_version": 2}
 
-    # Filter and group by normalized payee name
     for txn in transactions:
         payee = txn.get("payee_name")
         cat_id = txn.get("category_id")
         cat_name = txn.get("category_name")
-        date = txn.get("date")
 
-        # Skip uncategorized or missing payee
         if not payee or not cat_id:
             continue
 
-        # Normalize the payee name
-        normalized = normalize_payee(payee)
-
-        # Store or update if this is more recent
-        if normalized not in cache:
-            cache[normalized] = {
-                "category_id": cat_id,
-                "category_name": cat_name,
-                "date": date,  # Track for sorting
-            }
-        else:
-            # Keep the most recent
-            if date and cache[normalized].get("date"):
-                if date > cache[normalized]["date"]:
-                    cache[normalized] = {
-                        "category_id": cat_id,
-                        "category_name": cat_name,
-                        "date": date,
-                    }
-            elif date:
-                cache[normalized] = {
-                    "category_id": cat_id,
-                    "category_name": cat_name,
-                    "date": date,
-                }
-
-    # Remove the date field from final cache
-    for key in cache:
-        del cache[key]["date"]
+        record_categorization(cache, payee, cat_id, cat_name, source="history")
 
     return cache
 
@@ -282,7 +299,7 @@ def history_lookup(payee_name: str, cache: dict) -> CategoryResult | None:
 
     Args:
         payee_name: Raw payee name to look up
-        cache: Cache dict mapping normalized payee names to category info
+        cache: V2 frequency cache dict
 
     Returns:
         CategoryResult with confidence=1.0 if found, None otherwise.
@@ -292,10 +309,14 @@ def history_lookup(payee_name: str, cache: dict) -> CategoryResult | None:
         return None
 
     entry = cache[normalized]
+    if entry.get("_version") or not entry.get("categories"):
+        return None
+
+    cat_id, cat_name = _dominant_category(entry)
     return CategoryResult(
         transaction_id="",
-        category_id=entry["category_id"],
-        category_name=entry["category_name"],
+        category_id=cat_id,
+        category_name=cat_name,
         confidence=1.0,
         rationale="Exact history match",
         tier="history",
@@ -322,7 +343,7 @@ def fuzzy_match(payee_name: str, cache: dict, threshold: int = FUZZY_THRESHOLD) 
 
     Args:
         payee_name: Raw payee name to match
-        cache: Cache dict mapping normalized payee names to category info
+        cache: V2 frequency cache dict
         threshold: Minimum score (0-100) to consider a match
 
     Returns:
@@ -332,18 +353,26 @@ def fuzzy_match(payee_name: str, cache: dict, threshold: int = FUZZY_THRESHOLD) 
         return None
 
     normalized = normalize_payee(payee_name)
+    matchable_keys = [k for k in cache if k != "_version"]
+    if not matchable_keys:
+        return None
+
     best_match, score = process.extractOne(
-        normalized, cache.keys(), scorer=fuzzy_score
+        normalized, matchable_keys, scorer=fuzzy_score
     )
 
     if score < threshold:
         return None
 
     entry = cache[best_match]
+    if not entry.get("categories"):
+        return None
+
+    cat_id, cat_name = _dominant_category(entry)
     return CategoryResult(
         transaction_id="",
-        category_id=entry["category_id"],
-        category_name=entry["category_name"],
+        category_id=cat_id,
+        category_name=cat_name,
         confidence=score / 100.0,
         rationale=f"Fuzzy match to '{best_match}' (score: {score})",
         tier="fuzzy",
@@ -553,9 +582,10 @@ def main():
         print("Cache is empty. Bootstrapping from existing transactions...")
         all_txns, _ = client.get_transactions(budget_id)
         cache = build_cache_from_transactions(all_txns)
-        if cache:
+        payee_count = sum(1 for k in cache if k != "_version")
+        if payee_count > 0:
             save_payee_cache(cache)
-            print(f"Cache built with {len(cache)} payees")
+            print(f"Cache built with {payee_count} payees")
 
     # Categorize
     results = categorize_transactions(uncategorized, cache, categories, anthropic_key)
@@ -572,14 +602,13 @@ def main():
     # Update cache with new payees from Claude
     for result in results:
         if result.tier == "claude":
-            # Find original transaction for payee name
             txn = next((t for t in uncategorized if t["id"] == result.transaction_id), None)
             if txn:
-                normalized = normalize_payee(txn["payee_name"])
-                cache[normalized] = {
-                    "category_id": result.category_id,
-                    "category_name": result.category_name,
-                }
+                record_categorization(
+                    cache, txn["payee_name"],
+                    result.category_id, result.category_name,
+                    source="claude",
+                )
 
     save_payee_cache(cache)
     print(f"\nCache updated with {sum(1 for r in results if r.tier == 'claude')} new payees")

@@ -1,14 +1,21 @@
 {
+  "_version": 2,
   "whole foods": {
-    "category_id": "dddddddd-0000-0000-0000-000000000003",
-    "category_name": "Groceries"
+    "total": 1,
+    "categories": {
+      "dddddddd-0000-0000-0000-000000000003": {"name": "Groceries", "count": 1}
+    }
   },
   "amazon": {
-    "category_id": "dddddddd-0000-0000-0000-000000000002",
-    "category_name": "Online Shopping"
+    "total": 1,
+    "categories": {
+      "dddddddd-0000-0000-0000-000000000002": {"name": "Online Shopping", "count": 1}
+    }
   },
   "transfer": {
-    "category_id": "dddddddd-0000-0000-0000-000000000099",
-    "category_name": "Water (addup)"
+    "total": 1,
+    "categories": {
+      "dddddddd-0000-0000-0000-000000000099": {"name": "Water (addup)", "count": 1}
+    }
   }
 }

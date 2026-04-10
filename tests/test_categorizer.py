@@ -19,7 +19,22 @@ from categorizer import (
     count_categories,
     compute_confidence,
     record_categorization,
+    _dominant_category,
 )
+
+
+def _v2_entry(cat_id, cat_name, count=1):
+    """Helper to create a v2 frequency cache entry for tests."""
+    return {"total": count, "categories": {cat_id: {"name": cat_name, "count": count}}}
+
+
+def _v2_cache(entries):
+    """Helper to create a v2 cache from a dict of {payee: (cat_id, cat_name, count)}."""
+    cache = {"_version": 2}
+    for payee, (cat_id, cat_name, *rest) in entries.items():
+        count = rest[0] if rest else 1
+        cache[payee] = _v2_entry(cat_id, cat_name, count)
+    return cache
 
 
 # normalization — basic
@@ -193,8 +208,10 @@ def test_load_payee_cache_returns_empty_dict_when_missing(tmp_path):
 def test_load_payee_cache_loads_fixture():
     result = load_payee_cache("data/fixtures/payee_cache.json")
     assert "whole foods" in result
-    assert result["whole foods"]["category_id"] == "dddddddd-0000-0000-0000-000000000003"
-    assert result["whole foods"]["category_name"] == "Groceries"
+    assert result["_version"] == 2
+    cat_id, cat_name = _dominant_category(result["whole foods"])
+    assert cat_id == "dddddddd-0000-0000-0000-000000000003"
+    assert cat_name == "Groceries"
 
 
 def test_load_payee_cache_raises_on_invalid_json(tmp_path):
@@ -205,7 +222,7 @@ def test_load_payee_cache_raises_on_invalid_json(tmp_path):
 
 
 def test_save_payee_cache_writes_file(tmp_path):
-    cache = {"test": {"category_id": "abc", "category_name": "Test"}}
+    cache = {"_version": 2, "test": {"total": 1, "categories": {"abc": {"name": "Test", "count": 1}}}}
     path = tmp_path / "cache.json"
     save_payee_cache(cache, str(path))
     assert path.exists()
@@ -213,8 +230,9 @@ def test_save_payee_cache_writes_file(tmp_path):
 
 def test_save_payee_cache_roundtrip(tmp_path):
     original = {
-        "whole foods": {"category_id": "id1", "category_name": "Groceries"},
-        "amazon": {"category_id": "id2", "category_name": "Shopping"}
+        "_version": 2,
+        "whole foods": {"total": 1, "categories": {"id1": {"name": "Groceries", "count": 1}}},
+        "amazon": {"total": 1, "categories": {"id2": {"name": "Shopping", "count": 1}}},
     }
     path = tmp_path / "cache.json"
     save_payee_cache(original, str(path))
@@ -244,28 +262,39 @@ def test_build_cache_from_transactions_skips_no_payee():
     ]
     cache = build_cache_from_transactions(transactions)
     assert "valid" in cache
-    assert len(cache) == 1
+    assert len(cache) == 2  # "valid" + "_version"
 
 
-def test_build_cache_from_transactions_uses_most_recent():
+def test_build_cache_from_transactions_accumulates_categories():
+    """v2 format: same payee with different categories accumulates counts."""
     transactions = [
-        {"payee_name": "Whole Foods", "category_id": "cat1", "category_name": "OldCat", "date": "2026-03-01"},
-        {"payee_name": "Whole Foods", "category_id": "cat2", "category_name": "NewCat", "date": "2026-03-15"},
+        {"payee_name": "Whole Foods", "category_id": "cat1", "category_name": "Groceries"},
+        {"payee_name": "Whole Foods", "category_id": "cat2", "category_name": "Household"},
+        {"payee_name": "Whole Foods", "category_id": "cat1", "category_name": "Groceries"},
     ]
     cache = build_cache_from_transactions(transactions)
-    assert cache["whole foods"]["category_id"] == "cat2"
-    assert cache["whole foods"]["category_name"] == "NewCat"
+    entry = cache["whole foods"]
+    assert entry["total"] == 3
+    assert entry["categories"]["cat1"]["count"] == 2
+    assert entry["categories"]["cat2"]["count"] == 1
+
+
+def test_build_cache_from_transactions_has_version():
+    cache = build_cache_from_transactions([
+        {"payee_name": "X", "category_id": "c1", "category_name": "Cat"},
+    ])
+    assert cache["_version"] == 2
 
 
 def test_build_cache_from_transactions_empty_list():
     cache = build_cache_from_transactions([])
-    assert cache == {}
+    assert cache == {"_version": 2}
 
 
 # Tier 1: history_lookup
 
 def test_history_lookup_returns_result_on_hit():
-    cache = {"whole foods": {"category_id": "cat1", "category_name": "Groceries"}}
+    cache = _v2_cache({"whole foods": ("cat1", "Groceries")})
     result = history_lookup("Whole Foods", cache)
     assert result is not None
     assert result.category_id == "cat1"
@@ -273,7 +302,7 @@ def test_history_lookup_returns_result_on_hit():
 
 
 def test_history_lookup_returns_none_on_miss():
-    cache = {"whole foods": {"category_id": "cat1", "category_name": "Groceries"}}
+    cache = _v2_cache({"whole foods": ("cat1", "Groceries")})
     result = history_lookup("Amazon", cache)
     assert result is None
 
@@ -284,13 +313,13 @@ def test_history_lookup_returns_none_on_empty_cache():
 
 
 def test_history_lookup_confidence_is_1_0():
-    cache = {"whole foods": {"category_id": "cat1", "category_name": "Groceries"}}
+    cache = _v2_cache({"whole foods": ("cat1", "Groceries")})
     result = history_lookup("Whole Foods", cache)
     assert result.confidence == 1.0
 
 
 def test_history_lookup_tier_is_history():
-    cache = {"whole foods": {"category_id": "cat1", "category_name": "Groceries"}}
+    cache = _v2_cache({"whole foods": ("cat1", "Groceries")})
     result = history_lookup("Whole Foods", cache)
     assert result.tier == "history"
 
@@ -309,7 +338,7 @@ def test_history_lookup_with_fixture_cache_miss():
 
 
 def test_history_lookup_normalizes_before_lookup():
-    cache = {"whole foods": {"category_id": "cat1", "category_name": "Groceries"}}
+    cache = _v2_cache({"whole foods": ("cat1", "Groceries")})
     result = history_lookup("WHOLE FOODS #1234", cache)
     assert result is not None
     assert result.category_id == "cat1"
@@ -318,28 +347,28 @@ def test_history_lookup_normalizes_before_lookup():
 # Tier 2: fuzzy_match
 
 def test_fuzzy_match_exact_returns_result():
-    cache = {"whole foods": {"category_id": "cat1", "category_name": "Groceries"}}
+    cache = _v2_cache({"whole foods": ("cat1", "Groceries")})
     result = fuzzy_match("whole foods", cache)
     assert result is not None
     assert result.tier == "fuzzy"
 
 
 def test_fuzzy_match_close_variant_hits():
-    cache = {"whole foods": {"category_id": "cat1", "category_name": "Groceries"}}
+    cache = _v2_cache({"whole foods": ("cat1", "Groceries")})
     result = fuzzy_match("whole foods market", cache)
     assert result is not None
     assert result.category_id == "cat1"
 
 
 def test_fuzzy_match_store_number_still_hits():
-    cache = {"whole foods": {"category_id": "cat1", "category_name": "Groceries"}}
+    cache = _v2_cache({"whole foods": ("cat1", "Groceries")})
     result = fuzzy_match("whole foods #999", cache)
     assert result is not None
     assert result.category_id == "cat1"
 
 
 def test_fuzzy_match_below_threshold_returns_none():
-    cache = {"whole foods": {"category_id": "cat1", "category_name": "Groceries"}}
+    cache = _v2_cache({"whole foods": ("cat1", "Groceries")})
     result = fuzzy_match("xyz abc def", cache)
     assert result is None
 
@@ -350,20 +379,20 @@ def test_fuzzy_match_empty_cache_returns_none():
 
 
 def test_fuzzy_match_confidence_is_fraction():
-    cache = {"whole foods": {"category_id": "cat1", "category_name": "Groceries"}}
+    cache = _v2_cache({"whole foods": ("cat1", "Groceries")})
     result = fuzzy_match("whole foods market", cache)
     assert 0.0 <= result.confidence <= 1.0
     assert result.confidence > 0.7
 
 
 def test_fuzzy_match_tier_is_fuzzy():
-    cache = {"whole foods": {"category_id": "cat1", "category_name": "Groceries"}}
+    cache = _v2_cache({"whole foods": ("cat1", "Groceries")})
     result = fuzzy_match("whole foods market", cache)
     assert result.tier == "fuzzy"
 
 
 def test_fuzzy_match_threshold_boundary():
-    cache = {"target": {"category_id": "cat1", "category_name": "Retail"}}
+    cache = _v2_cache({"target": ("cat1", "Retail")})
     result = fuzzy_match("target", cache)
     assert result is not None
     assert result.confidence == 1.0
@@ -400,19 +429,19 @@ def test_fuzzy_score_no_penalty_for_similar_length():
 # fuzzy_match — transfer false-positive prevention
 
 def test_fuzzy_match_transfer_does_not_match_generic_transfer():
-    cache = {"transfer": {"category_id": "x", "category_name": "Water (addup)"}}
+    cache = _v2_cache({"transfer": ("x", "Water (addup)")})
     result = fuzzy_match("Transfer : Classic Checking -- 6190", cache)
     assert result is None
 
 
 def test_fuzzy_match_transfer_does_not_match_different_transfer():
-    cache = {"transfer : savings": {"category_id": "x", "category_name": "Savings"}}
+    cache = _v2_cache({"transfer : savings": ("x", "Savings")})
     result = fuzzy_match("Transfer : Classic Checking -- 6190", cache)
     assert result is None
 
 
 def test_categorize_transactions_transfer_not_miscategorized():
-    cache = {"transfer": {"category_id": "water_id", "category_name": "Water (addup)"}}
+    cache = _v2_cache({"transfer": ("water_id", "Water (addup)")})
     transactions = [
         {"id": "txn1", "payee_name": "Transfer : Classic Checking -- 6190", "amount": -5000, "date": "2026-03-01"},
     ]
@@ -643,7 +672,7 @@ def test_claude_categorize_raises_on_non_array_json():
 # Orchestrator: categorize_transactions
 
 def test_categorize_transactions_tier1_hit_no_claude_call():
-    cache = {"whole foods": {"category_id": "cat1", "category_name": "Groceries"}}
+    cache = _v2_cache({"whole foods": ("cat1", "Groceries")})
     transactions = [{"id": "txn1", "payee_name": "Whole Foods", "amount": -5000, "date": "2026-03-01"}]
     categories = []
 
@@ -658,7 +687,7 @@ def test_categorize_transactions_tier1_hit_no_claude_call():
 
 
 def test_categorize_transactions_tier2_hit_no_claude_call():
-    cache = {"whole foods": {"category_id": "cat1", "category_name": "Groceries"}}
+    cache = _v2_cache({"whole foods": ("cat1", "Groceries")})
     transactions = [{"id": "txn1", "payee_name": "Whole Foods Market #999", "amount": -5000, "date": "2026-03-01"}]
     categories = []
 
@@ -722,7 +751,7 @@ def test_categorize_transactions_raises_on_missing_payee_name():
 
 
 def test_categorize_transactions_mixed_tiers():
-    cache = {"whole foods": {"category_id": "cat1", "category_name": "Groceries"}}
+    cache = _v2_cache({"whole foods": ("cat1", "Groceries")})
     transactions = [
         {"id": "txn1", "payee_name": "Whole Foods", "amount": -5000, "date": "2026-03-01"},  # tier 1
         {"id": "txn2", "payee_name": "Unknown Store", "amount": -6000, "date": "2026-03-01"},  # tier 3
@@ -840,15 +869,16 @@ def test_normalize_payee_raises_on_punctuation_only():
         normalize_payee(".,!?;:")
 
 
-def test_build_cache_from_transactions_date_missing_in_existing_cache():
-    """Test the elif branch where new txn has date but cached one doesn't."""
+def test_build_cache_from_transactions_accumulates_both_categories():
+    """v2 format: both categories are accumulated regardless of date."""
     transactions = [
         {"payee_name": "Whole Foods", "category_id": "cat1", "category_name": "Groceries", "date": None},
         {"payee_name": "Whole Foods", "category_id": "cat2", "category_name": "Other", "date": "2026-01-01"},
     ]
     cache = build_cache_from_transactions(transactions)
-    # First txn has no date, second has date. The elif branch (line 151) should trigger and keep the second.
-    assert cache["whole foods"]["category_id"] == "cat2"
+    assert cache["whole foods"]["total"] == 2
+    assert "cat1" in cache["whole foods"]["categories"]
+    assert "cat2" in cache["whole foods"]["categories"]
 
 
 # Regression tests: bug #22 — transfer payee miscategorization
@@ -856,7 +886,8 @@ def test_build_cache_from_transactions_date_missing_in_existing_cache():
 def test_fixture_cache_has_transfer_entry():
     cache = load_payee_cache("data/fixtures/payee_cache.json")
     assert "transfer" in cache
-    assert cache["transfer"]["category_name"] == "Water (addup)"
+    cat_id, cat_name = _dominant_category(cache["transfer"])
+    assert cat_name == "Water (addup)"
 
 
 def test_regression_bug22_transfer_payees_not_miscategorized():
@@ -889,7 +920,7 @@ def test_regression_bug22_transfer_payees_not_miscategorized():
 
 def test_categorize_transactions_legitimate_transfer_exact_match():
     """A bare 'Transfer' payee should still match 'transfer' in cache via history lookup."""
-    cache = {"transfer": {"category_id": "water_id", "category_name": "Water (addup)"}}
+    cache = _v2_cache({"transfer": ("water_id", "Water (addup)")})
     transactions = [{"id": "txn1", "payee_name": "Transfer", "amount": -5000, "date": "2026-03-01"}]
     categories = []
 
@@ -1079,11 +1110,89 @@ def test_main_updates_cache_with_claude_results(monkeypatch, tmp_path):
                 with patch("categorizer.categorize_transactions", return_value=[claude_result]):
                     main()
 
-    # Verify cache was updated with the claude result
+    # Verify cache was updated with the claude result (v2 format)
     saved_cache = json.loads((cache_dir / "payee_lookup.json").read_text())
     assert "newplace" in saved_cache
-    assert saved_cache["newplace"]["category_id"] == "c2"
-    assert saved_cache["newplace"]["category_name"] == "Dining"
+    assert saved_cache["newplace"]["categories"]["c2"]["name"] == "Dining"
+    assert saved_cache["newplace"]["total"] == 1
+
+
+# ── Cache format migration (v1 → v2) ─────────────────────────────────────────
+
+def test_load_payee_cache_v1_migration(tmp_path):
+    """Load v1 cache → auto-migrates → entries have total: 1, correct structure."""
+    v1 = {"starbucks": {"category_id": "c1", "category_name": "Coffee"}}
+    path = tmp_path / "cache.json"
+    path.write_text(json.dumps(v1))
+    result = load_payee_cache(str(path))
+    assert result["_version"] == 2
+    assert result["starbucks"]["total"] == 1
+    assert result["starbucks"]["categories"]["c1"]["name"] == "Coffee"
+    assert result["starbucks"]["categories"]["c1"]["count"] == 1
+
+
+def test_load_payee_cache_v2_no_migration(tmp_path):
+    """Load v2 cache → returned as-is."""
+    v2 = {"_version": 2, "x": {"total": 5, "categories": {"c1": {"name": "Y", "count": 5}}}}
+    path = tmp_path / "cache.json"
+    path.write_text(json.dumps(v2))
+    result = load_payee_cache(str(path))
+    assert result == v2
+
+
+def test_load_payee_cache_v1_saves_migrated(tmp_path):
+    """After loading v1 cache, the file on disk is updated to v2 format."""
+    v1 = {"starbucks": {"category_id": "c1", "category_name": "Coffee"}}
+    path = tmp_path / "cache.json"
+    path.write_text(json.dumps(v1))
+    load_payee_cache(str(path))
+    on_disk = json.loads(path.read_text())
+    assert on_disk["_version"] == 2
+    assert "starbucks" in on_disk
+    assert on_disk["starbucks"]["total"] == 1
+
+
+def test_load_payee_cache_v1_fixture():
+    """The v1 fixture file can be loaded and migrates correctly."""
+    result = load_payee_cache("data/fixtures/payee_cache_v1.json")
+    assert result["_version"] == 2
+    assert result["whole foods"]["total"] == 1
+
+
+def test_build_cache_multi_category_payee():
+    """Payee with transactions in 2 different categories → both present."""
+    txns = [
+        {"payee_name": "Amazon", "category_id": "c1", "category_name": "Groceries"},
+        {"payee_name": "Amazon", "category_id": "c1", "category_name": "Groceries"},
+        {"payee_name": "Amazon", "category_id": "c2", "category_name": "Electronics"},
+    ]
+    cache = build_cache_from_transactions(txns)
+    entry = cache["amazon"]
+    assert entry["total"] == 3
+    assert entry["categories"]["c1"]["count"] == 2
+    assert entry["categories"]["c2"]["count"] == 1
+
+
+def test_build_cache_roundtrip(tmp_path):
+    """build → save → load → entries identical."""
+    txns = [
+        {"payee_name": "Starbucks", "category_id": "c1", "category_name": "Coffee"},
+        {"payee_name": "Starbucks", "category_id": "c1", "category_name": "Coffee"},
+    ]
+    cache = build_cache_from_transactions(txns)
+    path = tmp_path / "cache.json"
+    save_payee_cache(cache, str(path))
+    loaded = load_payee_cache(str(path))
+    assert loaded == cache
+
+
+def test_build_cache_then_compute_confidence():
+    """Build cache from transactions, compute confidence on an entry."""
+    txns = [{"payee_name": "X", "category_id": "c1", "category_name": "Cat"}] * 10
+    cache = build_cache_from_transactions(txns)
+    cat_id, cat_name, conf = compute_confidence(cache["x"], 5)
+    assert cat_id == "c1"
+    assert conf > 0
 
 
 # ── count_categories ──────────────────────────────────────────────────────────
