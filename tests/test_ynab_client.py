@@ -271,6 +271,15 @@ def test_get_categories_filters_deleted_groups(client):
     assert all(not g.get("deleted", False) for g in groups)
 
 
+def test_get_categories_preserves_group_fields(client):
+    """Verify that extra fields on category groups are not dropped."""
+    fixture = load_fixture("ynab_categories.json")
+    with mock_get(client, fixture):
+        groups = client.get_categories(BUDGET_ID)
+    # The fixture groups have "deleted" field — verify it's preserved
+    assert "deleted" in groups[0]
+
+
 def test_get_payees_returns_list(client):
     fixture = load_fixture("ynab_payees.json")
     with mock_get(client, fixture):

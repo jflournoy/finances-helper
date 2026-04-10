@@ -143,15 +143,10 @@ class YNABClient:
             if group.get("deleted", False):
                 continue
 
-            categories = group.get("categories", [])
-            filtered_categories = [c for c in categories if not c.get("deleted", False)]
-
-            result.append({
-                "id": group.get("id"),
-                "name": group.get("name"),
-                "hidden": group.get("hidden"),
-                "categories": filtered_categories,
-            })
+            filtered_categories = [c for c in group.get("categories", []) if not c.get("deleted", False)]
+            # Return full group dict with only the categories list replaced (filtered)
+            group_dict = {**group, "categories": filtered_categories}
+            result.append(group_dict)
 
         return result
 
