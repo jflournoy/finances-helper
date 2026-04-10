@@ -1156,11 +1156,23 @@ def test_load_payee_cache_v1_saves_migrated(tmp_path):
     assert on_disk["starbucks"]["total"] == 1
 
 
-def test_load_payee_cache_v1_fixture():
-    """The v1 fixture file can be loaded and migrates correctly."""
-    result = load_payee_cache("data/fixtures/payee_cache_v1.json")
+def test_load_payee_cache_v1_fixture(tmp_path):
+    """The v1 fixture file migrates to v2 correctly without corrupting the original."""
+    import shutil
+    src = Path("data/fixtures/payee_cache_v1.json")
+    dst = tmp_path / "payee_cache_v1.json"
+    shutil.copy(src, dst)
+
+    result = load_payee_cache(str(dst))
     assert result["_version"] == 2
     assert result["whole foods"]["total"] == 1
+    assert result["whole foods"]["categories"]["dddddddd-0000-0000-0000-000000000003"]["name"] == "Groceries"
+    assert result["whole foods"]["categories"]["dddddddd-0000-0000-0000-000000000003"]["count"] == 1
+
+    # Original fixture must remain v1 (no _version key)
+    original = json.loads(src.read_text())
+    assert "_version" not in original
+    assert original["whole foods"]["category_id"] == "dddddddd-0000-0000-0000-000000000003"
 
 
 def test_build_cache_multi_category_payee():
