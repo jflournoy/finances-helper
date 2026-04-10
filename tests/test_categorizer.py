@@ -16,6 +16,9 @@ from categorizer import (
     fuzzy_match,
     claude_categorize,
     categorize_transactions,
+    count_categories,
+    compute_confidence,
+    record_categorization,
 )
 
 
@@ -1081,4 +1084,183 @@ def test_main_updates_cache_with_claude_results(monkeypatch, tmp_path):
     assert "newplace" in saved_cache
     assert saved_cache["newplace"]["category_id"] == "c2"
     assert saved_cache["newplace"]["category_name"] == "Dining"
+
+
+# ── count_categories ──────────────────────────────────────────────────────────
+
+def test_count_categories_fixture():
+    """Using ynab_categories.json: Rent + Groceries = 2 (excludes deleted 'Old Category'
+    and categories in deleted group 'Deleted Group')."""
+    fixture = json.loads(Path("data/fixtures/ynab_categories.json").read_text())
+    groups = fixture["data"]["category_groups"]
+    assert count_categories(groups) == 2
+
+
+def test_count_categories_includes_hidden():
+    """Hidden but non-deleted categories are counted."""
+    groups = [
+        {
+            "id": "g1", "name": "G1", "hidden": False, "deleted": False,
+            "categories": [
+                {"id": "c1", "name": "Visible", "hidden": False, "deleted": False},
+                {"id": "c2", "name": "Hidden", "hidden": True, "deleted": False},
+            ]
+        }
+    ]
+    assert count_categories(groups) == 2
+
+
+def test_count_categories_empty():
+    assert count_categories([]) == 0
+
+
+# ── compute_confidence ────────────────────────────────────────────────────────
+
+def test_compute_confidence_matches_formula():
+    """Validate beta.ppf(0.10, c+1, (n-c)+(K-1)) with K=137.
+
+    The issue #25 table values were illustrative. These are the actual
+    computed values from the formula with K=137.
+    """
+    K = 137
+
+    # n=1, c=1: very low (~0.004)
+    entry_1 = {"total": 1, "categories": {"cat1": {"name": "Coffee", "count": 1}}}
+    _, _, conf = compute_confidence(entry_1, K)
+    assert conf < 0.02
+
+    # n=47, c=45: moderate (~0.21, prior mass from K=137 dilutes heavily)
+    entry_47 = {"total": 47, "categories": {
+        "cat1": {"name": "Groceries", "count": 45},
+        "cat2": {"name": "Household", "count": 2},
+    }}
+    _, _, conf = compute_confidence(entry_47, K)
+    assert 0.15 < conf < 0.30
+
+    # Confidence increases monotonically with n (all same category)
+    confs = []
+    for n in [1, 10, 20, 50, 100]:
+        entry = {"total": n, "categories": {"cat1": {"name": "X", "count": n}}}
+        _, _, c = compute_confidence(entry, K)
+        confs.append(c)
+    assert confs == sorted(confs)
+
+
+def test_compute_confidence_single_observation():
+    """n=1, K=137 → very low confidence."""
+    entry = {"total": 1, "categories": {"cat1": {"name": "X", "count": 1}}}
+    _, _, conf = compute_confidence(entry, 137)
+    assert conf < 0.05
+
+
+def test_compute_confidence_even_split():
+    """Two categories with equal counts → returns alphabetically first category_id."""
+    entry = {
+        "total": 10,
+        "categories": {
+            "cat_b": {"name": "B", "count": 5},
+            "cat_a": {"name": "A", "count": 5},
+        }
+    }
+    cat_id, cat_name, _ = compute_confidence(entry, 10)
+    assert cat_id == "cat_a"
+    assert cat_name == "A"
+
+
+def test_compute_confidence_k_equals_1():
+    """K=1 (only one category exists)."""
+    entry = {"total": 5, "categories": {"cat1": {"name": "Only", "count": 5}}}
+    cat_id, cat_name, conf = compute_confidence(entry, 1)
+    assert cat_id == "cat1"
+    assert conf > 0.5
+
+
+def test_compute_confidence_raises_on_zero_total():
+    entry = {"total": 0, "categories": {}}
+    with pytest.raises(ValueError, match="total=0"):
+        compute_confidence(entry, 10)
+
+
+def test_compute_confidence_raises_on_invalid_k():
+    entry = {"total": 1, "categories": {"c": {"name": "X", "count": 1}}}
+    with pytest.raises(ValueError, match="K must be >= 1"):
+        compute_confidence(entry, 0)
+    with pytest.raises(ValueError, match="K must be >= 1"):
+        compute_confidence(entry, -1)
+
+
+# ── record_categorization ────────────────────────────────────────────────────
+
+def test_record_categorization_creates_entry():
+    cache = {}
+    record_categorization(cache, "Whole Foods", "cat1", "Groceries", "history")
+    assert "whole foods" in cache
+    entry = cache["whole foods"]
+    assert entry["total"] == 1
+    assert entry["categories"]["cat1"]["name"] == "Groceries"
+    assert entry["categories"]["cat1"]["count"] == 1
+
+
+def test_record_categorization_accumulates():
+    cache = {}
+    record_categorization(cache, "Whole Foods", "cat1", "Groceries", "history")
+    record_categorization(cache, "Whole Foods", "cat1", "Groceries", "history")
+    entry = cache["whole foods"]
+    assert entry["total"] == 2
+    assert entry["categories"]["cat1"]["count"] == 2
+
+
+def test_record_categorization_multiple_categories():
+    cache = {}
+    record_categorization(cache, "Whole Foods", "cat1", "Groceries", "history")
+    record_categorization(cache, "Whole Foods", "cat2", "Household", "history")
+    entry = cache["whole foods"]
+    assert entry["total"] == 2
+    assert entry["categories"]["cat1"]["count"] == 1
+    assert entry["categories"]["cat2"]["count"] == 1
+
+
+def test_record_categorization_prior_strength():
+    cache = {}
+    record_categorization(cache, "Starbucks", "cat1", "Coffee", "claude", prior_strength=15)
+    entry = cache["starbucks"]
+    assert entry["total"] == 15
+    assert entry["categories"]["cat1"]["count"] == 15
+
+
+# ── CategoryResult.prior_strength ─────────────────────────────────────────────
+
+def test_category_result_prior_strength_default():
+    result = CategoryResult(
+        transaction_id="t1", category_id="c1", category_name="X",
+        confidence=0.9, rationale="r", tier="history"
+    )
+    assert result.prior_strength is None
+
+
+def test_category_result_prior_strength_set():
+    result = CategoryResult(
+        transaction_id="t1", category_id="c1", category_name="X",
+        confidence=0.9, rationale="r", tier="claude", prior_strength=10
+    )
+    assert result.prior_strength == 10
+
+
+# ── Integration: record then compute ─────────────────────────────────────────
+
+def test_record_then_compute_confidence():
+    """Record 20 categorizations (18 Groceries, 2 Household), compute confidence.
+
+    With K=5 (small category space), 18/20 dominant gives high confidence.
+    """
+    cache = {}
+    for _ in range(18):
+        record_categorization(cache, "Whole Foods", "cat1", "Groceries", "history")
+    for _ in range(2):
+        record_categorization(cache, "Whole Foods", "cat2", "Household", "history")
+
+    cat_id, cat_name, conf = compute_confidence(cache["whole foods"], 5)
+    assert cat_id == "cat1"
+    assert cat_name == "Groceries"
+    assert conf > 0.5
 

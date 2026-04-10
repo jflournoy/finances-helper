@@ -23,6 +23,7 @@ class CategoryResult:
     confidence: float      # 0.0 to 1.0
     rationale: str         # Brief explanation
     tier: str              # "history", "fuzzy", or "claude"
+    prior_strength: int | None = None  # Claude's confidence weight (1-20), only set for tier="claude"
 
 
 FUZZY_THRESHOLD = 70   # thefuzz token_sort_ratio score (0-100), lowered from 85
@@ -72,6 +73,113 @@ def normalize_payee(name: str) -> str:
         raise ValueError("Payee name cannot be empty after normalization")
 
     return name
+
+
+DEFAULT_CONFIDENCE_THRESHOLD = 0.5
+
+
+def count_categories(category_groups: list[dict]) -> int:
+    """Count non-deleted categories across non-deleted groups.
+
+    Hidden categories ARE counted (they can still have transactions).
+    Uses the same group format returned by YNABClient.get_categories().
+
+    Args:
+        category_groups: List of YNAB category group dicts.
+
+    Returns:
+        Number of non-deleted categories in non-deleted groups.
+    """
+    count = 0
+    for group in category_groups:
+        if group.get("deleted"):
+            continue
+        for cat in group.get("categories", []):
+            if not cat.get("deleted"):
+                count += 1
+    return count
+
+
+def compute_confidence(cache_entry: dict, K: int) -> tuple[str, str, float]:
+    """Compute Bayesian confidence for a frequency cache entry.
+
+    Uses the Beta distribution lower bound:
+        beta.ppf(0.10, c_dominant + 1, (n - c_dominant) + (K - 1))
+
+    Args:
+        cache_entry: Frequency cache entry with 'total' and 'categories' keys.
+        K: Number of YNAB categories (from count_categories).
+
+    Returns:
+        Tuple of (dominant_category_id, dominant_category_name, confidence).
+
+    Raises:
+        ValueError: If total == 0 or K < 1.
+    """
+    from scipy.stats import beta
+
+    total = cache_entry["total"]
+    if total == 0:
+        raise ValueError("Cannot compute confidence for cache entry with total=0")
+    if K < 1:
+        raise ValueError(f"K must be >= 1, got {K}")
+
+    categories = cache_entry["categories"]
+    max_count = -1
+    dominant_id = None
+    dominant_name = None
+
+    for cat_id, info in sorted(categories.items()):
+        if info["count"] > max_count:
+            max_count = info["count"]
+            dominant_id = cat_id
+            dominant_name = info["name"]
+
+    c = max_count
+    n = total
+    b = (n - c) + (K - 1)
+    if b == 0:
+        # Degenerate case: K=1 and all observations in one category.
+        # Beta(a, 0) is undefined, but confidence is trivially 1.0.
+        confidence = 1.0
+    else:
+        confidence = beta.ppf(0.10, c + 1, b)
+
+    return (dominant_id, dominant_name, confidence)
+
+
+def record_categorization(
+    cache: dict,
+    payee_name: str,
+    category_id: str,
+    category_name: str,
+    source: str,
+    prior_strength: int = 1,
+) -> None:
+    """Record a categorization in the frequency cache.
+
+    Creates or updates the frequency entry for the normalized payee name.
+    Adds prior_strength counts to the category (not always 1).
+
+    Args:
+        cache: The payee frequency cache (modified in place).
+        payee_name: Raw payee name (will be normalized).
+        category_id: YNAB category UUID.
+        category_name: Human-readable category name.
+        source: Origin tier ("history", "fuzzy", "claude").
+        prior_strength: Number of pseudo-observations to add (default 1).
+    """
+    normalized = normalize_payee(payee_name)
+
+    if normalized not in cache or "alias_of" in cache.get(normalized, {}):
+        cache[normalized] = {"total": 0, "categories": {}}
+
+    entry = cache[normalized]
+    if category_id not in entry["categories"]:
+        entry["categories"][category_id] = {"name": category_name, "count": 0}
+
+    entry["categories"][category_id]["count"] += prior_strength
+    entry["total"] += prior_strength
 
 
 def load_payee_cache(path: str = "data/cache/payee_lookup.json") -> dict:

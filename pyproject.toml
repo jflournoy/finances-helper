@@ -8,6 +8,7 @@ dependencies = [
     "python-dotenv>=1.0",
     "anthropic>=0.50",
     "thefuzz>=0.22",
+    "scipy>=1.11",
 ]
 
 [project.optional-dependencies]
