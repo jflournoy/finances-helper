@@ -274,10 +274,12 @@ Only use category IDs from the list above. Return ONLY the JSON array, no other 
     user_message = f"Categorize these transactions:\n{txn_list}"
 
     # Call Claude Haiku
+    # Each response item is ~80-100 tokens; scale max_tokens with batch size
+    max_tokens = max(1024, len(transactions) * 100)
     client = anthropic.Anthropic(api_key=api_key)
     response = client.messages.create(
         model="claude-haiku-4-5-20251001",
-        max_tokens=1024,
+        max_tokens=max_tokens,
         system=system_prompt,
         messages=[{"role": "user", "content": user_message}]
     )

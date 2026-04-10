@@ -406,6 +406,48 @@ def test_claude_categorize_uses_haiku_model():
     assert call_kwargs["model"] == "claude-haiku-4-5-20251001"
 
 
+def test_claude_categorize_max_tokens_scales_with_batch_size():
+    transactions = [
+        {"id": f"txn{i}", "payee_name": f"Store{i}", "amount": -1000, "date": "2026-03-20"}
+        for i in range(20)
+    ]
+    categories = [{"id": "g1", "name": "Online", "categories": [{"id": "c1", "name": "Shopping"}]}]
+
+    mock_response = Mock()
+    mock_response.content = [Mock(text=json.dumps([
+        {"payee_name": f"Store{i}", "category_id": "c1", "category_name": "Shopping", "confidence": 0.8, "rationale": "r"}
+        for i in range(20)
+    ]))]
+
+    with patch("categorizer.anthropic.Anthropic") as mock_anthropic_class:
+        mock_client = Mock()
+        mock_anthropic_class.return_value = mock_client
+        mock_client.messages.create.return_value = mock_response
+        claude_categorize(transactions, categories, "test-key")
+
+    call_kwargs = mock_client.messages.create.call_args[1]
+    # 20 transactions * 100 = 2000, which is > 1024 minimum
+    assert call_kwargs["max_tokens"] == 2000
+
+
+def test_claude_categorize_max_tokens_has_minimum():
+    transactions = [{"id": "txn1", "payee_name": "Amazon", "amount": -1000, "date": "2026-03-20"}]
+    categories = [{"id": "g1", "name": "Online", "categories": [{"id": "c1", "name": "Shopping"}]}]
+
+    mock_response = Mock()
+    mock_response.content = [Mock(text='[{"payee_name": "Amazon", "category_id": "c1", "category_name": "Shopping", "confidence": 0.8, "rationale": "r"}]')]
+
+    with patch("categorizer.anthropic.Anthropic") as mock_anthropic_class:
+        mock_client = Mock()
+        mock_anthropic_class.return_value = mock_client
+        mock_client.messages.create.return_value = mock_response
+        claude_categorize(transactions, categories, "test-key")
+
+    call_kwargs = mock_client.messages.create.call_args[1]
+    # 1 transaction * 100 = 100, but minimum is 1024
+    assert call_kwargs["max_tokens"] == 1024
+
+
 def test_claude_categorize_with_fixture_response():
     fixture = json.loads(Path("data/fixtures/claude_categorize_response.json").read_text())
     categories = json.loads(Path("data/fixtures/ynab_categories.json").read_text())["data"]["category_groups"]
@@ -670,4 +712,181 @@ def test_build_cache_from_transactions_date_missing_in_existing_cache():
     cache = build_cache_from_transactions(transactions)
     # First txn has no date, second has date. The elif branch (line 151) should trigger and keep the second.
     assert cache["whole foods"]["category_id"] == "cat2"
+
+
+# CLI main() tests
+
+from categorizer import main
+
+
+def test_main_raises_when_ynab_token_missing(monkeypatch, tmp_path):
+    monkeypatch.delenv("YNAB_API_TOKEN", raising=False)
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    monkeypatch.chdir(tmp_path)
+
+    with patch("dotenv.load_dotenv"):
+        with patch("sys.argv", ["categorizer.py", "--days", "7"]):
+            with pytest.raises(ValueError, match="YNAB_API_TOKEN"):
+                main()
+
+
+def test_main_raises_when_anthropic_key_missing(monkeypatch, tmp_path):
+    monkeypatch.setenv("YNAB_API_TOKEN", "token")
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    monkeypatch.chdir(tmp_path)
+
+    with patch("dotenv.load_dotenv"):
+        with patch("sys.argv", ["categorizer.py", "--days", "7"]):
+            with pytest.raises(ValueError, match="ANTHROPIC_API_KEY"):
+                main()
+
+
+def test_main_raises_when_config_missing(monkeypatch, tmp_path):
+    monkeypatch.setenv("YNAB_API_TOKEN", "token")
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "key")
+    monkeypatch.chdir(tmp_path)
+
+    with patch("dotenv.load_dotenv"):
+        with patch("sys.argv", ["categorizer.py", "--days", "7"]):
+            with pytest.raises(ValueError, match="config.json not found"):
+                main()
+
+
+def test_main_raises_when_budget_id_missing(monkeypatch, tmp_path):
+    monkeypatch.setenv("YNAB_API_TOKEN", "token")
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "key")
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "config.json").write_text(json.dumps({}))
+
+    with patch("dotenv.load_dotenv"):
+        with patch("sys.argv", ["categorizer.py", "--days", "7"]):
+            with pytest.raises(ValueError, match="budget_id not found"):
+                main()
+
+
+def test_main_no_uncategorized_exits_early(monkeypatch, tmp_path, capsys):
+    monkeypatch.setenv("YNAB_API_TOKEN", "token")
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "key")
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "config.json").write_text(json.dumps({"budget_id": "b1"}))
+
+    mock_client = Mock()
+    mock_client.get_transactions.return_value = ([
+        {"id": "t1", "payee_name": "X", "category_id": "c1", "amount": -1000, "date": "2026-03-01"}
+    ], {})
+    mock_client.get_categories.return_value = []
+
+    with patch("dotenv.load_dotenv"):
+        with patch("sys.argv", ["categorizer.py", "--days", "7"]):
+            with patch("ynab_client.YNABClient", return_value=mock_client):
+                main()
+
+    assert "No uncategorized transactions found" in capsys.readouterr().out
+
+
+def test_main_bootstraps_empty_cache(monkeypatch, tmp_path, capsys):
+    monkeypatch.setenv("YNAB_API_TOKEN", "token")
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "key")
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "config.json").write_text(json.dumps({"budget_id": "b1"}))
+
+    mock_ynab = Mock()
+    mock_ynab.get_transactions.side_effect = [
+        ([{"id": "t1", "payee_name": "NewStore", "category_id": None, "amount": -5000, "date": "2026-03-01"}], {}),
+        ([{"id": "t2", "payee_name": "OldStore", "category_id": "c1", "category_name": "Groceries", "amount": -3000, "date": "2026-02-01"}], {}),
+    ]
+    mock_ynab.get_categories.return_value = [
+        {"id": "g1", "name": "Shopping", "categories": [{"id": "c1", "name": "Groceries"}]}
+    ]
+
+    mock_claude_result = CategoryResult(
+        transaction_id="t1", category_id="c1", category_name="Groceries",
+        confidence=0.9, rationale="test", tier="claude"
+    )
+
+    with patch("dotenv.load_dotenv"):
+        with patch("sys.argv", ["categorizer.py", "--days", "7"]):
+            with patch("ynab_client.YNABClient", return_value=mock_ynab):
+                with patch("categorizer.categorize_transactions", return_value=[mock_claude_result]):
+                    main()
+
+    out = capsys.readouterr().out
+    assert "Cache is empty" in out
+    assert "Proposed categorizations" in out
+    assert "Cache updated" in out
+
+
+def test_main_full_run_with_existing_cache(monkeypatch, tmp_path, capsys):
+    monkeypatch.setenv("YNAB_API_TOKEN", "token")
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "key")
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "config.json").write_text(json.dumps({"budget_id": "b1"}))
+
+    # Pre-populate cache
+    cache_dir = tmp_path / "data" / "cache"
+    cache_dir.mkdir(parents=True)
+    (cache_dir / "payee_lookup.json").write_text(json.dumps({
+        "amazon": {"category_id": "c1", "category_name": "Shopping"}
+    }))
+
+    mock_ynab = Mock()
+    mock_ynab.get_transactions.return_value = ([
+        {"id": "t1", "payee_name": "Amazon", "category_id": None, "amount": -5000, "date": "2026-03-01"}
+    ], {})
+    mock_ynab.get_categories.return_value = [
+        {"id": "g1", "name": "Shopping", "categories": [{"id": "c1", "name": "Shopping"}]}
+    ]
+
+    history_result = CategoryResult(
+        transaction_id="t1", category_id="c1", category_name="Shopping",
+        confidence=1.0, rationale="Exact history match", tier="history"
+    )
+
+    with patch("dotenv.load_dotenv"):
+        with patch("sys.argv", ["categorizer.py", "--days", "7"]):
+            with patch("ynab_client.YNABClient", return_value=mock_ynab):
+                with patch("categorizer.categorize_transactions", return_value=[history_result]):
+                    main()
+
+    out = capsys.readouterr().out
+    assert "Proposed categorizations (1 transactions)" in out
+    assert "[HISTORY]" in out
+    assert "Cache updated with 0 new payees" in out
+
+
+def test_main_updates_cache_with_claude_results(monkeypatch, tmp_path):
+    monkeypatch.setenv("YNAB_API_TOKEN", "token")
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "key")
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "config.json").write_text(json.dumps({"budget_id": "b1"}))
+
+    cache_dir = tmp_path / "data" / "cache"
+    cache_dir.mkdir(parents=True)
+    (cache_dir / "payee_lookup.json").write_text(json.dumps({}))
+
+    mock_ynab = Mock()
+    mock_ynab.get_transactions.side_effect = [
+        ([{"id": "t1", "payee_name": "NewPlace", "category_id": None, "amount": -5000, "date": "2026-03-01"}], {}),
+        ([{"id": "t2", "payee_name": "OldPlace", "category_id": "c1", "category_name": "Dining", "amount": -3000, "date": "2026-02-01"}], {}),
+    ]
+    mock_ynab.get_categories.return_value = [
+        {"id": "g1", "name": "Food", "categories": [{"id": "c2", "name": "Dining"}]}
+    ]
+
+    claude_result = CategoryResult(
+        transaction_id="t1", category_id="c2", category_name="Dining",
+        confidence=0.85, rationale="restaurant", tier="claude"
+    )
+
+    with patch("dotenv.load_dotenv"):
+        with patch("sys.argv", ["categorizer.py", "--days", "7"]):
+            with patch("ynab_client.YNABClient", return_value=mock_ynab):
+                with patch("categorizer.categorize_transactions", return_value=[claude_result]):
+                    main()
+
+    # Verify cache was updated with the claude result
+    saved_cache = json.loads((cache_dir / "payee_lookup.json").read_text())
+    assert "newplace" in saved_cache
+    assert saved_cache["newplace"]["category_id"] == "c2"
+    assert saved_cache["newplace"]["category_name"] == "Dining"
 
