@@ -10,6 +10,7 @@ from categorizer import (
     load_payee_cache,
     save_payee_cache,
     build_cache_from_transactions,
+    history_lookup,
 )
 
 
@@ -173,3 +174,56 @@ def test_build_cache_from_transactions_uses_most_recent():
 def test_build_cache_from_transactions_empty_list():
     cache = build_cache_from_transactions([])
     assert cache == {}
+
+
+# Tier 1: history_lookup
+
+def test_history_lookup_returns_result_on_hit():
+    cache = {"whole foods": {"category_id": "cat1", "category_name": "Groceries"}}
+    result = history_lookup("Whole Foods", cache)
+    assert result is not None
+    assert result.category_id == "cat1"
+    assert result.category_name == "Groceries"
+
+
+def test_history_lookup_returns_none_on_miss():
+    cache = {"whole foods": {"category_id": "cat1", "category_name": "Groceries"}}
+    result = history_lookup("Amazon", cache)
+    assert result is None
+
+
+def test_history_lookup_returns_none_on_empty_cache():
+    result = history_lookup("Whole Foods", {})
+    assert result is None
+
+
+def test_history_lookup_confidence_is_1_0():
+    cache = {"whole foods": {"category_id": "cat1", "category_name": "Groceries"}}
+    result = history_lookup("Whole Foods", cache)
+    assert result.confidence == 1.0
+
+
+def test_history_lookup_tier_is_history():
+    cache = {"whole foods": {"category_id": "cat1", "category_name": "Groceries"}}
+    result = history_lookup("Whole Foods", cache)
+    assert result.tier == "history"
+
+
+def test_history_lookup_with_fixture_cache_hit():
+    cache = load_payee_cache("data/fixtures/payee_cache.json")
+    result = history_lookup("Whole Foods", cache)
+    assert result is not None
+    assert result.category_id == "dddddddd-0000-0000-0000-000000000003"
+
+
+def test_history_lookup_with_fixture_cache_miss():
+    cache = load_payee_cache("data/fixtures/payee_cache.json")
+    result = history_lookup("UnknownPayee", cache)
+    assert result is None
+
+
+def test_history_lookup_normalizes_before_lookup():
+    cache = {"whole foods": {"category_id": "cat1", "category_name": "Groceries"}}
+    result = history_lookup("WHOLE FOODS #1234", cache)
+    assert result is not None
+    assert result.category_id == "cat1"

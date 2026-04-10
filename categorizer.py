@@ -157,3 +157,28 @@ def build_cache_from_transactions(transactions: list[dict]) -> dict:
         del cache[key]["date"]
 
     return cache
+
+
+def history_lookup(payee_name: str, cache: dict) -> CategoryResult | None:
+    """Look up a payee in the cache using exact match on normalized name.
+
+    Args:
+        payee_name: Raw payee name to look up
+        cache: Cache dict mapping normalized payee names to category info
+
+    Returns:
+        CategoryResult with confidence=1.0 if found, None otherwise.
+    """
+    normalized = normalize_payee(payee_name)
+    if normalized not in cache:
+        return None
+
+    entry = cache[normalized]
+    return CategoryResult(
+        transaction_id="",
+        category_id=entry["category_id"],
+        category_name=entry["category_name"],
+        confidence=1.0,
+        rationale="Exact history match",
+        tier="history",
+    )
