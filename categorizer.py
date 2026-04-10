@@ -738,6 +738,9 @@ def main():
     transactions, _ = client.get_transactions(budget_id, since_date=since_date)
     categories = client.get_categories(budget_id)
 
+    # Compute K for Bayesian confidence
+    K = count_categories(categories)
+
     # Filter to uncategorized transactions
     uncategorized = [t for t in transactions if t.get("category_id") is None]
 
@@ -757,7 +760,7 @@ def main():
             print(f"Cache built with {payee_count} payees")
 
     # Categorize
-    results = categorize_transactions(uncategorized, cache, categories, anthropic_key)
+    results = categorize_transactions(uncategorized, cache, categories, anthropic_key, K=K)
 
     # Print changeset
     print(f"\nProposed categorizations ({len(results)} transactions):")
@@ -766,17 +769,24 @@ def main():
         tier_label = result.tier.upper()
         conf = f"{result.confidence:.2f}"
         reason = f" ({result.rationale})" if result.tier == "claude" else ""
-        print(f"[{tier_label}] {result.transaction_id} → {result.category_name} (confidence: {conf}){reason}")
+        print(f"[{tier_label}] {result.transaction_id} -> {result.category_name} (confidence: {conf}){reason}")
 
     # Update cache with new payees from Claude
     for result in results:
         if result.tier == "claude":
             txn = next((t for t in uncategorized if t["id"] == result.transaction_id), None)
             if txn:
+                import_names = []
+                for field in ("import_payee_name", "import_payee_name_original"):
+                    val = txn.get(field)
+                    if val:
+                        import_names.append(val)
                 record_categorization(
                     cache, txn["payee_name"],
                     result.category_id, result.category_name,
                     source="claude",
+                    prior_strength=result.prior_strength or 1,
+                    import_names=import_names or None,
                 )
 
     save_payee_cache(cache)
