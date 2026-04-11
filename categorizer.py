@@ -635,11 +635,25 @@ Only use category IDs from the list above. Return ONLY the JSON array, no other 
     )
 
     # Parse response
+    if not response.content:
+        raise ValueError(
+            f"Claude returned empty content. stop_reason={response.stop_reason}, "
+            f"usage={response.usage}"
+        )
     response_text = response.content[0].text
+    if not response_text or not response_text.strip():
+        raise ValueError(
+            f"Claude returned empty text. stop_reason={response.stop_reason}, "
+            f"usage={response.usage}, content_type={response.content[0].type}"
+        )
     try:
         data = json.loads(response_text)
     except json.JSONDecodeError as e:
-        raise ValueError(f"Claude returned unparseable JSON: {e}")
+        raise ValueError(
+            f"Claude returned unparseable JSON: {e}\n"
+            f"stop_reason={response.stop_reason}, "
+            f"Response text (first 500 chars): {response_text[:500]}"
+        )
 
     if not isinstance(data, list):
         raise ValueError("Claude response is not a JSON array")
