@@ -814,6 +814,7 @@ def test_categorize_transactions_full_pipeline_with_fixtures():
 
 def test_categorize_transactions_splits_large_batch():
     # Create 60 transactions, all need Claude (empty cache)
+    # With CLAUDE_BATCH_SIZE=25, expect 3 batches: 25+25+10
     cache = {}
     transactions = [
         {"id": f"txn{i}", "payee_name": f"Store{i}", "amount": -5000, "date": "2026-03-01"}
@@ -821,48 +822,33 @@ def test_categorize_transactions_splits_large_batch():
     ]
     categories = [{"id": "g1", "name": "Shopping", "categories": [{"id": "c1", "name": "Retail"}]}]
 
-    # Mock response for first batch (50 items)
-    first_batch_response = json.dumps([
-        {
-            "payee_name": f"Store{i}",
-            "category_id": "c1",
-            "category_name": "Retail",
-            "confidence": 0.7,
-            "rationale": "r",
-            "prior_strength": 10,
-        }
-        for i in range(50)
-    ])
-
-    # Mock response for second batch (10 items)
-    second_batch_response = json.dumps([
-        {
-            "payee_name": f"Store{i}",
-            "category_id": "c1",
-            "category_name": "Retail",
-            "confidence": 0.7,
-            "rationale": "r",
-            "prior_strength": 10,
-        }
-        for i in range(50, 60)
-    ])
+    def make_batch_response(start, end):
+        return json.dumps([
+            {
+                "payee_name": f"Store{i}",
+                "category_id": "c1",
+                "category_name": "Retail",
+                "confidence": 0.7,
+                "rationale": "r",
+                "prior_strength": 10,
+            }
+            for i in range(start, end)
+        ])
 
     with patch("categorizer.anthropic.Anthropic") as mock_anthropic_class:
         mock_client = Mock()
         mock_anthropic_class.return_value = mock_client
 
-        # Return different responses for each call
         mock_client.messages.create.side_effect = [
-            Mock(content=[Mock(text=first_batch_response)]),
-            Mock(content=[Mock(text=second_batch_response)]),
+            Mock(content=[Mock(text=make_batch_response(0, 25))]),
+            Mock(content=[Mock(text=make_batch_response(25, 50))]),
+            Mock(content=[Mock(text=make_batch_response(50, 60))]),
         ]
 
         results = categorize_transactions(transactions, cache, categories, "test-key")
 
-    # Should have made 2 API calls for 60 transactions
-    assert mock_client.messages.create.call_count == 2
+    assert mock_client.messages.create.call_count == 3
     assert len(results) == 60
-    # Results should be in original order
     assert results[0].transaction_id == "txn0"
     assert results[59].transaction_id == "txn59"
 

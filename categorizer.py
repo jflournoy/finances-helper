@@ -27,7 +27,7 @@ class CategoryResult:
 
 
 FUZZY_THRESHOLD = 70   # thefuzz token_sort_ratio score (0-100), lowered from 85
-CLAUDE_BATCH_SIZE = 50
+CLAUDE_BATCH_SIZE = 25
 
 
 def normalize_payee(name: str) -> str:
