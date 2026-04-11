@@ -22,6 +22,9 @@ from categorizer import (
     _dominant_category,
     _resolve_alias,
     normalize_import_payee,
+    count_categories_from_transactions,
+    compute_confidence_threshold,
+    MIN_OBSERVATIONS,
 )
 
 
@@ -1021,9 +1024,11 @@ def test_main_bootstraps_empty_cache(monkeypatch, tmp_path, capsys):
     (tmp_path / "config.json").write_text(json.dumps({"budget_id": "b1"}))
 
     mock_ynab = Mock()
+    k_txns = [{"id": "t2", "payee_name": "OldStore", "category_id": "c1", "category_name": "Groceries", "amount": -3000, "date": "2026-02-01"}]
     mock_ynab.get_transactions.side_effect = [
         ([{"id": "t1", "payee_name": "NewStore", "category_id": None, "amount": -5000, "date": "2026-03-01"}], {}),
-        ([{"id": "t2", "payee_name": "OldStore", "category_id": "c1", "category_name": "Groceries", "amount": -3000, "date": "2026-02-01"}], {}),
+        (k_txns, {}),
+        (k_txns, {}),
     ]
     mock_ynab.get_categories.return_value = [
         {"id": "g1", "name": "Shopping", "categories": [{"id": "c1", "name": "Groceries"}]}
@@ -1094,10 +1099,12 @@ def test_main_updates_cache_with_claude_results(monkeypatch, tmp_path):
     cache_dir.mkdir(parents=True)
     (cache_dir / "payee_lookup.json").write_text(json.dumps({}))
 
+    k_txns = [{"id": "t2", "payee_name": "OldPlace", "category_id": "c1", "category_name": "Dining", "amount": -3000, "date": "2026-02-01"}]
     mock_ynab = Mock()
     mock_ynab.get_transactions.side_effect = [
         ([{"id": "t1", "payee_name": "NewPlace", "category_id": None, "amount": -5000, "date": "2026-03-01"}], {}),
-        ([{"id": "t2", "payee_name": "OldPlace", "category_id": "c1", "category_name": "Dining", "amount": -3000, "date": "2026-02-01"}], {}),
+        (k_txns, {}),
+        (k_txns, {}),
     ]
     mock_ynab.get_categories.return_value = [
         {"id": "g1", "name": "Food", "categories": [{"id": "c2", "name": "Dining"}]}
@@ -1135,15 +1142,16 @@ def test_main_triggers_rebuild_on_v1_migration(monkeypatch, tmp_path, capsys):
     (cache_dir / "payee_lookup.json").write_text(json.dumps(v1_cache))
 
     mock_ynab = Mock()
-    # First call: get recent transactions (one uncategorized)
-    # Second call: get ALL transactions for rebuild
+    rebuild_txns = [
+        {"id": "t2", "payee_name": "Starbucks", "category_id": "c1", "category_name": "Coffee", "amount": -500, "date": "2026-01-01"},
+        {"id": "t3", "payee_name": "Starbucks", "category_id": "c1", "category_name": "Coffee", "amount": -500, "date": "2026-01-02"},
+        {"id": "t4", "payee_name": "Starbucks", "category_id": "c1", "category_name": "Coffee", "amount": -500, "date": "2026-01-03"},
+    ]
+    # Calls: (1) recent txns, (2) 18-month K txns, (3) all txns for rebuild
     mock_ynab.get_transactions.side_effect = [
         ([{"id": "t1", "payee_name": "NewStore", "category_id": None, "amount": -5000, "date": "2026-03-01"}], {}),
-        ([
-            {"id": "t2", "payee_name": "Starbucks", "category_id": "c1", "category_name": "Coffee", "amount": -500, "date": "2026-01-01"},
-            {"id": "t3", "payee_name": "Starbucks", "category_id": "c1", "category_name": "Coffee", "amount": -500, "date": "2026-01-02"},
-            {"id": "t4", "payee_name": "Starbucks", "category_id": "c1", "category_name": "Coffee", "amount": -500, "date": "2026-01-03"},
-        ], {}),
+        (rebuild_txns, {}),
+        (rebuild_txns, {}),
     ]
     mock_ynab.get_categories.return_value = [
         {"id": "g1", "name": "Food", "deleted": False, "hidden": False,
@@ -1286,6 +1294,85 @@ def test_count_categories_includes_hidden():
 
 def test_count_categories_empty():
     assert count_categories([]) == 0
+
+
+# ── count_categories_from_transactions ────────────────────────────────────────
+
+def test_count_categories_from_transactions_basic():
+    """Counts unique category_ids from transactions."""
+    txns = [
+        {"category_id": "c1", "category_name": "Groceries", "date": "2026-01-01"},
+        {"category_id": "c1", "category_name": "Groceries", "date": "2026-01-02"},
+        {"category_id": "c2", "category_name": "Dining", "date": "2026-01-03"},
+    ]
+    assert count_categories_from_transactions(txns) == 2
+
+
+def test_count_categories_from_transactions_skips_uncategorized():
+    txns = [
+        {"category_id": "c1", "category_name": "Groceries", "date": "2026-01-01"},
+        {"category_id": None, "category_name": None, "date": "2026-01-01"},
+        {"date": "2026-01-01"},
+    ]
+    assert count_categories_from_transactions(txns) == 1
+
+
+def test_count_categories_from_transactions_empty():
+    assert count_categories_from_transactions([]) == 0
+
+
+# ── compute_confidence_threshold ──────────────────────────────────────────────
+
+def test_compute_confidence_threshold_basic():
+    """Threshold derived from min_observations and K."""
+    from scipy.stats import beta
+    K = 72
+    thresh = compute_confidence_threshold(K)
+    expected = beta.ppf(0.10, MIN_OBSERVATIONS + 1, K - 1)
+    assert thresh == pytest.approx(expected)
+
+
+def test_compute_confidence_threshold_varies_with_k():
+    """Larger K produces lower threshold (harder to be confident)."""
+    t_small = compute_confidence_threshold(20)
+    t_large = compute_confidence_threshold(142)
+    assert t_small > t_large
+
+
+def test_compute_confidence_threshold_custom_min_obs():
+    """Can override min_observations."""
+    t3 = compute_confidence_threshold(72, min_observations=3)
+    t5 = compute_confidence_threshold(72, min_observations=5)
+    assert t5 > t3
+
+
+def test_compute_confidence_threshold_k_equals_1():
+    """K=1 produces threshold of 1.0 (degenerate case)."""
+    assert compute_confidence_threshold(1) == 1.0
+
+
+# ── Integration: threshold with real cache ────────────────────────────────────
+
+def test_threshold_resolves_consistent_payee():
+    """A payee seen 3+ times consistently should pass the derived threshold."""
+    K = 72
+    thresh = compute_confidence_threshold(K)
+    cache = {"_version": 2}
+    for _ in range(3):
+        record_categorization(cache, "Netflix", "c1", "Streaming", "history")
+    result = history_lookup("Netflix", cache, K=K, confidence_threshold=thresh)
+    assert result is not None
+    assert result.category_id == "c1"
+
+
+def test_threshold_rejects_single_observation():
+    """A payee seen once should NOT pass the derived threshold."""
+    K = 72
+    thresh = compute_confidence_threshold(K)
+    cache = {"_version": 2}
+    record_categorization(cache, "NewPlace", "c1", "Dining", "history")
+    result = history_lookup("NewPlace", cache, K=K, confidence_threshold=thresh)
+    assert result is None
 
 
 # ── compute_confidence ────────────────────────────────────────────────────────

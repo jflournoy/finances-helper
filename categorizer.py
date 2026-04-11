@@ -100,7 +100,46 @@ def normalize_import_payee(name: str) -> str:
     return name
 
 
-DEFAULT_CONFIDENCE_THRESHOLD = 0.5
+MIN_OBSERVATIONS = 3  # Trust cache after this many consistent categorizations
+DEFAULT_CONFIDENCE_THRESHOLD = 0.02  # Fallback; main() computes dynamically from K
+
+
+def count_categories_from_transactions(transactions: list[dict]) -> int:
+    """Count unique categories actually used in a set of transactions.
+
+    Use this with a time-windowed transaction list (e.g. last 18 months)
+    to get K that reflects the current decision space rather than all
+    categories that ever existed.
+
+    Args:
+        transactions: List of YNAB transaction dicts.
+
+    Returns:
+        Number of unique category_ids found.
+    """
+    return len({t["category_id"] for t in transactions if t.get("category_id")})
+
+
+def compute_confidence_threshold(K: int, min_observations: int = MIN_OBSERVATIONS) -> float:
+    """Derive a confidence threshold from K and a minimum observation count.
+
+    Computes the Bayesian confidence a payee would have if it were seen
+    min_observations times, all in the same category. This makes the
+    threshold adapt to the user's category count — more categories means
+    a lower threshold (since confidence grows more slowly).
+
+    Args:
+        K: Number of categories (from count_categories or count_categories_from_transactions).
+        min_observations: Minimum consistent observations to trust (default MIN_OBSERVATIONS).
+
+    Returns:
+        Confidence threshold as a float.
+    """
+    from scipy.stats import beta
+    b = K - 1
+    if b == 0:
+        return 1.0
+    return beta.ppf(0.10, min_observations + 1, b)
 
 
 def count_categories(category_groups: list[dict]) -> int:
@@ -743,8 +782,14 @@ def main():
     transactions, _ = client.get_transactions(budget_id, since_date=since_date)
     categories = client.get_categories(budget_id)
 
-    # Compute K for Bayesian confidence
-    K = count_categories(categories)
+    # Compute K from categories used in the last 18 months
+    k_since = (datetime.now() - timedelta(days=548)).strftime("%Y-%m-%d")
+    k_txns, _ = client.get_transactions(budget_id, since_date=k_since)
+    K = count_categories_from_transactions(k_txns)
+    if K < 2:
+        K = count_categories(categories)
+    confidence_threshold = compute_confidence_threshold(K)
+    print(f"K={K} categories (last 18mo), confidence threshold={confidence_threshold:.4f} (min {MIN_OBSERVATIONS} obs)")
 
     # Filter to uncategorized transactions
     uncategorized = [t for t in transactions if t.get("category_id") is None]
@@ -772,7 +817,7 @@ def main():
         print(f"Cache rebuilt with {payee_count} payees")
 
     # Categorize
-    results = categorize_transactions(uncategorized, cache, categories, anthropic_key, K=K)
+    results = categorize_transactions(uncategorized, cache, categories, anthropic_key, K=K, confidence_threshold=confidence_threshold)
 
     # Print changeset
     print(f"\nProposed categorizations ({len(results)} transactions):")
