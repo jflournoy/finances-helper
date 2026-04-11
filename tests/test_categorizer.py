@@ -24,6 +24,7 @@ from categorizer import (
     normalize_import_payee,
     count_categories_from_transactions,
     compute_confidence_threshold,
+    filter_categories_by_usage,
     MIN_OBSERVATIONS,
 )
 
@@ -597,8 +598,8 @@ def test_claude_categorize_max_tokens_scales_with_batch_size():
         claude_categorize(transactions, categories, "test-key")
 
     call_kwargs = mock_client.messages.create.call_args[1]
-    # 20 transactions * 100 = 2000, which is > 1024 minimum
-    assert call_kwargs["max_tokens"] == 2000
+    # 20 transactions * 250 = 5000, which is > 2048 minimum
+    assert call_kwargs["max_tokens"] == 5000
 
 
 def test_claude_categorize_max_tokens_has_minimum():
@@ -615,8 +616,8 @@ def test_claude_categorize_max_tokens_has_minimum():
         claude_categorize(transactions, categories, "test-key")
 
     call_kwargs = mock_client.messages.create.call_args[1]
-    # 1 transaction * 100 = 100, but minimum is 1024
-    assert call_kwargs["max_tokens"] == 1024
+    # 1 transaction * 250 = 250, but minimum is 2048
+    assert call_kwargs["max_tokens"] == 2048
 
 
 def test_claude_categorize_with_fixture_response():
@@ -1305,6 +1306,34 @@ def test_count_categories_from_transactions_skips_uncategorized():
 
 def test_count_categories_from_transactions_empty():
     assert count_categories_from_transactions([]) == 0
+
+
+# ── filter_categories_by_usage ────────────────────────────────────────────────
+
+def test_filter_categories_by_usage_basic():
+    groups = [
+        {"id": "g1", "name": "Food", "categories": [
+            {"id": "c1", "name": "Groceries"},
+            {"id": "c2", "name": "Dining"},
+        ]},
+        {"id": "g2", "name": "Bills", "categories": [
+            {"id": "c3", "name": "Electric"},
+        ]},
+    ]
+    txns = [
+        {"category_id": "c1"},
+        {"category_id": "c1"},
+    ]
+    filtered = filter_categories_by_usage(groups, txns)
+    assert len(filtered) == 1
+    assert filtered[0]["name"] == "Food"
+    assert len(filtered[0]["categories"]) == 1
+    assert filtered[0]["categories"][0]["name"] == "Groceries"
+
+
+def test_filter_categories_by_usage_empty_txns():
+    groups = [{"id": "g1", "name": "Food", "categories": [{"id": "c1", "name": "X"}]}]
+    assert filter_categories_by_usage(groups, []) == []
 
 
 # ── compute_confidence_threshold ──────────────────────────────────────────────

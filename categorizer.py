@@ -120,6 +120,28 @@ def count_categories_from_transactions(transactions: list[dict]) -> int:
     return len({t["category_id"] for t in transactions if t.get("category_id")})
 
 
+def filter_categories_by_usage(category_groups: list[dict], transactions: list[dict]) -> list[dict]:
+    """Filter category groups to only include categories seen in the given transactions.
+
+    Returns a new list of category groups with unused categories removed.
+    Groups with no remaining categories are excluded.
+
+    Args:
+        category_groups: Full list of YNAB category group dicts.
+        transactions: Transactions to check for category usage.
+
+    Returns:
+        Filtered list of category groups.
+    """
+    used_ids = {t["category_id"] for t in transactions if t.get("category_id")}
+    filtered = []
+    for group in category_groups:
+        cats = [c for c in group.get("categories", []) if c["id"] in used_ids]
+        if cats:
+            filtered.append({**group, "categories": cats})
+    return filtered
+
+
 def compute_confidence_threshold(K: int, min_observations: int = MIN_OBSERVATIONS) -> float:
     """Derive a confidence threshold from K and a minimum observation count.
 
@@ -624,8 +646,9 @@ Only use category IDs from the list above. Return ONLY the JSON array, no other 
     user_message = f"Categorize these transactions:\n{txn_list}"
 
     # Call Claude Haiku
-    # Each response item is ~80-100 tokens; scale max_tokens with batch size
-    max_tokens = max(1024, len(transactions) * 100)
+    # Each response item is ~150-200 tokens (rationale + prior_strength);
+    # scale max_tokens generously to avoid truncation
+    max_tokens = max(2048, len(transactions) * 250)
     client = anthropic.Anthropic(api_key=api_key)
     response = client.messages.create(
         model="claude-haiku-4-5-20251001",
@@ -646,6 +669,23 @@ Only use category IDs from the list above. Return ONLY the JSON array, no other 
             f"Claude returned empty text. stop_reason={response.stop_reason}, "
             f"usage={response.usage}, content_type={response.content[0].type}"
         )
+
+    if response.stop_reason == "max_tokens":
+        raise ValueError(
+            f"Claude response truncated (max_tokens reached). "
+            f"Batch had {len(transactions)} transactions, max_tokens={max_tokens}. "
+            f"Response text (last 200 chars): ...{response_text[-200:]}"
+        )
+
+    # Strip markdown code fences if present
+    stripped = response_text.strip()
+    if stripped.startswith("```"):
+        first_newline = stripped.index("\n")
+        stripped = stripped[first_newline + 1:]
+        if stripped.endswith("```"):
+            stripped = stripped[:-3]
+        response_text = stripped.strip()
+
     try:
         data = json.loads(response_text)
     except json.JSONDecodeError as e:
@@ -803,6 +843,7 @@ def main():
     if K < 2:
         K = count_categories(categories)
     confidence_threshold = compute_confidence_threshold(K)
+    recent_categories = filter_categories_by_usage(categories, k_txns)
     print(f"K={K} categories (last 18mo), confidence threshold={confidence_threshold:.4f} (min {MIN_OBSERVATIONS} obs)")
 
     # Filter to uncategorized transactions
@@ -831,7 +872,7 @@ def main():
         print(f"Cache rebuilt with {payee_count} payees")
 
     # Categorize
-    results = categorize_transactions(uncategorized, cache, categories, anthropic_key, K=K, confidence_threshold=confidence_threshold)
+    results = categorize_transactions(uncategorized, cache, recent_categories, anthropic_key, K=K, confidence_threshold=confidence_threshold)
 
     # Print changeset
     print(f"\nProposed categorizations ({len(results)} transactions):")
