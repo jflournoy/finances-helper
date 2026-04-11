@@ -610,13 +610,19 @@ def claude_categorize(transactions: list[dict], categories: list[dict], api_key:
         payee = txn.get("payee_name", "Unknown")
         amount = milliunits_to_dollars(txn.get("amount", 0))
         date = txn.get("date", "Unknown")
-        txn_list += f"{i}. Payee: {payee}, Amount: ${amount:.2f}, Date: {date}"
+        account = txn.get("account_name", "Unknown")
+        txn_list += f"{i}. Payee: {payee}, Amount: ${amount:.2f}, Date: {date}, Account: {account}"
         import_name = txn.get("import_payee_name_original")
         if import_name:
             txn_list += f", Bank description: {import_name}"
         txn_list += "\n"
 
     system_prompt = f"""You are a financial transaction categorizer. Given a list of transactions, assign each one to the most appropriate budget category.
+
+Each transaction includes the account it came from. The account name tells you the type of financial instrument:
+- Credit card accounts (e.g., "Alaska Airlines Visa Signature", "Venture X") indicate purchases
+- Checking accounts (e.g., "Classic Checking") indicate debit card purchases, ATM withdrawals, or direct debits
+- The payee name combined with the account type determines the correct category (e.g., a bank name from a checking account is likely an ATM withdrawal → Cash, not a credit card payment)
 
 Available categories:
 {category_text}
