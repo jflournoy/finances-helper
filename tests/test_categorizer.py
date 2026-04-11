@@ -446,24 +446,20 @@ def test_fuzzy_match_transfer_does_not_match_different_transfer():
     assert result is None
 
 
-def test_categorize_transactions_transfer_not_miscategorized():
+def test_categorize_transactions_transfer_skipped():
+    """Transfer : payees are skipped entirely, not sent to any tier."""
     cache = _v2_cache({"transfer": ("water_id", "Water (addup)")})
     transactions = [
         {"id": "txn1", "payee_name": "Transfer : Classic Checking -- 6190", "amount": -5000, "date": "2026-03-01"},
     ]
     categories = [{"id": "g1", "name": "Bills", "categories": [{"id": "c1", "name": "Water"}]}]
 
-    mock_response = Mock()
-    mock_response.content = [Mock(text='[{"payee_name": "Transfer : Classic Checking -- 6190", "category_id": "c1", "category_name": "Water", "confidence": 0.7, "rationale": "r", "prior_strength": 10}]')]
-
     with patch("categorizer.anthropic.Anthropic") as mock_anthropic_class:
-        mock_client = Mock()
-        mock_anthropic_class.return_value = mock_client
-        mock_client.messages.create.return_value = mock_response
-        results = categorize_transactions(transactions, cache, categories, "test-key")
+        results, skipped = categorize_transactions(transactions, cache, categories, "test-key")
 
-    assert len(results) == 1
-    assert results[0].tier == "claude"
+    assert len(results) == 0
+    assert len(skipped) == 1
+    mock_anthropic_class.assert_not_called()
 
 
 # Tier 3: claude_categorize
@@ -683,7 +679,7 @@ def test_categorize_transactions_tier1_hit_no_claude_call():
     categories = []
 
     with patch("categorizer.anthropic.Anthropic") as mock_anthropic_class:
-        results = categorize_transactions(transactions, cache, categories, "test-key")
+        results, _ = categorize_transactions(transactions, cache, categories, "test-key")
 
     assert len(results) == 1
     assert results[0].tier == "history"
@@ -698,7 +694,7 @@ def test_categorize_transactions_tier2_hit_no_claude_call():
     categories = []
 
     with patch("categorizer.anthropic.Anthropic") as mock_anthropic_class:
-        results = categorize_transactions(transactions, cache, categories, "test-key")
+        results, _ = categorize_transactions(transactions, cache, categories, "test-key")
 
     assert len(results) == 1
     assert results[0].tier == "fuzzy"
@@ -717,7 +713,7 @@ def test_categorize_transactions_tier3_called_for_novel_payee():
         mock_client = Mock()
         mock_anthropic_class.return_value = mock_client
         mock_client.messages.create.return_value = mock_response
-        results = categorize_transactions(transactions, cache, categories, "test-key")
+        results, _ = categorize_transactions(transactions, cache, categories, "test-key")
 
     assert len(results) == 1
     assert results[0].tier == "claude"
@@ -740,7 +736,7 @@ def test_categorize_transactions_claude_called_once_for_batch():
         mock_client = Mock()
         mock_anthropic_class.return_value = mock_client
         mock_client.messages.create.return_value = mock_response
-        results = categorize_transactions(transactions, cache, categories, "test-key")
+        results, _ = categorize_transactions(transactions, cache, categories, "test-key")
 
     assert len(results) == 3
     # Claude should be called once with all 3 transactions
@@ -771,7 +767,7 @@ def test_categorize_transactions_mixed_tiers():
         mock_client = Mock()
         mock_anthropic_class.return_value = mock_client
         mock_client.messages.create.return_value = mock_response
-        results = categorize_transactions(transactions, cache, categories, "test-key")
+        results, _ = categorize_transactions(transactions, cache, categories, "test-key")
 
     assert len(results) == 2
     # First result is from tier 1, second from tier 3
@@ -805,7 +801,7 @@ def test_categorize_transactions_full_pipeline_with_fixtures():
         mock_client = Mock()
         mock_anthropic_class.return_value = mock_client
         mock_client.messages.create.return_value = mock_response
-        results = categorize_transactions([novel_txn], cache, categories, "test-key")
+        results, _ = categorize_transactions([novel_txn], cache, categories, "test-key")
 
     assert len(results) == 1
     assert results[0].transaction_id == novel_txn["id"]
@@ -846,7 +842,7 @@ def test_categorize_transactions_splits_large_batch():
             Mock(content=[Mock(text=make_batch_response(50, 60))]),
         ]
 
-        results = categorize_transactions(transactions, cache, categories, "test-key")
+        results, _ = categorize_transactions(transactions, cache, categories, "test-key")
 
     assert mock_client.messages.create.call_count == 3
     assert len(results) == 60
@@ -904,23 +900,24 @@ def test_regression_bug22_transfer_payees_not_miscategorized():
         mock_client = Mock()
         mock_anthropic_class.return_value = mock_client
         mock_client.messages.create.return_value = mock_response
-        results = categorize_transactions(transfer_transactions, cache, categories, "test-key")
+        results, skipped = categorize_transactions(transfer_transactions, cache, categories, "test-key")
 
-    assert len(results) == 3
-    for result in results:
-        assert result.tier == "claude", f"Transaction {result.transaction_id} matched via {result.tier}, expected claude"
-        assert result.category_name != "Water (addup)", f"Transaction {result.transaction_id} incorrectly matched to Water (addup)"
+    # All "Transfer :" payees are now skipped entirely (not sent to Claude)
+    assert len(results) == 0
+    assert len(skipped) == 3
+    mock_anthropic_class.assert_not_called()
 
 
 def test_categorize_transactions_legitimate_transfer_exact_match():
-    """A bare 'Transfer' payee should still match 'transfer' in cache via history lookup."""
+    """A bare 'Transfer' payee (without colon) should still match 'transfer' in cache."""
     cache = _v2_cache({"transfer": ("water_id", "Water (addup)")})
     transactions = [{"id": "txn1", "payee_name": "Transfer", "amount": -5000, "date": "2026-03-01"}]
     categories = []
 
     with patch("categorizer.anthropic.Anthropic") as mock_anthropic_class:
-        results = categorize_transactions(transactions, cache, categories, "test-key")
+        results, _ = categorize_transactions(transactions, cache, categories, "test-key")
 
+    # "Transfer" (no colon) is NOT skipped — only "Transfer :" is
     assert len(results) == 1
     assert results[0].tier == "history"
     assert results[0].category_name == "Water (addup)"
@@ -1029,7 +1026,7 @@ def test_main_bootstraps_empty_cache(monkeypatch, tmp_path, capsys):
     with patch("dotenv.load_dotenv"):
         with patch("sys.argv", ["categorizer.py", "--days", "7"]):
             with patch("ynab_client.YNABClient", return_value=mock_ynab):
-                with patch("categorizer.categorize_transactions", return_value=[mock_claude_result]):
+                with patch("categorizer.categorize_transactions", return_value=([mock_claude_result], [])):
                     main()
 
     out = capsys.readouterr().out
@@ -1067,7 +1064,7 @@ def test_main_full_run_with_existing_cache(monkeypatch, tmp_path, capsys):
     with patch("dotenv.load_dotenv"):
         with patch("sys.argv", ["categorizer.py", "--days", "7"]):
             with patch("ynab_client.YNABClient", return_value=mock_ynab):
-                with patch("categorizer.categorize_transactions", return_value=[history_result]):
+                with patch("categorizer.categorize_transactions", return_value=([history_result], [])):
                     main()
 
     out = capsys.readouterr().out
@@ -1105,7 +1102,7 @@ def test_main_updates_cache_with_claude_results(monkeypatch, tmp_path):
     with patch("dotenv.load_dotenv"):
         with patch("sys.argv", ["categorizer.py", "--days", "7"]):
             with patch("ynab_client.YNABClient", return_value=mock_ynab):
-                with patch("categorizer.categorize_transactions", return_value=[claude_result]):
+                with patch("categorizer.categorize_transactions", return_value=([claude_result], [])):
                     main()
 
     # Verify cache was updated with the claude result (v2 format)
@@ -1153,7 +1150,7 @@ def test_main_triggers_rebuild_on_v1_migration(monkeypatch, tmp_path, capsys):
     with patch("dotenv.load_dotenv"):
         with patch("sys.argv", ["categorizer.py", "--days", "7"]):
             with patch("ynab_client.YNABClient", return_value=mock_ynab):
-                with patch("categorizer.categorize_transactions", return_value=[mock_claude_result]):
+                with patch("categorizer.categorize_transactions", return_value=([mock_claude_result], [])):
                     main()
 
     out = capsys.readouterr().out
@@ -1800,7 +1797,7 @@ def test_orchestrator_passes_import_names_to_lookup():
              "import_payee_name_original": "WF MARKET"}]
 
     with patch("categorizer.anthropic.Anthropic") as mock_cls:
-        results = categorize_transactions(txns, cache, [], "key")
+        results, _ = categorize_transactions(txns, cache, [], "key")
 
     assert len(results) == 1
     assert results[0].tier in ("history", "fuzzy")
@@ -1817,7 +1814,7 @@ def test_orchestrator_records_claude_with_strength():
 
     with patch("categorizer.anthropic.Anthropic") as mock_cls:
         mock_cls.return_value.messages.create.return_value = mock_response
-        results = categorize_transactions(txns, cache, categories, "key")
+        results, _ = categorize_transactions(txns, cache, categories, "key")
 
     assert results[0].prior_strength == 12
 

@@ -754,18 +754,27 @@ def categorize_transactions(
         confidence_threshold: Minimum confidence for tiers 1 and 2.
 
     Returns:
-        List of CategoryResult objects from all three tiers.
+        Tuple of (results, skipped) where results is a list of CategoryResult
+        objects from all three tiers, and skipped is a list of transactions
+        that were skipped (transfers/payments).
 
     Raises:
         ValueError: If any transaction lacks a payee_name.
     """
     results = []
     tier3_pending = []
+    skipped = []
 
     for txn in transactions:
         payee = txn.get("payee_name")
         if not payee:
             raise ValueError(f"Transaction {txn.get('id')} has no payee_name")
+
+        # Skip transfers and payments — these are inter-account movements,
+        # not purchases that need categorization
+        if payee.startswith("Transfer :") or payee.startswith("Payment :"):
+            skipped.append(txn)
+            continue
 
         import_payee = txn.get("import_payee_name")
         import_payee_orig = txn.get("import_payee_name_original")
@@ -798,7 +807,7 @@ def categorize_transactions(
             tier3_results = claude_categorize(batch, categories, api_key)
             results.extend(tier3_results)
 
-    return results
+    return results, skipped
 
 
 def main():
@@ -878,7 +887,10 @@ def main():
         print(f"Cache rebuilt with {payee_count} payees")
 
     # Categorize
-    results = categorize_transactions(uncategorized, cache, recent_categories, anthropic_key, K=K, confidence_threshold=confidence_threshold)
+    results, skipped = categorize_transactions(uncategorized, cache, recent_categories, anthropic_key, K=K, confidence_threshold=confidence_threshold)
+
+    if skipped:
+        print(f"\nSkipped {len(skipped)} transfer/payment transactions")
 
     # Print changeset
     print(f"\nProposed categorizations ({len(results)} transactions):")
