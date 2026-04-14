@@ -11,7 +11,7 @@ from dataclasses import dataclass
 from datetime import date, timedelta
 from decimal import Decimal, InvalidOperation, ROUND_HALF_EVEN
 from pathlib import Path
-from zipfile import ZipFile
+from zipfile import ZipFile, BadZipFile
 
 logger = logging.getLogger(__name__)
 
@@ -89,33 +89,33 @@ def extract_order_history_csv(zip_path: Path) -> str:
         CSV file contents as a string
 
     Raises:
-        ValueError: If the expected CSV path is missing from the zip
+        ValueError: If the zip file is invalid or the expected CSV path is missing
     """
     try:
         with ZipFile(zip_path, "r") as zf:
-            csv_path = "Your Amazon Orders/Order History.csv"
-            if csv_path not in zf.namelist():
-                files = "\n  ".join(zf.namelist())
-                raise ValueError(
-                    f"Expected CSV path '{csv_path}' not found in {zip_path.name}. "
-                    f"Zip contains:\n  {files}"
-                )
+            pass
+    except BadZipFile as e:
+        raise ValueError(f"Invalid zip file: {zip_path}") from e
 
-            csv_bytes = zf.read(csv_path)
+    with ZipFile(zip_path, "r") as zf:
+        csv_path = "Your Amazon Orders/Order History.csv"
+        if csv_path not in zf.namelist():
+            files = "\n  ".join(zf.namelist())
+            raise ValueError(
+                f"Expected CSV path '{csv_path}' not found in {zip_path.name}. "
+                f"Zip contains:\n  {files}"
+            )
 
-            # Try UTF-8, then UTF-8 with BOM, then cp1252
-            for encoding in ["utf-8", "utf-8-sig", "cp1252"]:
-                try:
-                    return csv_bytes.decode(encoding)
-                except UnicodeDecodeError:
-                    if encoding == "cp1252":
-                        raise  # Last attempt failed
-                    continue
+        csv_bytes = zf.read(csv_path)
 
-    except Exception as e:
-        if "BadZipFile" in type(e).__name__:
-            raise ValueError(f"Invalid zip file: {zip_path}") from e
-        raise
+        # Try UTF-8, then UTF-8 with BOM, then cp1252
+        for encoding in ["utf-8", "utf-8-sig", "cp1252"]:
+            try:
+                return csv_bytes.decode(encoding)
+            except UnicodeDecodeError:
+                if encoding == "cp1252":
+                    raise  # Last attempt failed
+                continue
 
 
 @dataclass(frozen=True)

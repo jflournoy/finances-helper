@@ -117,6 +117,16 @@ class TestFindLatestDump:
 class TestExtractOrderHistoryCSV:
     """Test extracting CSV from zip file."""
 
+    def test_extract_order_history_csv_invalid_zip(self, tmp_path):
+        """Raise ValueError with 'Invalid zip file' when passed a non-zip file."""
+        # Create a file that's not a valid zip
+        not_zip = tmp_path / "not_a_zip.bin"
+        not_zip.write_bytes(b"This is not a zip file at all")
+
+        with pytest.raises(ValueError) as exc_info:
+            extract_order_history_csv(not_zip)
+        assert "Invalid zip file" in str(exc_info.value)
+
     def test_extract_order_history_csv_success(self):
         """Extract CSV from fixture zip."""
         zip_path = Path("data/fixtures") / "amazon_order_history_sample.zip"
