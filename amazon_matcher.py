@@ -274,7 +274,6 @@ def parse_order_history(csv_text: str) -> tuple[list[AmazonShipment], list[Parse
 
         # Extract last-4 from payment method
         if payment_method_raw != "Not Available":
-            import re
             match = re.search(r"-\s*(\d{4})\s*$", payment_method_raw)
             if match:
                 payment_method_last4 = match.group(1)
