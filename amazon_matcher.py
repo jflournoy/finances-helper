@@ -489,7 +489,6 @@ def match_shipments_to_transactions(
     matched = []
     unmatched_ynab = []
     excluded_shipments_list = []
-    shipments_consumed = []  # List of consumed shipment (order_id, ship_date, amount) tuples
 
     # Categorize shipments by matchability
     matchable = [s for s in shipments if s.is_matchable]
@@ -540,14 +539,11 @@ def match_shipments_to_transactions(
         # Look up candidates
         candidates = by_last4_and_amount.get((expected_last4, ynab_amt), [])
 
-        # Filter by date window and not yet consumed
-        def is_consumed(s):
-            return (s.order_id, s.ship_date, str(s.total_amount)) in shipments_consumed
-
+        # Filter by date window and not yet matched
         date_candidates = [
             s
             for s in candidates
-            if not is_consumed(s)
+            if s.matched_to_ynab_id is None
             and s.ship_date
             and ynab_date - timedelta(days=date_window_days)
             <= s.ship_date
@@ -565,7 +561,6 @@ def match_shipments_to_transactions(
                 match_mode="strict",
             )
             matched.append(match)
-            shipments_consumed.append((shipment.order_id, shipment.ship_date, str(shipment.total_amount)))
             shipment.matched_to_ynab_id = txn["id"]
         elif len(date_candidates) > 1:
             # Multiple candidates: pick first by abs(date_delta) asc, then ship_date asc
@@ -582,7 +577,6 @@ def match_shipments_to_transactions(
                 match_mode="strict",
             )
             matched.append(match)
-            shipments_consumed.append((shipment.order_id, shipment.ship_date, str(shipment.total_amount)))
             shipment.matched_to_ynab_id = txn["id"]
         else:
             # No Phase 1 match, defer to Phase 2
@@ -615,14 +609,11 @@ def match_shipments_to_transactions(
         # Look up candidates
         candidates = by_amount_only.get(ynab_amt, [])
 
-        # Filter by date window and not yet consumed
-        def is_consumed(s):
-            return (s.order_id, s.ship_date, str(s.total_amount)) in shipments_consumed
-
+        # Filter by date window and not yet matched
         date_candidates = [
             s
             for s in candidates
-            if not is_consumed(s)
+            if s.matched_to_ynab_id is None
             and s.ship_date
             and ynab_date - timedelta(days=date_window_days)
             <= s.ship_date
@@ -644,7 +635,6 @@ def match_shipments_to_transactions(
                 match_mode="amount_date_only",
             )
             matched.append(match)
-            shipments_consumed.append((shipment.order_id, shipment.ship_date, str(shipment.total_amount)))
             shipment.matched_to_ynab_id = txn["id"]
         elif len(date_candidates) > 1:
             # Ambiguous: multiple shipments match same amount+date
@@ -663,10 +653,7 @@ def match_shipments_to_transactions(
     # Build final unmatched_shipments list
     # ========================================================================
 
-    def is_consumed(s):
-        return (s.order_id, s.ship_date, str(s.total_amount)) in shipments_consumed
-
-    unmatched_shipments = [s for s in matchable if not is_consumed(s)]
+    unmatched_shipments = [s for s in matchable if s.matched_to_ynab_id is None]
 
     return MatchResult(
         matched=matched,
