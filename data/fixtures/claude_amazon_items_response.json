@@ -1,0 +1,31 @@
+{
+  "items": [
+    {
+      "asin": "B0C0234567",
+      "product_name": "Test Product",
+      "allocated_amount": 2675,
+      "category_id": "e5d6a5ee-c297-4e4f-8bc9-64c3b15b4c90",
+      "category_name": "Shopping",
+      "confidence": 0.92,
+      "rationale": "Office supplies based on ASIN and product name"
+    },
+    {
+      "asin": "B0C0334567",
+      "product_name": "Test Widget",
+      "allocated_amount": 1605,
+      "category_id": "c5f3b2a1-d8f4-4c9b-a1e2-9f8c7d6e5f4a",
+      "category_name": "Electronics",
+      "confidence": 0.88,
+      "rationale": "Consumer electronics"
+    },
+    {
+      "asin": "B0C0434567",
+      "product_name": "Test Gadget",
+      "allocated_amount": 1070,
+      "category_id": null,
+      "category_name": null,
+      "confidence": 0.0,
+      "rationale": "Unable to categorize with confidence"
+    }
+  ]
+}

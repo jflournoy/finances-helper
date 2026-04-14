@@ -1,0 +1,110 @@
+[
+  {
+    "id": "txn-001",
+    "account_id": "account-visa-1",
+    "date": "2024-01-16",
+    "payee_id": null,
+    "payee_name": "Amazon.com",
+    "category_id": null,
+    "cleared": "uncleared",
+    "approved": true,
+    "amount": 3709,
+    "memo": "Test transaction 1"
+  },
+  {
+    "id": "txn-002",
+    "account_id": "account-visa-1",
+    "date": "2024-01-17",
+    "payee_id": null,
+    "payee_name": "Amazon.com",
+    "category_id": null,
+    "cleared": "uncleared",
+    "approved": true,
+    "amount": 4812,
+    "memo": "Test transaction 2 - multi-item"
+  },
+  {
+    "id": "txn-003",
+    "account_id": "account-visa-2",
+    "date": "2024-01-20",
+    "payee_id": null,
+    "payee_name": "Amazon.com",
+    "category_id": null,
+    "cleared": "uncleared",
+    "approved": true,
+    "amount": 4779,
+    "memo": "Not Available payment method fallback"
+  },
+  {
+    "id": "txn-004",
+    "account_id": "account-visa-1",
+    "date": "2024-01-22",
+    "payee_id": null,
+    "payee_name": "AMZN Mktp US",
+    "category_id": null,
+    "cleared": "uncleared",
+    "approved": true,
+    "amount": 3728,
+    "memo": "Payee variant"
+  },
+  {
+    "id": "txn-005",
+    "account_id": "account-visa-1",
+    "date": "2024-01-25",
+    "payee_id": null,
+    "payee_name": "Amazon.com",
+    "category_id": null,
+    "cleared": "uncleared",
+    "approved": true,
+    "amount": 5471,
+    "memo": "No matching shipment"
+  },
+  {
+    "id": "txn-006",
+    "account_id": "account-visa-1",
+    "date": "2024-01-28",
+    "payee_id": null,
+    "payee_name": "Amazon.com",
+    "category_id": "cat-groceries",
+    "cleared": "uncleared",
+    "approved": true,
+    "amount": 2282,
+    "memo": "Already categorized"
+  },
+  {
+    "id": "txn-007",
+    "account_id": "account-visa-1",
+    "date": "2024-01-29",
+    "payee_id": null,
+    "payee_name": "Amazon.com",
+    "category_id": null,
+    "cleared": "reconciled",
+    "approved": true,
+    "amount": 5885,
+    "memo": "Already reconciled"
+  },
+  {
+    "id": "txn-008",
+    "account_id": "account-unknown",
+    "date": "2024-02-04",
+    "payee_id": null,
+    "payee_name": "Amazon.com",
+    "category_id": null,
+    "cleared": "uncleared",
+    "approved": true,
+    "amount": 1283,
+    "memo": "Unknown account"
+  },
+  {
+    "id": "txn-009",
+    "account_id": "account-visa-1",
+    "date": "2024-02-05",
+    "payee_id": null,
+    "payee_name": "Target",
+    "category_id": null,
+    "cleared": "uncleared",
+    "approved": true,
+    "amount": 2500,
+    "memo": "Non-Amazon transaction"
+  }
+]

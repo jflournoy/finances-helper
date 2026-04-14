@@ -1,0 +1,2 @@
+Order ID,Order Date,Ship Date,Order Status,Shipment Status,Currency,Unit Price,Unit Price Tax,Shipment Item Subtotal,Shipment Item Subtotal Tax,Shipping Charge,Total Amount,Total Discounts,ASIN,Product Name,Original Quantity
+111-0000001-0000001,2024-01-15,2024-01-16,Closed,Shipped,USD,29.99,2.10,29.99,2.10,5.00,37.09,0.00,B0C1234567,Test Widget,1
