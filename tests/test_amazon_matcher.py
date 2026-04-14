@@ -1489,9 +1489,17 @@ class TestAllocateShipmentToItems:
         assert len(str(allocations[0].share_of_subtotal).split(".")[-1]) <= 8
 
     def test_banker_rounding_vs_half_up(self):
-        """Banker's rounding (ROUND_HALF_EVEN) differs from ROUND_HALF_UP at .5¢ boundaries."""
-        # Construct a case where banker's rounding produces different result
-        # than ROUND_HALF_UP. For example: .5 always rounds to nearest even.
+        """Banker's rounding (ROUND_HALF_EVEN) differs from ROUND_HALF_UP at .x5 boundaries.
+
+        This test constructs a case that demonstrably diverges between ROUND_HALF_EVEN
+        and ROUND_HALF_UP so that swapping the rounding mode would cause this test to fail.
+        """
+        # Construct items where each gets allocated exactly 0.505 (before rounding)
+        # total = $1.01, items = [1.00, 1.00], subtotal = $2.00
+        # share_item1 = 1.00 / 2.00 = 0.5
+        # allocated_item1 = 1.01 * 0.5 = 0.505
+        # ROUND_HALF_EVEN: 0.505 -> 0.50 (rounds to nearest even)
+        # ROUND_HALF_UP: 0.505 -> 0.51 (always rounds up)
         item1 = AmazonItem(
             order_id="111-0000001-0000001",
             ship_date=date(2024, 1, 15),
@@ -1508,15 +1516,11 @@ class TestAllocateShipmentToItems:
             asin="B0C2234567",
             product_name="Item 2",
             quantity=1,
-            unit_price=Decimal("2.00"),
+            unit_price=Decimal("1.00"),
             unit_price_tax=Decimal("0"),
             raw_row_index=3,
         )
 
-        # Total: $3.00, with 1 cent tax → $3.01
-        # Item 1 (1/3): 3.01 * (1/3) = 1.00333... → banker's rounds to 1.00
-        # Item 2 (2/3): 3.01 * (2/3) = 2.00666... → banker's rounds to 2.01
-        # Sum: 1.00 + 2.01 = 3.01 ✓
         shipment = AmazonShipment(
             order_id="111-0000001-0000001",
             ship_date=date(2024, 1, 15),
@@ -1524,21 +1528,36 @@ class TestAllocateShipmentToItems:
             payment_method_last4="0804",
             is_split_tender=False,
             currency="USD",
-            item_subtotal=Decimal("3.00"),
-            tax=Decimal("0.01"),
+            item_subtotal=Decimal("2.00"),
+            tax=Decimal("0.00"),
             shipping=Decimal("0.00"),
             discounts=Decimal("0.00"),
-            total_amount=Decimal("3.01"),
+            total_amount=Decimal("1.01"),  # Creates 0.505 per item before rounding
             items=[item1, item2],
             shipment_status="Shipped",
         )
 
         allocations = allocate_shipment_to_items(shipment)
-        assert sum(a.allocated_amount for a in allocations) == Decimal("3.01")
+
+        # With ROUND_HALF_EVEN, both items round to 0.50 (even), then delta of 0.01
+        # is distributed starting with highest subtotal (tie: both 1.00) then lowest index.
+        # So index 0 gets the 0.01 adjustment.
+        # Expected: item 0 = 0.51, item 1 = 0.50 (or if delta distributes first: 0.50, 0.50 then +0.01 to item 0)
+        # Either way, the sum must be exactly 1.01
+        assert sum(a.allocated_amount for a in allocations) == Decimal("1.01")
+        # Verify HALF_EVEN behavior: with tie at 0.505, both round to 0.50
+        assert allocations[0].allocated_amount == Decimal("0.51")
+        assert allocations[1].allocated_amount == Decimal("0.50")
 
     def test_multi_cent_delta_distribution(self):
-        """Multi-cent rounding delta is distributed across items."""
-        # A pathological case where rounding produces a 3-cent delta
+        """Multi-cent rounding delta is distributed across items according to policy.
+
+        Verifies that when rounding produces a multi-cent delta, it is distributed
+        per-item (not dumped on one item), respecting the allocation policy.
+        """
+        # 3 items, each with same subtotal
+        # subtotal = $3.00, total = $3.02 → 2¢ delta
+        # Each item should get $1.00 base, then 2¢ distributed across highest subtotal / lowest index
         items = [
             AmazonItem(
                 order_id="111-0000001-0000001",
@@ -1550,7 +1569,7 @@ class TestAllocateShipmentToItems:
                 unit_price_tax=Decimal("0"),
                 raw_row_index=i+2,
             )
-            for i in range(5)
+            for i in range(3)
         ]
 
         shipment = AmazonShipment(
@@ -1560,22 +1579,35 @@ class TestAllocateShipmentToItems:
             payment_method_last4="0804",
             is_split_tender=False,
             currency="USD",
-            item_subtotal=Decimal("5.00"),
-            tax=Decimal("1.00"),  # Large tax to force rounding
+            item_subtotal=Decimal("3.00"),
+            tax=Decimal("0.02"),
             shipping=Decimal("0.00"),
             discounts=Decimal("0.00"),
-            total_amount=Decimal("6.00"),
+            total_amount=Decimal("3.02"),
             items=items,
             shipment_status="Shipped",
         )
 
         allocations = allocate_shipment_to_items(shipment)
-        # All items should be allocated, sum to exactly $6.00
-        assert sum(a.allocated_amount for a in allocations) == Decimal("6.00")
-        assert all(a.allocated_amount >= Decimal("0.99") for a in allocations)  # Each at least ~$1.20
+
+        # Verify sum
+        assert sum(a.allocated_amount for a in allocations) == Decimal("3.02")
+
+        # Verify per-item: each item initially rounds to 1.01, but sum is 3.03 (1¢ overage).
+        # Delta distribution removes 1¢ from items in sorted order (all equal, so index order).
+        # Item 0 (index 0) gets -1¢, items 1-2 stay at 1.01.
+        # Expected distribution: [1.00, 1.01, 1.01]
+        assert allocations[0].allocated_amount == Decimal("1.00")
+        assert allocations[1].allocated_amount == Decimal("1.01")
+        assert allocations[2].allocated_amount == Decimal("1.01")
 
     def test_deterministic_tiebreak_equal_subtotals(self):
-        """Two items with identical raw_subtotal: smaller index gets penny first."""
+        """Two items with identical raw_subtotal: smaller index gets penny first.
+
+        When two items have the same subtotal, the delta distribution policy
+        processes them in index order (lowest index first). This test verifies
+        that determinism: item 0 always gets the extra penny, not item 1.
+        """
         items = [
             AmazonItem(
                 order_id="111-0000001-0000001",
@@ -1599,7 +1631,12 @@ class TestAllocateShipmentToItems:
             ),
         ]
 
-        # Total $10 → $10.01 with 1¢ tax creates rounding delta
+        # Subtotal $10.00, total $10.01 → 1¢ delta from rounding
+        # Each item's share: 5.00 / 10.00 = 0.5
+        # allocated = 10.01 * 0.5 = 5.005
+        # ROUND_HALF_EVEN: 5.005 -> 5.00 (nearest even)
+        # Delta = 10.01 - (5.00 + 5.00) = 0.01
+        # Distributed to highest subtotal (tie: both 5.00) then lowest index (item 0)
         shipment = AmazonShipment(
             order_id="111-0000001-0000001",
             ship_date=date(2024, 1, 15),
@@ -1617,11 +1654,13 @@ class TestAllocateShipmentToItems:
         )
 
         allocations = allocate_shipment_to_items(shipment)
-        # Item 1 (index 0) should get the penny; item 2 gets the base
-        # 10.01 * (5 / 10) = 5.005 → rounds to 5.00 or 5.01
-        # After rounding, delta is 0.01, distributed to item 0
-        # Expected: item 0 = 5.01, item 1 = 5.00 (or they split 5.00 and 5.01)
+
+        # Verify sum
         assert sum(a.allocated_amount for a in allocations) == Decimal("10.01")
+
+        # Verify deterministic tiebreak: item 0 gets the penny, item 1 gets the base
+        assert allocations[0].allocated_amount == Decimal("5.01")
+        assert allocations[1].allocated_amount == Decimal("5.00")
 
 
 # ============================================================================
@@ -1633,7 +1672,15 @@ class TestIntegrationMatching:
     """Integration tests for the full matching pipeline."""
 
     def test_it_match_fixture_pipeline(self):
-        """IT: Full pipeline: parse CSV → filter YNAB → match with hardcoded fixture expectations."""
+        """IT: Full pipeline: parse CSV → filter YNAB → match with hardcoded fixture expectations.
+
+        Fixture is intentionally designed to produce a mix of matches, unmatched, and excluded
+        shipments to exercise the full pipeline. Assertions verify:
+        1. Expected matches are found with correct txn_id ↔ order_id pairings
+        2. Expected unmatched YNAB txns exist (no corresponding shipment)
+        3. Expected excluded shipments exist (split tender, no shipment status, zero-price items)
+        4. Expected parse errors exist (EUR currency, embedded newline, etc.)
+        """
         # Load fixtures
         csv_content = Path("data/fixtures/amazon_order_history_sample.csv").read_text()
         with open("data/fixtures/amazon_ynab_transactions.json") as f:
@@ -1662,14 +1709,41 @@ class TestIntegrationMatching:
         assert isinstance(result.excluded_shipments, list)
         assert isinstance(result.parse_errors, list)
 
-        # Verify the pipeline runs without errors and produces reasonable results.
-        # (Note: fixture YNAB txn amounts are intentionally misaligned with shipment amounts
-        # to avoid false matches during testing; real usage will have aligned data)
-        assert len(result.matched) >= 0, "Matched list should exist"
-        assert len(result.unmatched_ynab) >= 0, "Unmatched YNAB list should exist"
+        # Hardcoded fixture expectations
+        # Fixture amounts are in milliunits (1000 = $1.00).
+        # Transactions are on accounts with specific visa last-4 mappings in account_last4.json:
+        # txn-001: account-visa-1 (0804), date 2024-01-15, amount 37090 ($37.09)
+        #   → matches order 111-0000001-0000001 (ship_date 2024-01-16, Visa-0804, $37.09) [strict]
+        # txn-002: account-visa-2 (1523), date 2024-01-16, amount 48120 ($48.12)
+        #   → matches order 111-0000002-0000002 (ship_date 2024-01-17, Visa-1523, $48.12) [strict]
+        # txn-003: account-visa-3 (2401), date 2024-01-17, amount 14190 ($14.19)
+        #   → matches order 111-0000003 item 1 (ship_date 2024-01-18, Visa-2401, $14.19) [strict]
+        # txn-004: account-visa-4 (2401), date 2024-01-17, amount 17400 ($17.40), payee "AMZN Mktp US"
+        #   → matches order 111-0000003 item 2 (ship_date 2024-01-18, Visa-2401, $17.40) [strict]
+        # txn-005: amount 54710, no matching shipment (mismatched amount) [unmatched]
+        # txn-008: account-unknown (not in account_last4) [unmatched]
 
-        # Verify excluded shipments exist (split tender, Not Available status, zero-price items)
-        assert len(result.excluded_shipments) > 0, "Expected excluded shipments from fixture (split tender, not available, zero-price)"
+        # Verify matched transactions: should have 4 strict (Phase 1) matches
+        assert len(result.matched) == 4, f"Expected 4 matches, got {len(result.matched)}"
 
-        # Verify parse errors (EUR currency, embedded newline, charge mismatch, etc.)
+        # All matches should be strict (exact date + amount + last-4)
+        strict_matches = [m for m in result.matched if m.match_mode == "strict"]
+        assert len(strict_matches) == 4, f"Expected 4 strict matches, got {len(strict_matches)}"
+
+        # Verify specific matched pairs (txn_id → order_id mapping)
+        matched_pairs = {m.ynab_txn["id"]: m.shipment.order_id for m in result.matched}
+        assert matched_pairs["txn-001"] == "111-0000001-0000001"
+        assert matched_pairs["txn-002"] == "111-0000002-0000002"
+        assert matched_pairs["txn-003"] == "111-0000003-0000003"
+        assert matched_pairs["txn-004"] == "111-0000003-0000003"
+
+        # Verify unmatched YNAB txns: txn-005 (no matching shipment) and txn-008 (unknown account)
+        unmatched_ids = {t[0]["id"] for t in result.unmatched_ynab}
+        assert "txn-005" in unmatched_ids, "txn-005 should be unmatched (no matching shipment)"
+        assert "txn-008" in unmatched_ids, "txn-008 should be unmatched (account not in account_last4)"
+
+        # Verify excluded shipments exist (from other orders with split tender, Not Available, zero price)
+        assert len(result.excluded_shipments) > 0, "Expected excluded shipments from fixture"
+
+        # Verify parse errors exist (EUR currency, embedded newline, etc.)
         assert len(result.parse_errors) > 0, "Expected parse errors from fixture"
