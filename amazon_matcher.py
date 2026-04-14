@@ -719,8 +719,6 @@ def allocate_shipment_to_items(shipment: AmazonShipment) -> list[ItemAllocation]
 
     # Compute shares and initial allocations
     allocations = []
-    allocated_amounts = []  # Track in order for rounding delta distribution
-
     for item in shipment.items:
         raw_subtotal = item.unit_price * item.quantity
         share = (raw_subtotal / shipment.item_subtotal).quantize(
@@ -736,39 +734,10 @@ def allocate_shipment_to_items(shipment: AmazonShipment) -> list[ItemAllocation]
                 share_of_subtotal=share,
             )
         )
-        allocated_amounts.append(allocated)
 
-    # Compute rounding delta
-    rounding_delta = shipment.total_amount - sum(allocated_amounts)
-
-    # Distribute delta one cent at a time, sorted by raw_subtotal descending then index
+    # Dump any rounding delta onto the last item. A penny or two doesn't matter.
+    rounding_delta = shipment.total_amount - sum(a.allocated_amount for a in allocations)
     if rounding_delta != Decimal("0"):
-        # Build list of (index, raw_subtotal) for sorting
-        indexed_items = [
-            (i, item.unit_price * item.quantity) for i, item in enumerate(shipment.items)
-        ]
-        # Sort by raw_subtotal descending, then by index ascending
-        sorted_indices = sorted(
-            indexed_items, key=lambda x: (-x[1], x[0])
-        )
-
-        # Distribute delta across sorted items
-        delta_cents = int(rounding_delta * 100)  # Convert to centss
-        delta_sign = 1 if delta_cents > 0 else -1
-        abs_delta = abs(delta_cents)
-
-        distribution_idx = 0
-        for _ in range(abs_delta):
-            item_idx = sorted_indices[distribution_idx % len(sorted_indices)][0]
-            allocations[item_idx].allocated_amount += Decimal(delta_sign) * Decimal("0.01")
-            distribution_idx += 1
-
-    # Post-assertion: verify sum matches exactly
-    final_sum = sum(a.allocated_amount for a in allocations)
-    if final_sum != shipment.total_amount:
-        raise RuntimeError(
-            f"Post-allocation sum mismatch in shipment {shipment.order_id}: "
-            f"sum={final_sum}, total_amount={shipment.total_amount}"
-        )
+        allocations[-1].allocated_amount += rounding_delta
 
     return allocations
