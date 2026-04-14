@@ -14,6 +14,7 @@ from amazon_matcher import (
     AmazonShipment,
     ParseError,
     _money,
+    allocate_shipment_to_items,
     extract_order_history_csv,
     filter_amazon_transactions,
     find_latest_dump,
@@ -21,6 +22,7 @@ from amazon_matcher import (
     parse_order_history,
     MatchCandidate,
     MatchResult,
+    ItemAllocation,
 )
 
 
@@ -1072,6 +1074,310 @@ class TestMatchShipmentsToTransactions:
 
         assert len(result.parse_errors) == 1
         assert result.parse_errors[0].reason == "test error"
+
+
+# ============================================================================
+# Allocator Tests: Pro-rata Allocation
+# ============================================================================
+
+
+class TestAllocateShipmentToItems:
+    """Test pro-rata allocation of shipment total across items."""
+
+    def test_single_item_passthrough(self):
+        """Single-item shipment: allocated_amount equals total_amount."""
+        item = AmazonItem(
+            order_id="111-0000001-0000001",
+            ship_date=date(2024, 1, 15),
+            asin="B0C1234567",
+            product_name="Test Widget",
+            quantity=1,
+            unit_price=Decimal("100.00"),
+            unit_price_tax=Decimal("7.00"),
+            raw_row_index=2,
+        )
+
+        shipment = AmazonShipment(
+            order_id="111-0000001-0000001",
+            ship_date=date(2024, 1, 15),
+            payment_method_raw="Visa - 0804",
+            payment_method_last4="0804",
+            is_split_tender=False,
+            currency="USD",
+            item_subtotal=Decimal("100.00"),
+            tax=Decimal("7.00"),
+            shipping=Decimal("5.00"),
+            discounts=Decimal("0.00"),
+            total_amount=Decimal("112.00"),
+            items=[item],
+            shipment_status="Shipped",
+        )
+
+        allocations = allocate_shipment_to_items(shipment)
+
+        assert len(allocations) == 1
+        assert allocations[0].allocated_amount == Decimal("112.00")
+        assert allocations[0].share_of_subtotal == Decimal("1")
+
+    def test_exact_50_50_split(self):
+        """Two equal items: each gets exactly half."""
+        item1 = AmazonItem(
+            order_id="111-0000001-0000001",
+            ship_date=date(2024, 1, 15),
+            asin="B0C1234567",
+            product_name="Item 1",
+            quantity=1,
+            unit_price=Decimal("10.00"),
+            unit_price_tax=Decimal("0.70"),
+            raw_row_index=2,
+        )
+        item2 = AmazonItem(
+            order_id="111-0000001-0000001",
+            ship_date=date(2024, 1, 15),
+            asin="B0C2234567",
+            product_name="Item 2",
+            quantity=1,
+            unit_price=Decimal("10.00"),
+            unit_price_tax=Decimal("0.70"),
+            raw_row_index=3,
+        )
+
+        shipment = AmazonShipment(
+            order_id="111-0000001-0000001",
+            ship_date=date(2024, 1, 15),
+            payment_method_raw="Visa - 0804",
+            payment_method_last4="0804",
+            is_split_tender=False,
+            currency="USD",
+            item_subtotal=Decimal("20.00"),
+            tax=Decimal("1.40"),
+            shipping=Decimal("0.00"),
+            discounts=Decimal("0.00"),
+            total_amount=Decimal("21.40"),
+            items=[item1, item2],
+            shipment_status="Shipped",
+        )
+
+        allocations = allocate_shipment_to_items(shipment)
+
+        assert len(allocations) == 2
+        assert allocations[0].allocated_amount == Decimal("10.70")
+        assert allocations[1].allocated_amount == Decimal("10.70")
+        assert sum(a.allocated_amount for a in allocations) == Decimal("21.40")
+
+    def test_three_item_pro_rata(self):
+        """Three items with different prices: each gets pro-rata share."""
+        items = [
+            AmazonItem(
+                order_id="111-0000001-0000001",
+                ship_date=date(2024, 1, 15),
+                asin="B0C1234567",
+                product_name="Item 1",
+                quantity=1,
+                unit_price=Decimal("10.00"),
+                unit_price_tax=Decimal("0.70"),
+                raw_row_index=2,
+            ),
+            AmazonItem(
+                order_id="111-0000001-0000001",
+                ship_date=date(2024, 1, 15),
+                asin="B0C2234567",
+                product_name="Item 2",
+                quantity=1,
+                unit_price=Decimal("20.00"),
+                unit_price_tax=Decimal("1.40"),
+                raw_row_index=3,
+            ),
+            AmazonItem(
+                order_id="111-0000001-0000001",
+                ship_date=date(2024, 1, 15),
+                asin="B0C3234567",
+                product_name="Item 3",
+                quantity=1,
+                unit_price=Decimal("30.00"),
+                unit_price_tax=Decimal("2.10"),
+                raw_row_index=4,
+            ),
+        ]
+
+        shipment = AmazonShipment(
+            order_id="111-0000001-0000001",
+            ship_date=date(2024, 1, 15),
+            payment_method_raw="Visa - 0804",
+            payment_method_last4="0804",
+            is_split_tender=False,
+            currency="USD",
+            item_subtotal=Decimal("60.00"),
+            tax=Decimal("4.20"),
+            shipping=Decimal("4.00"),
+            discounts=Decimal("0.00"),
+            total_amount=Decimal("68.20"),
+            items=items,
+            shipment_status="Shipped",
+        )
+
+        allocations = allocate_shipment_to_items(shipment)
+
+        assert len(allocations) == 3
+        # Item 1 should get ~11.37 (10/60 of 68.20)
+        # Item 2 should get ~22.73 (20/60 of 68.20)
+        # Item 3 should get ~34.10 (30/60 of 68.20)
+        # But with rounding, they sum exactly to 68.20
+        total_allocated = sum(a.allocated_amount for a in allocations)
+        assert total_allocated == Decimal("68.20")
+        assert all(a.allocated_amount > Decimal("0") for a in allocations)
+
+    def test_penny_rounding_deterministic(self):
+        """Uneven division with penny rounding: result is exact and deterministic."""
+        items = [
+            AmazonItem(
+                order_id="111-0000001-0000001",
+                ship_date=date(2024, 1, 15),
+                asin="B0C1234567",
+                product_name="Item 1",
+                quantity=1,
+                unit_price=Decimal("3.33"),
+                unit_price_tax=Decimal("0"),
+                raw_row_index=2,
+            ),
+            AmazonItem(
+                order_id="111-0000001-0000001",
+                ship_date=date(2024, 1, 15),
+                asin="B0C2234567",
+                product_name="Item 2",
+                quantity=1,
+                unit_price=Decimal("3.33"),
+                unit_price_tax=Decimal("0"),
+                raw_row_index=3,
+            ),
+            AmazonItem(
+                order_id="111-0000001-0000001",
+                ship_date=date(2024, 1, 15),
+                asin="B0C3234567",
+                product_name="Item 3",
+                quantity=1,
+                unit_price=Decimal("3.34"),
+                unit_price_tax=Decimal("0"),
+                raw_row_index=4,
+            ),
+        ]
+
+        shipment = AmazonShipment(
+            order_id="111-0000001-0000001",
+            ship_date=date(2024, 1, 15),
+            payment_method_raw="Visa - 0804",
+            payment_method_last4="0804",
+            is_split_tender=False,
+            currency="USD",
+            item_subtotal=Decimal("10.00"),
+            tax=Decimal("0.00"),
+            shipping=Decimal("0.00"),
+            discounts=Decimal("0.00"),
+            total_amount=Decimal("10.00"),
+            items=items,
+            shipment_status="Shipped",
+        )
+
+        allocations = allocate_shipment_to_items(shipment)
+
+        assert len(allocations) == 3
+        total = sum(a.allocated_amount for a in allocations)
+        assert total == Decimal("10.00")
+
+    def test_subtotal_mismatch_raises(self):
+        """Shipment where computed subtotal doesn't match CSV subtotal: raises."""
+        item1 = AmazonItem(
+            order_id="111-0000001-0000001",
+            ship_date=date(2024, 1, 15),
+            asin="B0C1234567",
+            product_name="Item 1",
+            quantity=1,
+            unit_price=Decimal("10.00"),
+            unit_price_tax=Decimal("0.70"),
+            raw_row_index=2,
+        )
+        item2 = AmazonItem(
+            order_id="111-0000001-0000001",
+            ship_date=date(2024, 1, 15),
+            asin="B0C2234567",
+            product_name="Item 2",
+            quantity=1,
+            unit_price=Decimal("10.00"),
+            unit_price_tax=Decimal("0.70"),
+            raw_row_index=3,
+        )
+
+        # Mismatch: item_subtotal claims 20, but items sum to 20
+        # Actually this matches, so let's create real mismatch:
+        shipment = AmazonShipment(
+            order_id="111-0000001-0000001",
+            ship_date=date(2024, 1, 15),
+            payment_method_raw="Visa - 0804",
+            payment_method_last4="0804",
+            is_split_tender=False,
+            currency="USD",
+            item_subtotal=Decimal("25.00"),  # Mismatch: items only sum to 20
+            tax=Decimal("1.40"),
+            shipping=Decimal("0.00"),
+            discounts=Decimal("0.00"),
+            total_amount=Decimal("26.40"),
+            items=[item1, item2],
+            shipment_status="Shipped",
+        )
+
+        with pytest.raises(RuntimeError) as exc_info:
+            allocate_shipment_to_items(shipment)
+        assert "111-0000001-0000001" in str(exc_info.value)
+
+    def test_share_precision(self):
+        """Multi-item: share_of_subtotal has 8 decimal places."""
+        items = [
+            AmazonItem(
+                order_id="111-0000001-0000001",
+                ship_date=date(2024, 1, 15),
+                asin="B0C1234567",
+                product_name="Item 1",
+                quantity=1,
+                unit_price=Decimal("1.00"),
+                unit_price_tax=Decimal("0"),
+                raw_row_index=2,
+            ),
+            AmazonItem(
+                order_id="111-0000001-0000001",
+                ship_date=date(2024, 1, 15),
+                asin="B0C2234567",
+                product_name="Item 2",
+                quantity=1,
+                unit_price=Decimal("2.00"),
+                unit_price_tax=Decimal("0"),
+                raw_row_index=3,
+            ),
+        ]
+
+        shipment = AmazonShipment(
+            order_id="111-0000001-0000001",
+            ship_date=date(2024, 1, 15),
+            payment_method_raw="Visa - 0804",
+            payment_method_last4="0804",
+            is_split_tender=False,
+            currency="USD",
+            item_subtotal=Decimal("3.00"),
+            tax=Decimal("0.00"),
+            shipping=Decimal("0.00"),
+            discounts=Decimal("0.00"),
+            total_amount=Decimal("3.00"),
+            items=items,
+            shipment_status="Shipped",
+        )
+
+        allocations = allocate_shipment_to_items(shipment)
+
+        # Item 1: 1/3, Item 2: 2/3
+        # The share is quantized to 8 decimals
+        assert allocations[0].share_of_subtotal == Decimal("0.33333333")
+        assert allocations[1].share_of_subtotal == Decimal("0.66666667")
+        # Both shares quantized to 8 decimals
+        assert len(str(allocations[0].share_of_subtotal).split(".")[-1]) <= 8
 
 
 # ============================================================================

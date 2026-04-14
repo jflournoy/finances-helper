@@ -9,7 +9,7 @@ import logging
 import re
 from dataclasses import dataclass
 from datetime import date, timedelta
-from decimal import Decimal, InvalidOperation
+from decimal import Decimal, InvalidOperation, ROUND_HALF_EVEN
 from pathlib import Path
 from zipfile import ZipFile
 
@@ -678,3 +678,113 @@ def match_shipments_to_transactions(
         excluded_shipments=excluded_shipments_list,
         parse_errors=parse_errors,
     )
+
+
+# ============================================================================
+# Phase C: Pro-rata Allocation
+# ============================================================================
+
+
+@dataclass
+class ItemAllocation:
+    """Allocation of shipment total to an individual item."""
+
+    item: AmazonItem
+    allocated_amount: Decimal  # quantized to cents
+    share_of_subtotal: Decimal  # high-precision share (8 decimal places)
+
+
+def allocate_shipment_to_items(shipment: AmazonShipment) -> list[ItemAllocation]:
+    """Allocate a multi-item shipment's total pro-rata across items.
+
+    Ensures the subtransaction amounts sum to the parent amount exactly via
+    deterministic banker's rounding.
+
+    Args:
+        shipment: An AmazonShipment with one or more items
+
+    Returns:
+        List of ItemAllocation, one per item
+
+    Raises:
+        RuntimeError: If the shipment's computed subtotal doesn't match the CSV
+                     item_subtotal by more than 1 cent (parser bug or Amazon
+                     inconsistency)
+    """
+    # Single-item shortcut
+    if len(shipment.items) == 1:
+        item = shipment.items[0]
+        return [
+            ItemAllocation(
+                item=item,
+                allocated_amount=shipment.total_amount,
+                share_of_subtotal=Decimal("1"),
+            )
+        ]
+
+    # Multi-item: validate subtotal consistency
+    computed_subtotal = sum(
+        item.unit_price * item.quantity for item in shipment.items
+    )
+
+    if abs(computed_subtotal - shipment.item_subtotal) > Decimal("0.01"):
+        raise RuntimeError(
+            f"Subtotal mismatch in shipment {shipment.order_id}: "
+            f"computed {computed_subtotal}, CSV has {shipment.item_subtotal}"
+        )
+
+    # Compute shares and initial allocations
+    allocations = []
+    allocated_amounts = []  # Track in order for rounding delta distribution
+
+    for item in shipment.items:
+        raw_subtotal = item.unit_price * item.quantity
+        share = (raw_subtotal / shipment.item_subtotal).quantize(
+            Decimal("0.00000001")
+        )
+        allocated = (shipment.total_amount * share).quantize(
+            Decimal("0.01"), rounding=ROUND_HALF_EVEN
+        )
+        allocations.append(
+            ItemAllocation(
+                item=item,
+                allocated_amount=allocated,
+                share_of_subtotal=share,
+            )
+        )
+        allocated_amounts.append(allocated)
+
+    # Compute rounding delta
+    rounding_delta = shipment.total_amount - sum(allocated_amounts)
+
+    # Distribute delta one cent at a time, sorted by raw_subtotal descending then index
+    if rounding_delta != Decimal("0"):
+        # Build list of (index, raw_subtotal) for sorting
+        indexed_items = [
+            (i, item.unit_price * item.quantity) for i, item in enumerate(shipment.items)
+        ]
+        # Sort by raw_subtotal descending, then by index ascending
+        sorted_indices = sorted(
+            indexed_items, key=lambda x: (-x[1], x[0])
+        )
+
+        # Distribute delta across sorted items
+        delta_cents = int(rounding_delta * 100)  # Convert to centss
+        delta_sign = 1 if delta_cents > 0 else -1
+        abs_delta = abs(delta_cents)
+
+        distribution_idx = 0
+        for _ in range(abs_delta):
+            item_idx = sorted_indices[distribution_idx % len(sorted_indices)][0]
+            allocations[item_idx].allocated_amount += Decimal(delta_sign) * Decimal("0.01")
+            distribution_idx += 1
+
+    # Post-assertion: verify sum matches exactly
+    final_sum = sum(a.allocated_amount for a in allocations)
+    if final_sum != shipment.total_amount:
+        raise RuntimeError(
+            f"Post-allocation sum mismatch in shipment {shipment.order_id}: "
+            f"sum={final_sum}, total_amount={shipment.total_amount}"
+        )
+
+    return allocations
