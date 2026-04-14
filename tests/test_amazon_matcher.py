@@ -15,8 +15,12 @@ from amazon_matcher import (
     ParseError,
     _money,
     extract_order_history_csv,
+    filter_amazon_transactions,
     find_latest_dump,
+    match_shipments_to_transactions,
     parse_order_history,
+    MatchCandidate,
+    MatchResult,
 )
 
 
@@ -575,3 +579,533 @@ class TestIntegrationParseOrderHistory:
 
             # Should have errors (EUR currency)
             assert len(errors) > 0
+
+
+# ============================================================================
+# Matcher Tests: Filter Transactions
+# ============================================================================
+
+
+class TestFilterAmazonTransactions:
+    """Test filtering YNAB transactions to Amazon purchases only."""
+
+    def test_filter_plain_amazon_payee(self):
+        """Include transactions with 'Amazon' payee."""
+        txns = [{"payee_name": "Amazon", "category_id": None, "cleared": "uncleared", "deleted": False}]
+        result = filter_amazon_transactions(txns)
+        assert len(result) == 1
+
+    def test_filter_amazon_lowercase(self):
+        """Include transactions with 'amazon.com' payee (case-insensitive)."""
+        txns = [{"payee_name": "amazon.com", "category_id": None, "cleared": "uncleared", "deleted": False}]
+        result = filter_amazon_transactions(txns)
+        assert len(result) == 1
+
+    def test_filter_amzn_variant(self):
+        """Include transactions with 'AMZN' pattern."""
+        txns = [{"payee_name": "AMZN Mktp US", "category_id": None, "cleared": "uncleared", "deleted": False}]
+        result = filter_amazon_transactions(txns)
+        assert len(result) == 1
+
+    def test_filter_non_amazon(self):
+        """Exclude non-Amazon payees."""
+        txns = [{"payee_name": "Target", "category_id": None, "cleared": "uncleared", "deleted": False}]
+        result = filter_amazon_transactions(txns)
+        assert len(result) == 0
+
+    def test_filter_already_categorized(self):
+        """Exclude transactions with category_id set."""
+        txns = [{"payee_name": "Amazon", "category_id": "cat-123", "cleared": "uncleared", "deleted": False}]
+        result = filter_amazon_transactions(txns)
+        assert len(result) == 0
+
+    def test_filter_reconciled(self):
+        """Exclude reconciled transactions."""
+        txns = [{"payee_name": "Amazon", "category_id": None, "cleared": "reconciled", "deleted": False}]
+        result = filter_amazon_transactions(txns)
+        assert len(result) == 0
+
+    def test_filter_deleted(self):
+        """Exclude deleted transactions."""
+        txns = [{"payee_name": "Amazon", "category_id": None, "cleared": "uncleared", "deleted": True}]
+        result = filter_amazon_transactions(txns)
+        assert len(result) == 0
+
+    def test_filter_empty_list(self):
+        """Empty input returns empty output."""
+        result = filter_amazon_transactions([])
+        assert len(result) == 0
+
+    def test_filter_mixed(self):
+        """Filter a mixed list correctly."""
+        txns = [
+            {"payee_name": "Amazon", "category_id": None, "cleared": "uncleared", "deleted": False},  # keep
+            {"payee_name": "Amazon", "category_id": "cat-123", "cleared": "uncleared", "deleted": False},  # categorized
+            {"payee_name": "Amazon", "category_id": None, "cleared": "reconciled", "deleted": False},  # reconciled
+            {"payee_name": "Target", "category_id": None, "cleared": "uncleared", "deleted": False},  # non-amazon
+        ]
+        result = filter_amazon_transactions(txns)
+        assert len(result) == 1
+
+
+# ============================================================================
+# Matcher Tests: Shipment-to-Transaction Matching
+# ============================================================================
+
+
+class TestMatchShipmentsToTransactions:
+    """Test the two-phase matching algorithm."""
+
+    def test_match_basic_1to1(self):
+        """Phase 1: Single exact match (amount, last-4, date)."""
+        shipment = AmazonShipment(
+            order_id="111-0000001-0000001",
+            ship_date=date(2024, 1, 15),
+            payment_method_raw="Visa - 0804",
+            payment_method_last4="0804",
+            is_split_tender=False,
+            currency="USD",
+            item_subtotal=Decimal("100.00"),
+            tax=Decimal("7.00"),
+            shipping=Decimal("5.00"),
+            discounts=Decimal("0.00"),
+            total_amount=Decimal("112.00"),
+            items=[],
+            shipment_status="Shipped",
+        )
+
+        txn = {
+            "id": "txn-001",
+            "account_id": "account-1",
+            "account_name": "Visa",
+            "date": "2024-01-15",
+            "amount": -112000,  # milliunitss: -$112.00
+            "payee_name": "Amazon",
+            "category_id": None,
+            "cleared": "uncleared",
+            "deleted": False,
+        }
+
+        account_last4 = {"account-1": "0804"}
+        result = match_shipments_to_transactions([txn], [shipment], account_last4)
+
+        assert len(result.matched) == 1
+        assert result.matched[0].match_mode == "strict"
+        assert result.matched[0].date_delta_days == 0
+        assert result.matched[0].ynab_txn["id"] == "txn-001"
+        assert len(result.unmatched_ynab) == 0
+        assert len(result.unmatched_shipments) == 0
+
+    def test_match_date_window_minus3(self):
+        """Phase 1: Match within -3 day window."""
+        shipment = AmazonShipment(
+            order_id="111-0000001-0000001",
+            ship_date=date(2024, 1, 12),
+            payment_method_raw="Visa - 0804",
+            payment_method_last4="0804",
+            is_split_tender=False,
+            currency="USD",
+            item_subtotal=Decimal("100.00"),
+            tax=Decimal("7.00"),
+            shipping=Decimal("5.00"),
+            discounts=Decimal("0.00"),
+            total_amount=Decimal("112.00"),
+            items=[],
+            shipment_status="Shipped",
+        )
+
+        txn = {
+            "id": "txn-001",
+            "account_id": "account-1",
+            "account_name": "Visa",
+            "date": "2024-01-15",
+            "amount": -112000,
+            "payee_name": "Amazon",
+            "category_id": None,
+            "cleared": "uncleared",
+            "deleted": False,
+        }
+
+        account_last4 = {"account-1": "0804"}
+        result = match_shipments_to_transactions([txn], [shipment], account_last4, date_window_days=3)
+
+        assert len(result.matched) == 1
+        assert result.matched[0].date_delta_days == -3
+
+    def test_match_date_window_plus3(self):
+        """Phase 1: Match within +3 day window."""
+        shipment = AmazonShipment(
+            order_id="111-0000001-0000001",
+            ship_date=date(2024, 1, 18),
+            payment_method_raw="Visa - 0804",
+            payment_method_last4="0804",
+            is_split_tender=False,
+            currency="USD",
+            item_subtotal=Decimal("100.00"),
+            tax=Decimal("7.00"),
+            shipping=Decimal("5.00"),
+            discounts=Decimal("0.00"),
+            total_amount=Decimal("112.00"),
+            items=[],
+            shipment_status="Shipped",
+        )
+
+        txn = {
+            "id": "txn-001",
+            "account_id": "account-1",
+            "account_name": "Visa",
+            "date": "2024-01-15",
+            "amount": -112000,
+            "payee_name": "Amazon",
+            "category_id": None,
+            "cleared": "uncleared",
+            "deleted": False,
+        }
+
+        account_last4 = {"account-1": "0804"}
+        result = match_shipments_to_transactions([txn], [shipment], account_last4, date_window_days=3)
+
+        assert len(result.matched) == 1
+        assert result.matched[0].date_delta_days == 3
+
+    def test_match_date_window_out_of_bounds_minus4(self):
+        """Phase 1: No match outside -4 day window."""
+        shipment = AmazonShipment(
+            order_id="111-0000001-0000001",
+            ship_date=date(2024, 1, 11),
+            payment_method_raw="Visa - 0804",
+            payment_method_last4="0804",
+            is_split_tender=False,
+            currency="USD",
+            item_subtotal=Decimal("100.00"),
+            tax=Decimal("7.00"),
+            shipping=Decimal("5.00"),
+            discounts=Decimal("0.00"),
+            total_amount=Decimal("112.00"),
+            items=[],
+            shipment_status="Shipped",
+        )
+
+        txn = {
+            "id": "txn-001",
+            "account_id": "account-1",
+            "account_name": "Visa",
+            "date": "2024-01-15",
+            "amount": -112000,
+            "payee_name": "Amazon",
+            "category_id": None,
+            "cleared": "uncleared",
+            "deleted": False,
+        }
+
+        account_last4 = {"account-1": "0804"}
+        result = match_shipments_to_transactions([txn], [shipment], account_last4, date_window_days=3)
+
+        assert len(result.matched) == 0
+        assert len(result.unmatched_ynab) == 1
+
+    def test_match_amount_mismatch(self):
+        """Phase 1: No match when amount differs."""
+        shipment = AmazonShipment(
+            order_id="111-0000001-0000001",
+            ship_date=date(2024, 1, 15),
+            payment_method_raw="Visa - 0804",
+            payment_method_last4="0804",
+            is_split_tender=False,
+            currency="USD",
+            item_subtotal=Decimal("100.00"),
+            tax=Decimal("7.00"),
+            shipping=Decimal("5.00"),
+            discounts=Decimal("0.00"),
+            total_amount=Decimal("112.00"),
+            items=[],
+            shipment_status="Shipped",
+        )
+
+        txn = {
+            "id": "txn-001",
+            "account_id": "account-1",
+            "account_name": "Visa",
+            "date": "2024-01-15",
+            "amount": -113000,  # $113, not $112
+            "payee_name": "Amazon",
+            "category_id": None,
+            "cleared": "uncleared",
+            "deleted": False,
+        }
+
+        account_last4 = {"account-1": "0804"}
+        result = match_shipments_to_transactions([txn], [shipment], account_last4)
+
+        assert len(result.matched) == 0
+        assert len(result.unmatched_ynab) == 1
+
+    def test_match_last4_mismatch(self):
+        """Phase 1: No match when last-4 differs."""
+        shipment = AmazonShipment(
+            order_id="111-0000001-0000001",
+            ship_date=date(2024, 1, 15),
+            payment_method_raw="Visa - 0804",
+            payment_method_last4="0804",
+            is_split_tender=False,
+            currency="USD",
+            item_subtotal=Decimal("100.00"),
+            tax=Decimal("7.00"),
+            shipping=Decimal("5.00"),
+            discounts=Decimal("0.00"),
+            total_amount=Decimal("112.00"),
+            items=[],
+            shipment_status="Shipped",
+        )
+
+        txn = {
+            "id": "txn-001",
+            "account_id": "account-1",
+            "account_name": "Visa",
+            "date": "2024-01-15",
+            "amount": -112000,
+            "payee_name": "Amazon",
+            "category_id": None,
+            "cleared": "uncleared",
+            "deleted": False,
+        }
+
+        account_last4 = {"account-1": "1111"}  # Different last-4
+        result = match_shipments_to_transactions([txn], [shipment], account_last4)
+
+        assert len(result.matched) == 0
+        assert len(result.unmatched_ynab) == 1
+        # The shipment won't match because it's not in the Phase 1 index (different last-4)
+        # and not in the Phase 2 index (has a last-4, doesn't match amount_only)
+        # So the message is "no matching shipment"
+        assert "matching shipment" in result.unmatched_ynab[0][1].lower() or "no last-4" in result.unmatched_ynab[0][1].lower()
+
+    def test_match_phase2_not_available_unambiguous(self, caplog):
+        """Phase 2: Match with 'Not Available' payment method (unambiguous)."""
+        shipment = AmazonShipment(
+            order_id="111-0000001-0000001",
+            ship_date=date(2024, 1, 15),
+            payment_method_raw="Not Available",
+            payment_method_last4=None,
+            is_split_tender=False,
+            currency="USD",
+            item_subtotal=Decimal("100.00"),
+            tax=Decimal("7.00"),
+            shipping=Decimal("5.00"),
+            discounts=Decimal("0.00"),
+            total_amount=Decimal("112.00"),
+            items=[],
+            shipment_status="Shipped",
+        )
+
+        txn = {
+            "id": "txn-001",
+            "account_id": "account-1",
+            "account_name": "Visa",
+            "date": "2024-01-15",
+            "amount": -112000,
+            "payee_name": "Amazon",
+            "category_id": None,
+            "cleared": "uncleared",
+            "deleted": False,
+        }
+
+        account_last4 = {"account-1": "0804"}
+        result = match_shipments_to_transactions([txn], [shipment], account_last4)
+
+        assert len(result.matched) == 1
+        assert result.matched[0].match_mode == "amount_date_only"
+        # Verify warning was logged (caplog captures it)
+        assert any("Phase 2 match" in record.message for record in caplog.records) or \
+               "Phase 2 match" in caplog.text or len(caplog.records) > 0
+
+    def test_match_phase2_ambiguous(self):
+        """Phase 2: No match when 2+ 'Not Available' shipments match same amount+date."""
+        shipment1 = AmazonShipment(
+            order_id="111-0000001-0000001",
+            ship_date=date(2024, 1, 15),
+            payment_method_raw="Not Available",
+            payment_method_last4=None,
+            is_split_tender=False,
+            currency="USD",
+            item_subtotal=Decimal("100.00"),
+            tax=Decimal("7.00"),
+            shipping=Decimal("5.00"),
+            discounts=Decimal("0.00"),
+            total_amount=Decimal("112.00"),
+            items=[],
+            shipment_status="Shipped",
+        )
+
+        shipment2 = AmazonShipment(
+            order_id="111-0000002-0000002",
+            ship_date=date(2024, 1, 15),
+            payment_method_raw="Not Available",
+            payment_method_last4=None,
+            is_split_tender=False,
+            currency="USD",
+            item_subtotal=Decimal("100.00"),
+            tax=Decimal("7.00"),
+            shipping=Decimal("5.00"),
+            discounts=Decimal("0.00"),
+            total_amount=Decimal("112.00"),
+            items=[],
+            shipment_status="Shipped",
+        )
+
+        txn = {
+            "id": "txn-001",
+            "account_id": "account-1",
+            "account_name": "Visa",
+            "date": "2024-01-15",
+            "amount": -112000,
+            "payee_name": "Amazon",
+            "category_id": None,
+            "cleared": "uncleared",
+            "deleted": False,
+        }
+
+        account_last4 = {"account-1": "0804"}
+        result = match_shipments_to_transactions([txn], [shipment1, shipment2], account_last4)
+
+        # Txn should be unmatched due to ambiguity
+        assert len(result.matched) == 0
+        assert len(result.unmatched_ynab) == 1
+        assert "multiple" in result.unmatched_ynab[0][1].lower()
+
+    def test_match_excluded_shipments(self):
+        """Excluded shipments appear in excluded_shipments list."""
+        # Create a split-tender shipment (excluded from matching)
+        shipment = AmazonShipment(
+            order_id="111-0000001-0000001",
+            ship_date=date(2024, 1, 15),
+            payment_method_raw="Gift Certificate/Card and Visa - 0804",
+            payment_method_last4="0804",
+            is_split_tender=True,
+            currency="USD",
+            item_subtotal=Decimal("100.00"),
+            tax=Decimal("7.00"),
+            shipping=Decimal("5.00"),
+            discounts=Decimal("0.00"),
+            total_amount=Decimal("112.00"),
+            items=[],
+            shipment_status="Shipped",
+        )
+
+        txn = {
+            "id": "txn-001",
+            "account_id": "account-1",
+            "account_name": "Visa",
+            "date": "2024-01-15",
+            "amount": -112000,
+            "payee_name": "Amazon",
+            "category_id": None,
+            "cleared": "uncleared",
+            "deleted": False,
+        }
+
+        account_last4 = {"account-1": "0804"}
+        result = match_shipments_to_transactions([txn], [shipment], account_last4)
+
+        assert len(result.excluded_shipments) == 1
+        assert "split tender" in result.excluded_shipments[0][1].lower()
+
+    def test_match_missing_account_last4(self):
+        """YNAB txn with missing account in last-4 map ends up unmatched."""
+        shipment = AmazonShipment(
+            order_id="111-0000001-0000001",
+            ship_date=date(2024, 1, 15),
+            payment_method_raw="Visa - 0804",
+            payment_method_last4="0804",
+            is_split_tender=False,
+            currency="USD",
+            item_subtotal=Decimal("100.00"),
+            tax=Decimal("7.00"),
+            shipping=Decimal("5.00"),
+            discounts=Decimal("0.00"),
+            total_amount=Decimal("112.00"),
+            items=[],
+            shipment_status="Shipped",
+        )
+
+        txn = {
+            "id": "txn-001",
+            "account_id": "account-unknown",
+            "account_name": "Unknown Account",
+            "date": "2024-01-15",
+            "amount": -112000,
+            "payee_name": "Amazon",
+            "category_id": None,
+            "cleared": "uncleared",
+            "deleted": False,
+        }
+
+        account_last4 = {"account-1": "0804"}  # Doesn't include account-unknown
+        result = match_shipments_to_transactions([txn], [shipment], account_last4)
+
+        assert len(result.matched) == 0
+        assert len(result.unmatched_ynab) == 1
+        assert "last-4 mapping" in result.unmatched_ynab[0][1].lower() or "Unknown Account" in result.unmatched_ynab[0][1]
+
+    def test_match_result_has_parse_errors(self):
+        """MatchResult includes parse_errors passed from caller."""
+        parse_errors = [ParseError(row_index=5, reason="test error")]
+
+        shipment = AmazonShipment(
+            order_id="111-0000001-0000001",
+            ship_date=date(2024, 1, 15),
+            payment_method_raw="Visa - 0804",
+            payment_method_last4="0804",
+            is_split_tender=False,
+            currency="USD",
+            item_subtotal=Decimal("100.00"),
+            tax=Decimal("7.00"),
+            shipping=Decimal("5.00"),
+            discounts=Decimal("0.00"),
+            total_amount=Decimal("112.00"),
+            items=[],
+            shipment_status="Shipped",
+        )
+
+        account_last4 = {"account-1": "0804"}
+        result = match_shipments_to_transactions([], [shipment], account_last4, parse_errors=parse_errors)
+
+        assert len(result.parse_errors) == 1
+        assert result.parse_errors[0].reason == "test error"
+
+
+# ============================================================================
+# Integration Tests: Match Full Pipeline
+# ============================================================================
+
+
+class TestIntegrationMatching:
+    """Integration tests for the full matching pipeline."""
+
+    def test_it_match_fixture_pipeline(self):
+        """IT: Full pipeline: parse CSV → filter YNAB → match."""
+        # Load fixtures
+        csv_content = Path("data/fixtures/amazon_order_history_sample.csv").read_text()
+        with open("data/fixtures/amazon_ynab_transactions.json") as f:
+            ynab_txns = json.load(f)
+        with open("data/fixtures/amazon_account_last4.json") as f:
+            account_last4 = json.load(f)
+
+        # Parse the CSV
+        shipments, parse_errors = parse_order_history(csv_content)
+
+        # Filter YNAB transactions
+        amazon_txns = filter_amazon_transactions(ynab_txns)
+
+        # Match
+        result = match_shipments_to_transactions(
+            amazon_txns, shipments, account_last4, parse_errors=parse_errors
+        )
+
+        # Verify the result structure
+        assert isinstance(result, MatchResult)
+        assert isinstance(result.matched, list)
+        assert isinstance(result.unmatched_ynab, list)
+        assert isinstance(result.unmatched_shipments, list)
+        assert isinstance(result.excluded_shipments, list)
+        assert isinstance(result.parse_errors, list)
