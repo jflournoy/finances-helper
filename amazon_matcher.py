@@ -468,7 +468,6 @@ def match_shipments_to_transactions(
     account_last4_map: dict[str, str],
     parse_errors: list[ParseError] | None = None,
     date_window_days: int = 3,
-    caplog=None,  # For testing, allows capturing warnings
 ) -> MatchResult:
     """Match Amazon shipments to YNAB transactions using a two-phase algorithm.
 
@@ -481,7 +480,6 @@ def match_shipments_to_transactions(
         account_last4_map: Dict mapping account_id to card last-4 digits
         parse_errors: List of ParseError from parsing (passed through to result)
         date_window_days: Number of days before/after for matching (default 3)
-        caplog: For testing, allows capturing log messages
 
     Returns:
         MatchResult with matched, unmatched_ynab, unmatched_shipments, excluded_shipments
