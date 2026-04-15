@@ -681,8 +681,9 @@ class ItemAllocation:
 def allocate_shipment_to_items(shipment: AmazonShipment) -> list[ItemAllocation]:
     """Allocate a multi-item shipment's total pro-rata across items.
 
-    Ensures the subtransaction amounts sum to the parent amount exactly via
-    deterministic banker's rounding.
+    Each item gets a share of the total proportional to its subtotal. Any
+    sub-cent rounding remainder is dumped onto the last item so the
+    allocations sum exactly to shipment.total_amount.
 
     Args:
         shipment: An AmazonShipment with one or more items
