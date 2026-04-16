@@ -161,7 +161,7 @@ class AmazonItem:
     raw_row_index: int  # 1-based CSV row for error reporting
 
 
-@dataclass(frozen=True)
+@dataclass
 class AmazonShipment:
     """A shipment (may contain multiple items)."""
 
@@ -178,7 +178,6 @@ class AmazonShipment:
     total_amount: Decimal
     items: list[AmazonItem]
     shipment_status: str
-    matched_to_ynab_id: str | None = None
 
     @property
     def expected_charge(self) -> Decimal:
@@ -531,9 +530,6 @@ def match_shipments_to_transactions(
 
     # Phase 1: Enumerate candidates for each matchable shipment
     candidates = []  # list of (shipment, [(txn, date_delta), ...])
-    # Use a tuple (order_id, total_amount) as key to uniquely identify shipments
-    # (since same order can have multiple shipments with different amounts)
-    shipment_key_to_index = {}
 
     for shipment in matchable:
         shipment_candidates = []
@@ -548,14 +544,11 @@ def match_shipments_to_transactions(
                 if abs(date_delta) <= date_window_days:
                     shipment_candidates.append((txn, date_delta))
 
-        # Use (order_id, total_amount) to uniquely identify this shipment
-        shipment_key = (shipment.order_id, str(shipment.total_amount))
-        shipment_key_to_index[shipment_key] = len(candidates)
         candidates.append((shipment, shipment_candidates))
 
     # Phase 2 & 3: Iterative resolution
     consumed_txn_ids = set()
-    resolved = {}  # (order_id, total_amount) → (txn, date_delta)
+    resolved = {}  # index → (txn, date_delta)
     # Track unresolved by index (not by order_id, since multiple shipments can share order_id)
     unresolved_indices = set(range(len(candidates)))
 
@@ -593,8 +586,7 @@ def match_shipments_to_transactions(
                 if not case_b:
                     # Safe to consume
                     txn, date_delta = cands[0]
-                    shipment_key = (shipment.order_id, str(shipment.total_amount))
-                    resolved[shipment_key] = (txn, date_delta)
+                    resolved[idx] = (txn, date_delta)
                     consumed_txn_ids.add(txn["id"])
                     unresolved_indices.remove(idx)
                     changed = True
@@ -609,8 +601,7 @@ def match_shipments_to_transactions(
                     key=lambda c: (abs(c[1]), c[0]["date"], c[0]["id"])
                 )
                 txn, date_delta = sorted_cands[0]
-                shipment_key = (shipment.order_id, str(shipment.total_amount))
-                resolved[shipment_key] = (txn, date_delta)
+                resolved[idx] = (txn, date_delta)
                 consumed_txn_ids.add(txn["id"])
                 unresolved_indices.remove(idx)
                 changed = True
@@ -642,23 +633,29 @@ def match_shipments_to_transactions(
         )
 
     # Build matched list
-    for (order_id, total_amount_str), (txn, date_delta) in resolved.items():
-        # Find the shipment by order_id and total_amount
-        for idx, (shipment, _) in enumerate(candidates):
-            if shipment.order_id == order_id and str(shipment.total_amount) == total_amount_str:
-                match = MatchCandidate(
-                    ynab_txn=txn,
-                    shipment=shipment,
-                    date_delta_days=date_delta,
-                )
-                matched.append(match)
-                break
+    for idx, (txn, date_delta) in resolved.items():
+        shipment, _ = candidates[idx]
+        match = MatchCandidate(
+            ynab_txn=txn,
+            shipment=shipment,
+            date_delta_days=date_delta,
+        )
+        matched.append(match)
 
     # Unmatched YNAB transactions
     matched_txn_ids = {m.ynab_txn["id"] for m in matched}
+    contended_txn_ids = set()
+    for shipment, cands in case_b_shipments:
+        for t, _ in cands:
+            contended_txn_ids.add(t["id"])
+
     for txn in ynab_txns:
         if txn["id"] not in matched_txn_ids:
-            unmatched_ynab.append((txn, "no matching shipment in dump"))
+            if txn["id"] in contended_txn_ids:
+                reason = f"contended: multiple shipments share this txn — check for missing charge or duplicate"
+            else:
+                reason = "no matching shipment in dump"
+            unmatched_ynab.append((txn, reason))
 
     # Unmatched shipments = those with zero candidates OR Case B contention
     zero_candidate_indices = [idx for idx in unresolved_indices if len(candidates[idx][1]) == 0]

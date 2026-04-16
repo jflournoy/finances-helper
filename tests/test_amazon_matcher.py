@@ -80,6 +80,18 @@ class TestMoney:
         """
         assert _money("Not Available") == Decimal("0")
 
+    def test_money_single_quoted(self):
+        """Excel CSV exports wrap values in single quotes.
+
+        When Excel exports CSV, it sometimes wraps decimal values in single quotes.
+        _money() should strip these and parse the value.
+        """
+        assert _money("'37.09'") == Decimal("37.09")
+
+    def test_money_single_quoted_negative(self):
+        """Negative values with Excel single quotes."""
+        assert _money("'-1.22'") == Decimal("-1.22")
+
 
 # ============================================================================
 # Unit Tests: find_latest_dump()
@@ -1095,7 +1107,8 @@ class TestMatchShipmentsToTransactions:
         assert len(result.matched) == 0
         assert len(result.unmatched_shipments) == 2
         assert len(result.unmatched_ynab) == 1
-        assert all("contended" in s[1].lower() for s in [(s, "contended") for s in result.unmatched_shipments])
+        # Check contended reason on the unmatched txn
+        assert "contended" in result.unmatched_ynab[0][1].lower()
         # Check for logger.error
         assert any(record.levelname == "ERROR" and "contended" in record.message.lower() for record in caplog.records)
 
@@ -1378,6 +1391,98 @@ class TestMatchShipmentsToTransactions:
         matched_set2 = {(m.shipment.order_id, m.ynab_txn["id"]) for m in result2.matched}
         
         assert matched_set1 == matched_set2
+
+    def test_match_same_order_id_same_amount_different_items(self):
+        """Bug #66: Two shipments same order_id, same amount, different items.
+
+        Real data: order 112-1522950-2165026 has 2 shipments @ $15.05 each.
+        Both should match distinct txns, not one overwrite the other.
+        """
+        shipment1 = AmazonShipment(
+            order_id="112-1522950-2165026",
+            ship_date=date(2024, 1, 15),
+            payment_method_raw="Visa - 0804",
+            payment_method_last4="0804",
+            is_split_tender=False,
+            currency="USD",
+            item_subtotal=Decimal("14.00"),
+            tax=Decimal("1.05"),
+            shipping=Decimal("0.00"),
+            discounts=Decimal("0.00"),
+            total_amount=Decimal("15.05"),
+            items=[
+                AmazonItem(
+                    order_id="112-1522950-2165026",
+                    ship_date=date(2024, 1, 15),
+                    asin="AAAA111111",
+                    product_name="Item A",
+                    quantity=1,
+                    unit_price=Decimal("14.00"),
+                    unit_price_tax=Decimal("1.05"),
+                    raw_row_index=2,
+                )
+            ],
+            shipment_status="Shipped",
+        )
+        shipment2 = AmazonShipment(
+            order_id="112-1522950-2165026",
+            ship_date=date(2024, 1, 16),
+            payment_method_raw="Visa - 0804",
+            payment_method_last4="0804",
+            is_split_tender=False,
+            currency="USD",
+            item_subtotal=Decimal("14.00"),
+            tax=Decimal("1.05"),
+            shipping=Decimal("0.00"),
+            discounts=Decimal("0.00"),
+            total_amount=Decimal("15.05"),
+            items=[
+                AmazonItem(
+                    order_id="112-1522950-2165026",
+                    ship_date=date(2024, 1, 16),
+                    asin="BBBB222222",
+                    product_name="Item B",
+                    quantity=1,
+                    unit_price=Decimal("14.00"),
+                    unit_price_tax=Decimal("1.05"),
+                    raw_row_index=3,
+                )
+            ],
+            shipment_status="Shipped",
+        )
+
+        txn1 = {
+            "id": "txn-ship1",
+            "account_id": "account-1",
+            "account_name": "Visa",
+            "date": "2024-01-15",
+            "amount": -15050,
+            "payee_name": "Amazon",
+            "category_id": None,
+            "cleared": "uncleared",
+            "deleted": False,
+        }
+        txn2 = {
+            "id": "txn-ship2",
+            "account_id": "account-1",
+            "account_name": "Visa",
+            "date": "2024-01-16",
+            "amount": -15050,
+            "payee_name": "Amazon",
+            "category_id": None,
+            "cleared": "uncleared",
+            "deleted": False,
+        }
+
+        result = match_shipments_to_transactions([txn1, txn2], [shipment1, shipment2])
+
+        # Both shipments should match distinct txns
+        assert len(result.matched) == 2
+        matched_pairs = {m.shipment.order_id: [m.ynab_txn["id"] for m in result.matched if m.shipment.order_id == m.shipment.order_id] for m in result.matched}
+        # Simpler check: just verify both txns are matched and both shipments are matched
+        matched_txn_ids = {m.ynab_txn["id"] for m in result.matched}
+        assert "txn-ship1" in matched_txn_ids
+        assert "txn-ship2" in matched_txn_ids
 
 
 class TestAllocateShipmentToItems:
