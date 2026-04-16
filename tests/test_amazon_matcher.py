@@ -1338,7 +1338,7 @@ class TestMatchShipmentsToTransactions:
 
         assert len(result.matched) == 3
         matched_pairs = {m.shipment.order_id: m.ynab_txn["id"] for m in result.matched}
-        assert matched_pairs["111-0000001-0000001"] in ["txn-a1", "txn-a2"]
+        assert matched_pairs["111-0000001-0000001"] == "txn-a1"
         assert matched_pairs["111-0000002-0000002"] == "txn-b"
         assert matched_pairs["111-0000003-0000003"] == "txn-c"
 
