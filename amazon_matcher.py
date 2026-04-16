@@ -8,7 +8,7 @@ import csv
 import logging
 import re
 from dataclasses import dataclass
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
 from decimal import Decimal, InvalidOperation, ROUND_HALF_EVEN
 from pathlib import Path
 from zipfile import ZipFile, BadZipFile
@@ -19,10 +19,10 @@ logger = logging.getLogger(__name__)
 def _money(s: str) -> Decimal:
     """Parse a currency string to Decimal.
 
-    Strips $, commas, and whitespace. Empty string returns 0.
+    Strips $, commas, whitespace, and Excel single quotes. Empty string returns 0.
 
     Args:
-        s: Currency string (e.g., "$1,234.56")
+        s: Currency string (e.g., "$1,234.56" or "'1234.56'" from Excel exports)
 
     Returns:
         Decimal value
@@ -32,11 +32,40 @@ def _money(s: str) -> Decimal:
     """
     if s is None or s.strip() == "":
         return Decimal("0")
-    cleaned = s.strip().replace("$", "").replace(",", "")
+    if s.strip() == "Not Available":
+        return Decimal("0")
+    cleaned = s.strip().replace("$", "").replace(",", "").replace("'", "")
     try:
         return Decimal(cleaned)
     except InvalidOperation as e:
         raise ValueError(f"Unparseable money value: {s!r}") from e
+
+
+def _parse_amazon_date(s: str) -> date | None:
+    """Parse an Amazon CSV date field to a `date`.
+
+    Accepts both the legacy date-only format (``2024-01-16``) and the
+    ISO8601 datetime format emitted by the "Request My Data" export
+    (``2025-04-12T18:27:51.050Z``, with optional fractional seconds and
+    ``Z`` UTC marker). Returns ``None`` if the value cannot be parsed.
+    """
+    if s is None:
+        return None
+    s = s.strip()
+    if not s:
+        return None
+    # Legacy date-only: take the first whitespace-separated token.
+    first = s.split()[0]
+    try:
+        return date.fromisoformat(first)
+    except ValueError:
+        pass
+    # ISO8601 datetime: strip trailing 'Z' (UTC) so fromisoformat accepts it.
+    candidate = first[:-1] if first.endswith("Z") else first
+    try:
+        return datetime.fromisoformat(candidate).date()
+    except ValueError:
+        return None
 
 
 def find_latest_dump(imports_dir: Path = Path("data/imports")) -> Path:
@@ -132,7 +161,7 @@ class AmazonItem:
     raw_row_index: int  # 1-based CSV row for error reporting
 
 
-@dataclass
+@dataclass(frozen=True)
 class AmazonShipment:
     """A shipment (may contain multiple items)."""
 
@@ -258,9 +287,8 @@ def parse_order_history(csv_text: str) -> tuple[list[AmazonShipment], list[Parse
         # Parse ship date
         ship_date = None
         if row["Ship Date"] != "Not Available":
-            try:
-                ship_date = date.fromisoformat(row["Ship Date"].split()[0])
-            except (ValueError, IndexError):
+            ship_date = _parse_amazon_date(row["Ship Date"])
+            if ship_date is None:
                 errors.append(
                     ParseError(row_index=row_index, reason=f"unparseable ship date: {row['Ship Date']}")
                 )
@@ -406,7 +434,6 @@ class MatchCandidate:
     ynab_txn: dict
     shipment: AmazonShipment
     date_delta_days: int  # signed: ship_date - ynab_date
-    match_mode: str  # "strict" or "amount_date_only"
 
 
 @dataclass
@@ -464,24 +491,18 @@ def filter_amazon_transactions(ynab_txns: list[dict]) -> list[dict]:
 def match_shipments_to_transactions(
     ynab_txns: list[dict],
     shipments: list[AmazonShipment],
-    account_last4_map: dict[str, str],
     parse_errors: list[ParseError] | None = None,
     date_window_days: int = 3,
 ) -> MatchResult:
-    """Match Amazon shipments to YNAB transactions using a two-phase algorithm.
-
-    Phase 1: Strict match (amount + last-4 + date window)
-    Phase 2: Fallback for "Not Available" payment method (amount+date only, with warnings)
-
-    Args:
-        ynab_txns: List of YNAB transaction dicts (pre-filtered for Amazon payees)
-        shipments: List of AmazonShipment objects from parse_order_history()
-        account_last4_map: Dict mapping account_id to card last-4 digits
-        parse_errors: List of ParseError from parsing (passed through to result)
-        date_window_days: Number of days before/after for matching (default 3)
-
-    Returns:
-        MatchResult with matched, unmatched_ynab, unmatched_shipments, excluded_shipments
+    """Match Amazon shipments to YNAB transactions using shipment-pivoted algorithm.
+    
+    No account_last4_map required. Matches by amount + date window.
+    
+    Algorithm: Two-pass "resolve-easy-first"
+    - Phase 1: Enumerate candidates for each matchable shipment
+    - Phase 2: Iteratively resolve singletons (no contention)
+    - Phase 3: Case A - tiebreak for multi-candidate shipments
+    - Phase 4: Classify remaining unresolved shipments (Case B error)
     """
     if parse_errors is None:
         parse_errors = []
@@ -508,152 +529,142 @@ def match_shipments_to_transactions(
             reason = "excluded (unknown reason)"
         excluded_shipments_list.append((shipment, reason))
 
-    # ========================================================================
-    # Phase 1: Strict match (amount + last-4 + date)
-    # ========================================================================
+    # Phase 1: Enumerate candidates for each matchable shipment
+    candidates = []  # list of (shipment, [(txn, date_delta), ...])
+    # Use a tuple (order_id, total_amount) as key to uniquely identify shipments
+    # (since same order can have multiple shipments with different amounts)
+    shipment_key_to_index = {}
 
-    # Build index by (last-4, amount) for Phase 1
-    by_last4_and_amount: dict[tuple[str, Decimal], list[AmazonShipment]] = {}
     for shipment in matchable:
-        if shipment.payment_method_last4:
-            # Convert total_amount to dollars (it's already in dollars, unlike YNAB milliutils)
-            key = (shipment.payment_method_last4, shipment.total_amount)
-            if key not in by_last4_and_amount:
-                by_last4_and_amount[key] = []
-            by_last4_and_amount[key].append(shipment)
+        shipment_candidates = []
 
-    for txn in ynab_txns:
-        # Get expected last-4 for this account
-        expected_last4 = account_last4_map.get(txn["account_id"])
-        if expected_last4 is None:
-            account_name = txn.get("account_name", txn["account_id"])
-            unmatched_ynab.append(
-                (txn, f"no last-4 mapping for account {account_name}")
-            )
-            continue  # Skip Phase 2 for this txn
+        for txn in ynab_txns:
+            txn_amt = abs(Decimal(txn["amount"])) / Decimal(1000)
+            txn_date = date.fromisoformat(txn["date"])
 
-        # Convert YNAB amount to dollars (YNAB stores in milliutils as negative outflow)
-        ynab_amt = abs(Decimal(txn["amount"])) / Decimal(1000)
-        ynab_date = date.fromisoformat(txn["date"])
+            # Check exact amount match and date window
+            if txn_amt == shipment.total_amount and shipment.ship_date is not None:
+                date_delta = (shipment.ship_date - txn_date).days
+                if abs(date_delta) <= date_window_days:
+                    shipment_candidates.append((txn, date_delta))
 
-        # Look up candidates
-        candidates = by_last4_and_amount.get((expected_last4, ynab_amt), [])
+        # Use (order_id, total_amount) to uniquely identify this shipment
+        shipment_key = (shipment.order_id, str(shipment.total_amount))
+        shipment_key_to_index[shipment_key] = len(candidates)
+        candidates.append((shipment, shipment_candidates))
 
-        # Filter by date window and not yet matched
-        date_candidates = [
-            s
-            for s in candidates
-            if s.matched_to_ynab_id is None
-            and s.ship_date
-            and ynab_date - timedelta(days=date_window_days)
-            <= s.ship_date
-            <= ynab_date + timedelta(days=date_window_days)
-        ]
+    # Phase 2 & 3: Iterative resolution
+    consumed_txn_ids = set()
+    resolved = {}  # (order_id, total_amount) → (txn, date_delta)
+    # Track unresolved by index (not by order_id, since multiple shipments can share order_id)
+    unresolved_indices = set(range(len(candidates)))
 
-        if len(date_candidates) == 1:
-            # Exact 1 match
-            shipment = date_candidates[0]
-            date_delta = (shipment.ship_date - ynab_date).days
-            match = MatchCandidate(
-                ynab_txn=txn,
-                shipment=shipment,
-                date_delta_days=date_delta,
-                match_mode="strict",
-            )
-            matched.append(match)
-            shipment.matched_to_ynab_id = txn["id"]
-        elif len(date_candidates) > 1:
-            # Multiple candidates: pick first by abs(date_delta) asc, then ship_date asc
-            sorted_candidates = sorted(
-                date_candidates,
-                key=lambda s: (abs((s.ship_date - ynab_date).days), s.ship_date),
-            )
-            shipment = sorted_candidates[0]
-            date_delta = (shipment.ship_date - ynab_date).days
-            match = MatchCandidate(
-                ynab_txn=txn,
-                shipment=shipment,
-                date_delta_days=date_delta,
-                match_mode="strict",
-            )
-            matched.append(match)
-            shipment.matched_to_ynab_id = txn["id"]
-        else:
-            # No Phase 1 match, defer to Phase 2
-            pass
+    max_iterations = 100
+    iteration = 0
 
-    # ========================================================================
-    # Phase 2: Fallback for "Not Available" payment method (amount+date only)
-    # ========================================================================
+    while unresolved_indices and iteration < max_iterations:
+        iteration += 1
+        changed = False
 
-    # Build index by amount only for Phase 2
-    by_amount_only: dict[Decimal, list[AmazonShipment]] = {}
-    for shipment in matchable:
-        if shipment.payment_method_last4 is None:
-            if shipment.total_amount not in by_amount_only:
-                by_amount_only[shipment.total_amount] = []
-            by_amount_only[shipment.total_amount].append(shipment)
+        # Update candidate lists (drop consumed txns)
+        for idx in list(unresolved_indices):
+            shipment, cands = candidates[idx]
+            cands = [(t, d) for t, d in cands if t["id"] not in consumed_txn_ids]
+            candidates[idx] = (shipment, cands)
 
-    # Track which txns have been addressed (matched or in unmatched_ynab)
-    addressed_txn_ids = set(m.ynab_txn["id"] for m in matched)
-    addressed_txn_ids.update(txn[0]["id"] for txn in unmatched_ynab)
+        # Phase 2: Resolve singletons
+        for idx in list(unresolved_indices):
+            shipment, cands = candidates[idx]
 
-    for txn in ynab_txns:
-        # Skip if already addressed
-        if txn["id"] in addressed_txn_ids:
-            continue
-
-        ynab_amt = abs(Decimal(txn["amount"])) / Decimal(1000)
-        ynab_date = date.fromisoformat(txn["date"])
-
-        # Look up candidates
-        candidates = by_amount_only.get(ynab_amt, [])
-
-        # Filter by date window and not yet matched
-        date_candidates = [
-            s
-            for s in candidates
-            if s.matched_to_ynab_id is None
-            and s.ship_date
-            and ynab_date - timedelta(days=date_window_days)
-            <= s.ship_date
-            <= ynab_date + timedelta(days=date_window_days)
-        ]
-
-        if len(date_candidates) == 1:
-            # Exactly 1 match - emit warning
-            shipment = date_candidates[0]
-            date_delta = (shipment.ship_date - ynab_date).days
-            logger.warning(
-                f"Phase 2 match (not available payment): YNAB txn {txn['id']} matched to "
-                f"Amazon order {shipment.order_id} via amount+date only (no card info)"
-            )
-            match = MatchCandidate(
-                ynab_txn=txn,
-                shipment=shipment,
-                date_delta_days=date_delta,
-                match_mode="amount_date_only",
-            )
-            matched.append(match)
-            shipment.matched_to_ynab_id = txn["id"]
-        elif len(date_candidates) > 1:
-            # Ambiguous: multiple shipments match same amount+date
-            unmatched_ynab.append(
-                (
-                    txn,
-                    "multiple Amazon shipments match amount+date but payment method missing — "
-                    "disambiguate manually",
+            if len(cands) == 0:
+                # No match
+                unresolved_indices.remove(idx)
+                changed = True
+            elif len(cands) == 1:
+                # Check for Case B: another unresolved shipment also has this as sole candidate
+                txn = cands[0][0]
+                case_b = any(
+                    idx2 != idx and
+                    idx2 in unresolved_indices and
+                    len(candidates[idx2][1]) == 1 and
+                    candidates[idx2][1][0][0]["id"] == txn["id"]
+                    for idx2 in unresolved_indices
                 )
-            )
-        else:
-            # No match in Phase 2
-            unmatched_ynab.append((txn, "no matching shipment in dump — dump may be outdated"))
+                if not case_b:
+                    # Safe to consume
+                    txn, date_delta = cands[0]
+                    shipment_key = (shipment.order_id, str(shipment.total_amount))
+                    resolved[shipment_key] = (txn, date_delta)
+                    consumed_txn_ids.add(txn["id"])
+                    unresolved_indices.remove(idx)
+                    changed = True
 
-    # ========================================================================
-    # Build final unmatched_shipments list
-    # ========================================================================
+        # Phase 3: Tiebreak for multi-candidate shipments
+        for idx in list(unresolved_indices):
+            shipment, cands = candidates[idx]
+            if len(cands) >= 2:
+                # Sort: (abs(date_delta), txn_date, txn_id)
+                sorted_cands = sorted(
+                    cands,
+                    key=lambda c: (abs(c[1]), c[0]["date"], c[0]["id"])
+                )
+                txn, date_delta = sorted_cands[0]
+                shipment_key = (shipment.order_id, str(shipment.total_amount))
+                resolved[shipment_key] = (txn, date_delta)
+                consumed_txn_ids.add(txn["id"])
+                unresolved_indices.remove(idx)
+                changed = True
 
-    unmatched_shipments = [s for s in matchable if s.matched_to_ynab_id is None]
+        if not changed:
+            break
+
+    # Phase 4: Classify remaining unresolved shipments
+    case_b_shipments = []
+    for idx in unresolved_indices:
+        shipment, cands = candidates[idx]
+        cands = [(t, d) for t, d in cands if t["id"] not in consumed_txn_ids]
+
+        if len(cands) > 0:
+            # Case B: contention
+            case_b_shipments.append((shipment, cands))
+
+    # Log Case B errors once (not per shipment)
+    if case_b_shipments:
+        all_txn_ids = set()
+        all_shipment_ids = []
+        for shipment, cands in case_b_shipments:
+            all_shipment_ids.append(shipment.order_id)
+            for t, _ in cands:
+                all_txn_ids.add(t["id"])
+        logger.error(
+            f"Contended: {len(case_b_shipments)} shipments share YNAB txn(s) {sorted(all_txn_ids)}. "
+            f"Shipments: {all_shipment_ids}. Reason: check for missing charge or duplicate."
+        )
+
+    # Build matched list
+    for (order_id, total_amount_str), (txn, date_delta) in resolved.items():
+        # Find the shipment by order_id and total_amount
+        for idx, (shipment, _) in enumerate(candidates):
+            if shipment.order_id == order_id and str(shipment.total_amount) == total_amount_str:
+                match = MatchCandidate(
+                    ynab_txn=txn,
+                    shipment=shipment,
+                    date_delta_days=date_delta,
+                )
+                matched.append(match)
+                break
+
+    # Unmatched YNAB transactions
+    matched_txn_ids = {m.ynab_txn["id"] for m in matched}
+    for txn in ynab_txns:
+        if txn["id"] not in matched_txn_ids:
+            unmatched_ynab.append((txn, "no matching shipment in dump"))
+
+    # Unmatched shipments = those with zero candidates OR Case B contention
+    zero_candidate_indices = [idx for idx in unresolved_indices if len(candidates[idx][1]) == 0]
+    zero_candidate_shipments = [candidates[idx][0] for idx in zero_candidate_indices]
+    case_b_unmatched = [s for s, _ in case_b_shipments]
+    unmatched_shipments = zero_candidate_shipments + case_b_unmatched
 
     return MatchResult(
         matched=matched,
@@ -662,6 +673,7 @@ def match_shipments_to_transactions(
         excluded_shipments=excluded_shipments_list,
         parse_errors=parse_errors,
     )
+
 
 
 # ============================================================================
