@@ -1853,8 +1853,8 @@ class TestIntegrationMatching:
 
         # Filter YNAB transactions (should exclude already-categorized, reconciled, non-Amazon)
         amazon_txns = filter_amazon_transactions(ynab_txns)
-        # From fixture: 9 txns, filter removes txn-006 (categorized), txn-007 (reconciled), txn-009 (non-Amazon)
-        assert len(amazon_txns) == 6
+        # From fixture: 12 txns, filter removes txn-006 (categorized), txn-007 (reconciled), txn-009 (non-Amazon)
+        assert len(amazon_txns) == 9, f"Expected 9 Amazon txns, got {len(amazon_txns)}"
 
         # Match (no account_last4_map required)
         result = match_shipments_to_transactions(
@@ -1869,38 +1869,100 @@ class TestIntegrationMatching:
         assert isinstance(result.excluded_shipments, list)
         assert isinstance(result.parse_errors, list)
 
-        # Fixture expectations (pivot-based matching, no Phase 1 vs Phase 2 distinction):
-        # txn-001: date 2024-01-15, amount 37090 ($37.09)
-        #   → matches order 111-0000001-0000001 (ship_date 2024-01-16, $37.09)
-        # txn-002: date 2024-01-16, amount 48120 ($48.12)
-        #   → matches order 111-0000002-0000002 (ship_date 2024-01-17, $48.12)
-        # txn-003: date 2024-01-17, amount 14190 ($14.19)
-        #   → matches order 111-0000003-0000003 item 1 (ship_date 2024-01-18, $14.19)
-        # txn-004: date 2024-01-17, amount 17400 ($17.40)
-        #   → matches order 111-0000003-0000003 item 2 (ship_date 2024-01-18, $17.40)
-        # txn-005: amount 54710, no matching shipment [unmatched]
-        # txn-008: matches but no longer filtered out by account; should match or not based on amount
-
-        # Verify matched transactions: should have 4 matches
-        assert len(result.matched) == 4, f"Expected 4 matches, got {len(result.matched)}"
+        # Verify matched transactions: should have 6 matches
+        assert len(result.matched) == 6, f"Expected 6 matches, got {len(result.matched)}"
 
         # Verify specific matched pairs (txn_id → order_id mapping)
         matched_pairs = {m.ynab_txn["id"]: m.shipment.order_id for m in result.matched}
         assert matched_pairs["txn-001"] == "111-0000001-0000001"
         assert matched_pairs["txn-002"] == "111-0000002-0000002"
-        assert matched_pairs["txn-003"] == "111-0000003-0000003"
-        assert matched_pairs["txn-004"] == "111-0000003-0000003"
+        assert matched_pairs["txn-008"] == "111-0000020-0000020"
+        assert matched_pairs["txn-010"] == "111-0000003-0000003"
+        assert matched_pairs["txn-011"] == "111-0000010-0000010"
+        assert matched_pairs["txn-012"] == "111-0000023-0000023"
 
-        # Verify unmatched YNAB txns: txn-005 has no matching shipment
+        # Verify multi-item shipment item counts
+        txn_010_shipment = next(m.shipment for m in result.matched if m.ynab_txn["id"] == "txn-010")
+        assert len(txn_010_shipment.items) == 3, f"txn-010 shipment should have 3 items, got {len(txn_010_shipment.items)}"
+
+        txn_011_shipment = next(m.shipment for m in result.matched if m.ynab_txn["id"] == "txn-011")
+        assert len(txn_011_shipment.items) == 5, f"txn-011 shipment should have 5 items, got {len(txn_011_shipment.items)}"
+
+        txn_012_shipment = next(m.shipment for m in result.matched if m.ynab_txn["id"] == "txn-012")
+        assert len(txn_012_shipment.items) == 2, f"txn-012 shipment should have 2 items, got {len(txn_012_shipment.items)}"
+
+        # Verify unmatched YNAB txns: txn-003, txn-004, txn-005
         unmatched_ids = {t[0]["id"] for t in result.unmatched_ynab}
-        assert "txn-005" in unmatched_ids, "txn-005 should be unmatched (no matching shipment)"
+        assert "txn-003" in unmatched_ids, "txn-003 should be unmatched (amount doesn't match any shipment)"
+        assert "txn-004" in unmatched_ids, "txn-004 should be unmatched (amount doesn't match any shipment)"
+        assert "txn-005" in unmatched_ids, "txn-005 should be unmatched (date too far from any shipment)"
 
         # Verify fixture has no Case B (contended) errors
         assert not any(record.levelname == "ERROR" and "contended" in record.message.lower() for record in caplog.records), \
             "Fixture should be clean (no contended shipments)"
 
         # Verify excluded shipments exist (from other orders with split tender, Not Available, zero price)
-        assert len(result.excluded_shipments) > 0, "Expected excluded shipments from fixture"
+        assert len(result.excluded_shipments) >= 4, f"Expected ≥4 excluded shipments, got {len(result.excluded_shipments)}"
 
         # Verify parse errors exist (EUR currency, embedded newline, etc.)
-        assert len(result.parse_errors) > 0, "Expected parse errors from fixture"
+        assert len(result.parse_errors) >= 3, f"Expected ≥3 parse errors, got {len(result.parse_errors)}"
+
+
+# ============================================================================
+# Tests: CSV Fixture Structure and Multi-item Shipment Parsing
+# ============================================================================
+
+
+def test_csv_has_28_columns():
+    """Fixture CSV has all 28 real-dump columns."""
+    import csv
+    reader = csv.DictReader(Path("data/fixtures/amazon_order_history_sample.csv").read_text().splitlines())
+    assert len(reader.fieldnames) == 28, f"Expected 28 columns, got {len(reader.fieldnames)}: {reader.fieldnames}"
+
+
+def test_order_003_parses_as_3_item_shipment():
+    """Order 111-0000003 rows all share the same total → 1 shipment with 3 items."""
+    csv_content = Path("data/fixtures/amazon_order_history_sample.csv").read_text()
+    shipments, _ = parse_order_history(csv_content)
+    order_003 = [s for s in shipments if s.order_id == "111-0000003-0000003"]
+    assert len(order_003) == 1, f"Expected 1 shipment for order 003, got {len(order_003)}"
+    assert len(order_003[0].items) == 3, f"Expected 3 items in shipment 003, got {len(order_003[0].items)}"
+
+
+def test_order_010_parses_as_5_item_shipment():
+    """Order 111-0000010 rows all share the same total → 1 shipment with 5 items."""
+    csv_content = Path("data/fixtures/amazon_order_history_sample.csv").read_text()
+    shipments, _ = parse_order_history(csv_content)
+    order_010 = [s for s in shipments if s.order_id == "111-0000010-0000010"]
+    assert len(order_010) == 1, f"Expected 1 shipment for order 010, got {len(order_010)}"
+    assert len(order_010[0].items) == 5, f"Expected 5 items in shipment 010, got {len(order_010[0].items)}"
+
+
+def test_order_023_parses_as_2_item_shipment():
+    """Order 111-0000023 rows share the same total → 1 shipment with 2 items."""
+    csv_content = Path("data/fixtures/amazon_order_history_sample.csv").read_text()
+    shipments, _ = parse_order_history(csv_content)
+    order_023 = [s for s in shipments if s.order_id == "111-0000023-0000023"]
+    assert len(order_023) == 1, f"Expected 1 shipment for order 023, got {len(order_023)}"
+    assert len(order_023[0].items) == 2, f"Expected 2 items in shipment 023, got {len(order_023[0].items)}"
+
+
+def test_header_drift_csv_raises():
+    """Header drift CSV raises ValueError for missing Payment Method Type column."""
+    csv_content = Path("data/fixtures/amazon_order_history_header_drift.csv").read_text()
+    with pytest.raises(ValueError, match="missing required columns"):
+        parse_order_history(csv_content)
+
+
+def test_ynab_fixture_amounts_are_negative():
+    """All YNAB fixture transaction amounts are negative (outflow convention)."""
+    txns = json.load(open("data/fixtures/amazon_ynab_transactions.json"))
+    for txn in txns:
+        assert txn["amount"] < 0, f"{txn['id']} has non-negative amount {txn['amount']}"
+
+
+def test_ynab_fixture_amounts_are_whole_cents():
+    """All YNAB fixture amounts are multiples of 10 (no sub-cent)."""
+    txns = json.load(open("data/fixtures/amazon_ynab_transactions.json"))
+    for txn in txns:
+        assert txn["amount"] % 10 == 0, f"{txn['id']} has sub-cent amount {txn['amount']}"

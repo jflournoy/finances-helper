@@ -8,7 +8,7 @@
     "category_id": null,
     "cleared": "uncleared",
     "approved": true,
-    "amount": 37090,
+    "amount": -37090,
     "memo": "Order 111-0000001 ($37.09)"
   },
   {
@@ -20,7 +20,7 @@
     "category_id": null,
     "cleared": "uncleared",
     "approved": true,
-    "amount": 48120,
+    "amount": -48120,
     "memo": "Order 111-0000002 ($48.12)"
   },
   {
@@ -32,8 +32,8 @@
     "category_id": null,
     "cleared": "uncleared",
     "approved": true,
-    "amount": 14190,
-    "memo": "Order 111-0000003 first item ($14.19)"
+    "amount": -14200,
+    "memo": "No matching shipment ($14.20)"
   },
   {
     "id": "txn-004",
@@ -44,20 +44,20 @@
     "category_id": null,
     "cleared": "uncleared",
     "approved": true,
-    "amount": 17400,
-    "memo": "Order 111-0000003 second item ($17.40)"
+    "amount": -17410,
+    "memo": "No matching shipment ($17.41)"
   },
   {
     "id": "txn-005",
     "account_id": "account-visa-1",
-    "date": "2024-01-25",
+    "date": "2024-02-15",
     "payee_id": null,
     "payee_name": "Amazon.com",
     "category_id": null,
     "cleared": "uncleared",
     "approved": true,
-    "amount": 5471,
-    "memo": "No matching shipment"
+    "amount": -54710,
+    "memo": "Date too far from matching shipment ($54.71)"
   },
   {
     "id": "txn-006",
@@ -68,7 +68,7 @@
     "category_id": "cat-groceries",
     "cleared": "uncleared",
     "approved": true,
-    "amount": 2282,
+    "amount": -22820,
     "memo": "Already categorized"
   },
   {
@@ -80,7 +80,7 @@
     "category_id": null,
     "cleared": "reconciled",
     "approved": true,
-    "amount": 5885,
+    "amount": -58850,
     "memo": "Already reconciled"
   },
   {
@@ -92,7 +92,7 @@
     "category_id": null,
     "cleared": "uncleared",
     "approved": true,
-    "amount": 1283,
+    "amount": -12830,
     "memo": "Unknown account"
   },
   {
@@ -104,7 +104,43 @@
     "category_id": null,
     "cleared": "uncleared",
     "approved": true,
-    "amount": 2500,
+    "amount": -25000,
     "memo": "Non-Amazon transaction"
+  },
+  {
+    "id": "txn-010",
+    "account_id": "account-visa-3",
+    "date": "2024-01-17",
+    "payee_id": null,
+    "payee_name": "Amazon.com",
+    "category_id": null,
+    "cleared": "uncleared",
+    "approved": true,
+    "amount": -37710,
+    "memo": "Order 111-0000003 (3-item shipment, $37.71)"
+  },
+  {
+    "id": "txn-011",
+    "account_id": "account-visa-1",
+    "date": "2024-01-24",
+    "payee_id": null,
+    "payee_name": "Amazon.com",
+    "category_id": null,
+    "cleared": "uncleared",
+    "approved": true,
+    "amount": -82480,
+    "memo": "Order 111-0000010 (5-item shipment, $82.48)"
+  },
+  {
+    "id": "txn-012",
+    "account_id": "account-visa-3",
+    "date": "2024-02-07",
+    "payee_id": null,
+    "payee_name": "AMZN Mktp US",
+    "category_id": null,
+    "cleared": "uncleared",
+    "approved": true,
+    "amount": -42800,
+    "memo": "Order 111-0000023 (2-item shipment, $42.80)"
   }
 ]
