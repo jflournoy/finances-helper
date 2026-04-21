@@ -5,6 +5,8 @@ from pathlib import Path
 from unittest.mock import patch, Mock
 from categorizer import (
     CategoryResult,
+    ItemCategoryResult,
+    AmazonSplitProposal,
     normalize_payee,
     fuzzy_score,
     FUZZY_THRESHOLD,
@@ -27,6 +29,7 @@ from categorizer import (
     filter_categories_by_usage,
     MIN_OBSERVATIONS,
 )
+from amazon_matcher import MatchResult
 
 
 def _v2_entry(cat_id, cat_name, count=1):
@@ -455,7 +458,7 @@ def test_categorize_transactions_transfer_skipped():
     categories = [{"id": "g1", "name": "Bills", "categories": [{"id": "c1", "name": "Water"}]}]
 
     with patch("categorizer.anthropic.Anthropic") as mock_anthropic_class:
-        results, skipped = categorize_transactions(transactions, cache, categories, "test-key")
+        results, skipped, _, _ = categorize_transactions(transactions, cache, categories, "test-key")
 
     assert len(results) == 0
     assert len(skipped) == 1
@@ -679,7 +682,7 @@ def test_categorize_transactions_tier1_hit_no_claude_call():
     categories = []
 
     with patch("categorizer.anthropic.Anthropic") as mock_anthropic_class:
-        results, _ = categorize_transactions(transactions, cache, categories, "test-key")
+        results, _, _, _ = categorize_transactions(transactions, cache, categories, "test-key")
 
     assert len(results) == 1
     assert results[0].tier == "history"
@@ -694,7 +697,7 @@ def test_categorize_transactions_tier2_hit_no_claude_call():
     categories = []
 
     with patch("categorizer.anthropic.Anthropic") as mock_anthropic_class:
-        results, _ = categorize_transactions(transactions, cache, categories, "test-key")
+        results, _, _, _ = categorize_transactions(transactions, cache, categories, "test-key")
 
     assert len(results) == 1
     assert results[0].tier == "fuzzy"
@@ -713,7 +716,7 @@ def test_categorize_transactions_tier3_called_for_novel_payee():
         mock_client = Mock()
         mock_anthropic_class.return_value = mock_client
         mock_client.messages.create.return_value = mock_response
-        results, _ = categorize_transactions(transactions, cache, categories, "test-key")
+        results, _, _, _ = categorize_transactions(transactions, cache, categories, "test-key")
 
     assert len(results) == 1
     assert results[0].tier == "claude"
@@ -736,7 +739,7 @@ def test_categorize_transactions_claude_called_once_for_batch():
         mock_client = Mock()
         mock_anthropic_class.return_value = mock_client
         mock_client.messages.create.return_value = mock_response
-        results, _ = categorize_transactions(transactions, cache, categories, "test-key")
+        results, _, _, _ = categorize_transactions(transactions, cache, categories, "test-key")
 
     assert len(results) == 3
     # Claude should be called once with all 3 transactions
@@ -767,7 +770,7 @@ def test_categorize_transactions_mixed_tiers():
         mock_client = Mock()
         mock_anthropic_class.return_value = mock_client
         mock_client.messages.create.return_value = mock_response
-        results, _ = categorize_transactions(transactions, cache, categories, "test-key")
+        results, _, _, _ = categorize_transactions(transactions, cache, categories, "test-key")
 
     assert len(results) == 2
     # First result is from tier 1, second from tier 3
@@ -801,7 +804,7 @@ def test_categorize_transactions_full_pipeline_with_fixtures():
         mock_client = Mock()
         mock_anthropic_class.return_value = mock_client
         mock_client.messages.create.return_value = mock_response
-        results, _ = categorize_transactions([novel_txn], cache, categories, "test-key")
+        results, _, _, _ = categorize_transactions([novel_txn], cache, categories, "test-key")
 
     assert len(results) == 1
     assert results[0].transaction_id == novel_txn["id"]
@@ -842,7 +845,7 @@ def test_categorize_transactions_splits_large_batch():
             Mock(content=[Mock(text=make_batch_response(50, 60))]),
         ]
 
-        results, _ = categorize_transactions(transactions, cache, categories, "test-key")
+        results, _, _, _ = categorize_transactions(transactions, cache, categories, "test-key")
 
     assert mock_client.messages.create.call_count == 3
     assert len(results) == 60
@@ -900,7 +903,7 @@ def test_regression_bug22_transfer_payees_not_miscategorized():
         mock_client = Mock()
         mock_anthropic_class.return_value = mock_client
         mock_client.messages.create.return_value = mock_response
-        results, skipped = categorize_transactions(transfer_transactions, cache, categories, "test-key")
+        results, skipped, _, _ = categorize_transactions(transfer_transactions, cache, categories, "test-key")
 
     # All "Transfer :" payees are now skipped entirely (not sent to Claude)
     assert len(results) == 0
@@ -915,7 +918,7 @@ def test_categorize_transactions_legitimate_transfer_exact_match():
     categories = []
 
     with patch("categorizer.anthropic.Anthropic") as mock_anthropic_class:
-        results, _ = categorize_transactions(transactions, cache, categories, "test-key")
+        results, _, _, _ = categorize_transactions(transactions, cache, categories, "test-key")
 
     # "Transfer" (no colon) is NOT skipped — only "Transfer :" is
     assert len(results) == 1
@@ -1026,7 +1029,7 @@ def test_main_bootstraps_empty_cache(monkeypatch, tmp_path, capsys):
     with patch("dotenv.load_dotenv"):
         with patch("sys.argv", ["categorizer.py", "--days", "7"]):
             with patch("ynab_client.YNABClient", return_value=mock_ynab):
-                with patch("categorizer.categorize_transactions", return_value=([mock_claude_result], [])):
+                with patch("categorizer.categorize_transactions", return_value=([mock_claude_result], [], [], [])):
                     main()
 
     out = capsys.readouterr().out
@@ -1064,7 +1067,7 @@ def test_main_full_run_with_existing_cache(monkeypatch, tmp_path, capsys):
     with patch("dotenv.load_dotenv"):
         with patch("sys.argv", ["categorizer.py", "--days", "7"]):
             with patch("ynab_client.YNABClient", return_value=mock_ynab):
-                with patch("categorizer.categorize_transactions", return_value=([history_result], [])):
+                with patch("categorizer.categorize_transactions", return_value=([history_result], [], [], [])):
                     main()
 
     out = capsys.readouterr().out
@@ -1102,7 +1105,7 @@ def test_main_updates_cache_with_claude_results(monkeypatch, tmp_path):
     with patch("dotenv.load_dotenv"):
         with patch("sys.argv", ["categorizer.py", "--days", "7"]):
             with patch("ynab_client.YNABClient", return_value=mock_ynab):
-                with patch("categorizer.categorize_transactions", return_value=([claude_result], [])):
+                with patch("categorizer.categorize_transactions", return_value=([claude_result], [], [], [])):
                     main()
 
     # Verify cache was updated with the claude result (v2 format)
@@ -1150,7 +1153,7 @@ def test_main_triggers_rebuild_on_v1_migration(monkeypatch, tmp_path, capsys):
     with patch("dotenv.load_dotenv"):
         with patch("sys.argv", ["categorizer.py", "--days", "7"]):
             with patch("ynab_client.YNABClient", return_value=mock_ynab):
-                with patch("categorizer.categorize_transactions", return_value=([mock_claude_result], [])):
+                with patch("categorizer.categorize_transactions", return_value=([mock_claude_result], [], [], [])):
                     main()
 
     out = capsys.readouterr().out
@@ -1797,7 +1800,7 @@ def test_orchestrator_passes_import_names_to_lookup():
              "import_payee_name_original": "WF MARKET"}]
 
     with patch("categorizer.anthropic.Anthropic") as mock_cls:
-        results, _ = categorize_transactions(txns, cache, [], "key")
+        results, _, _, _ = categorize_transactions(txns, cache, [], "key")
 
     assert len(results) == 1
     assert results[0].tier in ("history", "fuzzy")
@@ -1814,7 +1817,7 @@ def test_orchestrator_records_claude_with_strength():
 
     with patch("categorizer.anthropic.Anthropic") as mock_cls:
         mock_cls.return_value.messages.create.return_value = mock_response
-        results, _ = categorize_transactions(txns, cache, categories, "key")
+        results, _, _, _ = categorize_transactions(txns, cache, categories, "key")
 
     assert results[0].prior_strength == 12
 
@@ -2104,3 +2107,252 @@ def test_claude_categorize_amazon_items_prompt_contents():
     assert "$23.45" in user_msg
     assert "2026-01-15" in user_msg
     assert "Rewards Visa" in user_msg
+
+
+# ============================================================================
+# Tests for Phase D: categorize_transactions 4-tuple return (Issue #84)
+# ============================================================================
+
+import copy
+from amazon_matcher import (
+    filter_amazon_transactions, match_shipments_to_transactions,
+    parse_order_history, MatchCandidate,
+)
+
+
+def test_categorize_transactions_backward_compat_amazon_matches_none():
+    """With amazon_matches=None, Amazon txns flow through normal Tier-3 pipeline."""
+    cache = {}
+    amazon_txn = {"id": "amz1", "payee_name": "Amazon.com", "amount": -10000, "date": "2026-01-15"}
+    normal_txn = {"id": "nrm1", "payee_name": "Target", "amount": -5000, "date": "2026-01-15"}
+    categories = [{"id": "g1", "name": "Shopping", "categories": [{"id": "c1", "name": "Retail"}]}]
+
+    tier3_response = json.dumps([
+        {"payee_name": "Amazon.com", "category_id": "c1", "category_name": "Retail",
+         "confidence": 0.7, "rationale": "r", "prior_strength": 5},
+        {"payee_name": "Target", "category_id": "c1", "category_name": "Retail",
+         "confidence": 0.8, "rationale": "r", "prior_strength": 8},
+    ])
+    mock_response = Mock()
+    mock_response.content = [Mock(text=tier3_response)]
+    mock_response.stop_reason = "end_turn"
+
+    with patch("categorizer.anthropic.Anthropic") as mock_cls:
+        mock_cls.return_value.messages.create.return_value = mock_response
+        results, skipped, unmatched_amazon, split_proposals = categorize_transactions(
+            [amazon_txn, normal_txn], cache, categories, "key"
+        )
+
+    assert len(results) == 2
+    assert unmatched_amazon == []
+    assert split_proposals == []
+    # Amazon txn went through tier 3 (not the Amazon branch)
+    amazon_result = next(r for r in results if r.transaction_id == "amz1")
+    assert amazon_result.tier == "claude"
+
+
+def test_categorize_transactions_amazon_single_item_goes_to_proposals():
+    """Single-item Amazon match goes to split_proposals (not results)."""
+    from amazon_matcher import AmazonShipment, MatchCandidate
+    
+    item = _make_item(asin="B001", product_name="Widget")
+    shipment = AmazonShipment(
+        order_id="111-0000001", ship_date=date(2026,1,15),
+        payment_method_raw="Visa - 1234", payment_method_last4="1234",
+        is_split_tender=False, currency="USD",
+        item_subtotal=Decimal("10.00"), tax=Decimal("0"),
+        shipping=Decimal("0"), discounts=Decimal("0"),
+        total_amount=Decimal("10.00"), items=[item],
+        shipment_status="Shipped",
+    )
+    amazon_txn = {"id": "amz1", "payee_name": "Amazon.com", "amount": -10000,
+                  "date": "2026-01-15", "account_name": "Visa"}
+    match = MatchCandidate(ynab_txn=amazon_txn, shipment=shipment, date_delta_days=0)
+    match_result = MatchResult(
+        matched=[match],
+        unmatched_ynab=[],
+        unmatched_shipments=[],
+        excluded_shipments=[],
+        parse_errors=[],
+    )
+
+    response_data = json.dumps([
+        {"item_index": 1, "category_id": "e5d6a5ee-c297-4e4f-8bc9-64c3b15b4c90",
+         "category_name": "Shopping", "confidence": 0.9, "rationale": "r"}
+    ])
+    mock_response = Mock()
+    mock_response.content = [Mock(text=response_data)]
+    mock_response.stop_reason = "end_turn"
+
+    with patch("categorizer.anthropic.Anthropic") as mock_cls:
+        mock_cls.return_value.messages.create.return_value = mock_response
+        results, skipped, unmatched_amazon, split_proposals = categorize_transactions(
+            [amazon_txn], {}, CATEGORIES_FIXTURE, "key", amazon_matches=match_result
+        )
+
+    assert results == []  # Amazon does NOT go into results
+    assert len(split_proposals) == 1
+    assert len(split_proposals[0].subtransactions) == 1
+    assert split_proposals[0].total_allocated() == Decimal("10.00")
+
+
+def test_categorize_transactions_amazon_multi_item_goes_to_proposals():
+    """Multi-item Amazon match goes to split_proposals."""
+    from amazon_matcher import AmazonShipment, MatchCandidate
+    
+    items = [_make_item(asin=f"B00{i}", product_name=f"Item {i}") for i in range(3)]
+    shipment = AmazonShipment(
+        order_id="111-0000002", ship_date=date(2026,1,15),
+        payment_method_raw="Visa - 1234", payment_method_last4="1234",
+        is_split_tender=False, currency="USD",
+        item_subtotal=Decimal("30.00"), tax=Decimal("0"),
+        shipping=Decimal("0"), discounts=Decimal("0"),
+        total_amount=Decimal("30.00"), items=items,
+        shipment_status="Shipped",
+    )
+    amazon_txn = {"id": "amz2", "payee_name": "AMZN Mktp US", "amount": -30000,
+                  "date": "2026-01-15", "account_name": "Visa"}
+    match = MatchCandidate(ynab_txn=amazon_txn, shipment=shipment, date_delta_days=0)
+    match_result = MatchResult(
+        matched=[match],
+        unmatched_ynab=[],
+        unmatched_shipments=[],
+        excluded_shipments=[],
+        parse_errors=[],
+    )
+
+    response_data = json.dumps([
+        {"item_index": i+1, "category_id": "e5d6a5ee-c297-4e4f-8bc9-64c3b15b4c90",
+         "category_name": "Shopping", "confidence": 0.9, "rationale": "r"}
+        for i in range(3)
+    ])
+    mock_response = Mock()
+    mock_response.content = [Mock(text=response_data)]
+    mock_response.stop_reason = "end_turn"
+
+    with patch("categorizer.anthropic.Anthropic") as mock_cls:
+        mock_cls.return_value.messages.create.return_value = mock_response
+        results, skipped, unmatched_amazon, split_proposals = categorize_transactions(
+            [amazon_txn], {}, CATEGORIES_FIXTURE, "key", amazon_matches=match_result
+        )
+
+    assert results == []
+    assert len(split_proposals) == 1
+    assert len(split_proposals[0].subtransactions) == 3
+    assert split_proposals[0].total_allocated() == Decimal("30.00")
+
+
+def test_categorize_transactions_cache_untouched_for_amazon():
+    """Amazon txns must NOT modify the payee cache."""
+    from amazon_matcher import AmazonShipment, MatchCandidate
+    
+    cache = _v2_cache({"amazon.com": ("c1", "Shopping")})
+    initial_cache = copy.deepcopy(cache)
+
+    item1 = _make_item()
+    item2 = _make_item()
+    item3 = _make_item()
+    ship1 = AmazonShipment(
+        order_id="111-0000001", ship_date=date(2026,1,15),
+        payment_method_raw="Visa - 1234", payment_method_last4="1234",
+        is_split_tender=False, currency="USD",
+        item_subtotal=Decimal("10.00"), tax=Decimal("0"),
+        shipping=Decimal("0"), discounts=Decimal("0"),
+        total_amount=Decimal("10.00"), items=[item1],
+        shipment_status="Shipped",
+    )
+    ship2 = AmazonShipment(
+        order_id="111-0000002", ship_date=date(2026,1,16),
+        payment_method_raw="Visa - 1234", payment_method_last4="1234",
+        is_split_tender=False, currency="USD",
+        item_subtotal=Decimal("20.00"), tax=Decimal("0"),
+        shipping=Decimal("0"), discounts=Decimal("0"),
+        total_amount=Decimal("20.00"), items=[item2, item3],
+        shipment_status="Shipped",
+    )
+    txn1 = {"id": "amz1", "payee_name": "Amazon.com", "amount": -10000,
+             "date": "2026-01-15", "account_name": "Visa"}
+    txn2 = {"id": "amz2", "payee_name": "Amazon.com", "amount": -20000,
+             "date": "2026-01-16", "account_name": "Visa"}
+    match1 = MatchCandidate(ynab_txn=txn1, shipment=ship1, date_delta_days=0)
+    match2 = MatchCandidate(ynab_txn=txn2, shipment=ship2, date_delta_days=0)
+    match_result = MatchResult(
+        matched=[match1, match2],
+        unmatched_ynab=[],
+        unmatched_shipments=[],
+        excluded_shipments=[],
+        parse_errors=[],
+    )
+
+    response_data = json.dumps([
+        {"item_index": 1, "category_id": None, "category_name": None, "confidence": 0.0, "rationale": "r"}
+    ])
+    mock_response = Mock()
+    mock_response.content = [Mock(text=response_data)]
+    mock_response.stop_reason = "end_turn"
+
+    response_data2 = json.dumps([
+        {"item_index": i+1, "category_id": None, "category_name": None, "confidence": 0.0, "rationale": "r"}
+        for i in range(2)
+    ])
+    mock_response2 = Mock()
+    mock_response2.content = [Mock(text=response_data2)]
+    mock_response2.stop_reason = "end_turn"
+
+    with patch("categorizer.anthropic.Anthropic") as mock_cls:
+        mock_cls.return_value.messages.create.side_effect = [mock_response, mock_response2]
+        categorize_transactions([txn1, txn2], cache, CATEGORIES_FIXTURE, "key", amazon_matches=match_result)
+
+    assert cache == initial_cache, "Cache was modified by Amazon txns — invariant violated"
+
+
+def test_categorize_transactions_allocator_error_goes_to_unmatched():
+    """Allocator RuntimeError → unmatched_amazon (no Claude call)."""
+    from amazon_matcher import AmazonShipment, MatchCandidate
+    
+    item = _make_item()
+    shipment = AmazonShipment(
+        order_id="111-0000001", ship_date=date(2026,1,15),
+        payment_method_raw="Visa - 1234", payment_method_last4="1234",
+        is_split_tender=False, currency="USD",
+        item_subtotal=Decimal("10.00"), tax=Decimal("0"),
+        shipping=Decimal("0"), discounts=Decimal("0"),
+        total_amount=Decimal("10.00"), items=[item],
+        shipment_status="Shipped",
+    )
+    amazon_txn = {"id": "amz1", "payee_name": "Amazon.com", "amount": -10000,
+                  "date": "2026-01-15", "account_name": "Visa"}
+    match = MatchCandidate(ynab_txn=amazon_txn, shipment=shipment, date_delta_days=0)
+    match_result = MatchResult(
+        matched=[match],
+        unmatched_ynab=[],
+        unmatched_shipments=[],
+        excluded_shipments=[],
+        parse_errors=[],
+    )
+
+    with patch("categorizer.allocate_shipment_to_items", side_effect=RuntimeError("subtotal mismatch")):
+        with patch("categorizer.anthropic.Anthropic") as mock_cls:
+            results, skipped, unmatched_amazon, split_proposals = categorize_transactions(
+                [amazon_txn], {}, CATEGORIES_FIXTURE, "key", amazon_matches=match_result
+            )
+            mock_cls.assert_not_called()  # Claude must NOT be called
+
+    assert len(unmatched_amazon) == 1
+    assert "allocator failed" in unmatched_amazon[0][1]
+    assert "subtotal mismatch" in unmatched_amazon[0][1]
+
+
+def test_categorize_transactions_matcher_invariant_violation():
+    """If Amazon txn is in neither matched nor unmatched_ynab, RuntimeError."""
+    amazon_txn = {"id": "ghost-id", "payee_name": "Amazon.com", "amount": -10000, "date": "2026-01-15"}
+    match_result = MatchResult(
+        matched=[],
+        unmatched_ynab=[],
+        unmatched_shipments=[],
+        excluded_shipments=[],
+        parse_errors=[],
+    )
+
+    with pytest.raises(RuntimeError, match="matcher invariant violated"):
+        categorize_transactions([amazon_txn], {}, [], "key", amazon_matches=match_result)

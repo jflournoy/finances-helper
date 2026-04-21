@@ -955,7 +955,8 @@ def categorize_transactions(
     api_key: str,
     K: int | None = None,
     confidence_threshold: float = DEFAULT_CONFIDENCE_THRESHOLD,
-) -> list[CategoryResult]:
+    amazon_matches: "MatchResult | None" = None,
+) -> tuple[list[CategoryResult], list[dict], list[tuple[dict, str]], list[AmazonSplitProposal]]:
     """Orchestrate the three-tier categorization for a list of transactions.
 
     Args:
@@ -965,30 +966,48 @@ def categorize_transactions(
         api_key: Anthropic API key
         K: Number of categories for Bayesian confidence. None = legacy mode.
         confidence_threshold: Minimum confidence for tiers 1 and 2.
+        amazon_matches: MatchResult from amazon_matcher, or None to skip Amazon routing.
 
     Returns:
-        Tuple of (results, skipped) where results is a list of CategoryResult
-        objects from all three tiers, and skipped is a list of transactions
-        that were skipped (transfers/payments).
+        4-tuple: (results, skipped, unmatched_amazon, split_proposals)
+        - results: CategoryResult objects from tiers 1, 2, 3, and single-item Amazon matches
+        - skipped: Transfers/Payments that were skipped
+        - unmatched_amazon: List of (txn, reason) tuples for Amazon txns not matched
+        - split_proposals: AmazonSplitProposal objects for multi-item shipments
 
     Raises:
         ValueError: If any transaction lacks a payee_name.
+        RuntimeError: If matcher invariant violated or allocation invariant failed.
     """
     results = []
     tier3_pending = []
     skipped = []
+    unmatched_amazon = []
+    split_proposals = []
+
+    # Partition transactions upfront
+    amazon_pending = []
+    normal_pending = []
 
     for txn in transactions:
         payee = txn.get("payee_name")
         if not payee:
             raise ValueError(f"Transaction {txn.get('id')} has no payee_name")
 
-        # Skip transfers and payments — these are inter-account movements,
-        # not purchases that need categorization
+        # Transfers/Payments are never categorized
         if payee.startswith("Transfer :") or payee.startswith("Payment :"):
             skipped.append(txn)
             continue
 
+        # Route Amazon txns separately if amazon_matches is provided
+        if amazon_matches is not None and is_amazon_payee(payee):
+            amazon_pending.append(txn)
+        else:
+            normal_pending.append(txn)
+
+    # Process normal (non-Amazon) transactions through 3-tier pipeline
+    for txn in normal_pending:
+        payee = txn.get("payee_name")
         import_payee = txn.get("import_payee_name")
         import_payee_orig = txn.get("import_payee_name_original")
 
@@ -1020,7 +1039,76 @@ def categorize_transactions(
             tier3_results = claude_categorize(batch, categories, api_key)
             results.extend(tier3_results)
 
-    return results, skipped
+    # Process Amazon transactions
+    for txn in amazon_pending:
+        txn_id = txn["id"]
+
+        # Look up in matched shipments
+        match = None
+        if amazon_matches.matched:
+            for m in amazon_matches.matched:
+                if m.ynab_txn["id"] == txn_id:
+                    match = m
+                    break
+
+        if match is None:
+            # Check if explicitly unmatched
+            if amazon_matches.unmatched_ynab:
+                found_unmatched = False
+                for um in amazon_matches.unmatched_ynab:
+                    if um.ynab_txn["id"] == txn_id:
+                        unmatched_amazon.append((txn, um.reason))
+                        found_unmatched = True
+                        break
+                if found_unmatched:
+                    continue
+
+            # Txn not in matched or unmatched — invariant violation
+            raise RuntimeError(
+                f"matcher invariant violated: Txn {txn_id} not in matcher.matched or matcher.unmatched_ynab"
+            )
+
+        # Found a match; allocate and categorize items
+        try:
+            allocations = allocate_shipment_to_items(match.shipment)
+        except RuntimeError as e:
+            # Allocator failed (e.g., division by zero)
+            unmatched_amazon.append((txn, f"allocator failed: {str(e)}"))
+            continue
+
+        # Call Claude to categorize items in the shipment
+        item_results = claude_categorize_amazon_items(
+            match.ynab_txn,
+            allocations,
+            categories,
+            api_key,
+        )
+
+        # Compute parent amount quantized to 2dp
+        parent_amount = abs(Decimal(txn["amount"])) / Decimal("1000")
+        parent_amount_quantized = parent_amount.quantize(Decimal("0.01"), rounding=ROUND_HALF_EVEN)
+
+        # Compute sum of allocated amounts
+        total_allocated = sum(
+            (ir.allocated_amount for ir in item_results),
+            start=Decimal("0")
+        )
+
+        # Verify invariant
+        if total_allocated != parent_amount_quantized:
+            raise RuntimeError(
+                f"Txn {txn_id}: total_allocated ({total_allocated}) != parent_amount ({parent_amount_quantized})"
+            )
+
+        # Build split proposal
+        proposal = AmazonSplitProposal(
+            parent_ynab_txn=match.ynab_txn,
+            shipment=match.shipment,
+            subtransactions=item_results,
+        )
+        split_proposals.append(proposal)
+
+    return results, skipped, unmatched_amazon, split_proposals
 
 
 def main():
@@ -1100,7 +1188,7 @@ def main():
         print(f"Cache rebuilt with {payee_count} payees")
 
     # Categorize
-    results, skipped = categorize_transactions(uncategorized, cache, recent_categories, anthropic_key, K=K, confidence_threshold=confidence_threshold)
+    results, skipped, _, _ = categorize_transactions(uncategorized, cache, recent_categories, anthropic_key, K=K, confidence_threshold=confidence_threshold)
 
     if skipped:
         print(f"\nSkipped {len(skipped)} transfer/payment transactions")
