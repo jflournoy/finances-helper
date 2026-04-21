@@ -1,0 +1,42 @@
+{
+  "file_hashes": {
+    "amazon_matcher.py": "9c62f2c1aaba7baab0b7d7b6d455403627b39460944b3be1705f97e74ed45604",
+    "categorizer.py": "f5f26fc548b0db1622236fa097c10ab152ad7d541e4bfa1f05d1add9f490721d",
+    "demo.py": "fc59eb0f0e0ac24058c17d6d1d9c61539177620c766c897c069e67c44537fcd6",
+    "demo_categorizer.py": "e568a7bbd48000378e3e0aeefb1200cb6a9a5b2fee1d8e5052fa0a39a13a9b0d",
+    "demo_full_pipeline.py": "72e413af9d06cb8c78674f6380939fa4c400ef47d26f1360934afbebd7f790f4",
+    "insights.py": "1ecaacf08d537a65c073e378a47c87075452bef9117790aacbbe17eae27e612a",
+    "scripts/check-ci.js": "e47ed1a2b4617e74e9e3ec85b9af9848d0e98b9f8960569cb938a5a35f35e9e2",
+    "scripts/cli.js": "f47a1da1581d1a20b31d7b0ea43efb9f835841d0264d9157e44f060dbe1eab76",
+    "scripts/docs.js": "838e1f323ace360269d339d8d29fb8139fef4fc138ba821f6037c204224fafb9",
+    "scripts/feature-check.js": "3ff6af0e7f8bed66618fa3096db3cbf9a9f56adaf48f5389f5f4c5b2a6827769",
+    "scripts/learn.js": "4d2f18805fdee350e006ff882783ad30832dc9836b0ed4f844006139156c5452",
+    "scripts/monitor-repo.js": "d3382e8e03a63e1c27c893817521e098331cc487849988f982041522e6c48a90",
+    "scripts/plan-execute.js": "0df4a5c9199a146d213d60b827bc483450be47bd8ba29e7d2acb6770387f9eb9",
+    "scripts/reflect.js": "83803af3b636a03fc84e3216925322e0e53f662bf07ddb69ecd63fcd6bea41c5",
+    "scripts/retrospective.js": "08be31218d1746d66b4d600494ae7ba3026adc25819cb76e9b29a1113c78dd4f",
+    "scripts/session-history.js": "1ec56d43aed133fa2570809b37467f4602c3ff816ca0514714b13856fb5c7fcc",
+    "scripts/setup.js": "1559fc3699ec6ef5fbd1db65f668fca1d4ffe3b8caf902ea5cb2f22966162db5",
+    "scripts/tdd.js": "90264a59cc1b07999dca7ccedf3b3e5e09ad116a2cf4e794d73f3efbadccf6e0",
+    "scripts/todo-github.js": "f04d14784a4ae54fd93c7c6e291d4036db25f9dc74580afd5dcfab885f3d5074",
+    "setup.py": "194a04786e29a3d0eaf94f7e996e67e8c2e278b19a30b5014ae52db6045bb835",
+    "tests/__init__.py": "af1349b9f5f9a1a6a0404dea36dcc9499bcb25c9adc112b7cc9a93cae41f3262",
+    "tests/conftest.py": "1a0003e2a40d1d7e111c9036ce1f322d8fe2025bd5a22a92770d9983f29694a8",
+    "tests/test_amazon_matcher.py": "a4b1f448de224407c78358f2dc2f0d42fe3ca9239718188e906dd678f8db889b",
+    "tests/test_categorizer.py": "e2e15728781bd6e02aa53f952de16f583fbd0f4d091cda02d6790e01036339f0",
+    "tests/test_demo_full_pipeline.py": "37819e25d6df0529bf746e4ef0f6adaaf514eb4add156cb4da4ee59d18a2770d",
+    "tests/test_insights.py": "ebe182f6f3f5854a020dca33e5c82a4a00cfd8a773029468d335e623c08ab587",
+    "tests/test_ynab_client.py": "7a2484cacfa1d5f8daf7773a0e09a2421d946e94d141f1d12c74c6f6de07a0ff",
+    "tests/test_ynab_client_integration.py": "00012a8225e4e2dae0b5cf366b3cdd478aeb8ea1972cecfcd44249b386ddced2",
+    "ynab_client.py": "4216fdaa9784632b88ae1f1a780caf924fdb6dd95d8ea376d36ca794e7ea2956"
+  },
+  "indexed_at_commit": "78586f8f994c2cd0f1727c4090fb71dba3d81602",
+  "indexed_at_timestamp": "2026-04-17T21:16:47.631282040+00:00",
+  "schema_version": 3,
+  "stats": {
+    "total_edges": 642,
+    "total_files": 29,
+    "total_nodes": 505
+  },
+  "vexp_version": "2.0.11"
+}

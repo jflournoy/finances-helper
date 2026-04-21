@@ -2356,3 +2356,32 @@ def test_categorize_transactions_matcher_invariant_violation():
 
     with pytest.raises(RuntimeError, match="matcher invariant violated"):
         categorize_transactions([amazon_txn], {}, [], "key", amazon_matches=match_result)
+
+
+def test_categorize_transactions_unmatched_ynab_tuple_unpacking():
+    """Amazon txn in unmatched_ynab → lands in unmatched_amazon with reason preserved."""
+    amazon_txn = {
+        "id": "amz-no-shipment",
+        "payee_name": "Amazon.com",
+        "amount": -10000,
+        "date": "2026-01-15",
+        "account_name": "Visa"
+    }
+    match_result = MatchResult(
+        matched=[],
+        unmatched_ynab=[(amazon_txn, "no matching shipment in CSV dump")],
+        unmatched_shipments=[],
+        excluded_shipments=[],
+        parse_errors=[],
+    )
+
+    results, skipped, unmatched_amazon, split_proposals = categorize_transactions(
+        [amazon_txn], {}, CATEGORIES_FIXTURE, "key", amazon_matches=match_result
+    )
+
+    assert results == []
+    assert skipped == []
+    assert split_proposals == []
+    assert len(unmatched_amazon) == 1
+    assert unmatched_amazon[0][0] == amazon_txn
+    assert "no matching shipment" in unmatched_amazon[0][1]

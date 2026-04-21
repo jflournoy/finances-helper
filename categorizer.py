@@ -1055,9 +1055,9 @@ def categorize_transactions(
             # Check if explicitly unmatched
             if amazon_matches.unmatched_ynab:
                 found_unmatched = False
-                for um in amazon_matches.unmatched_ynab:
-                    if um.ynab_txn["id"] == txn_id:
-                        unmatched_amazon.append((txn, um.reason))
+                for um_txn, um_reason in amazon_matches.unmatched_ynab:
+                    if um_txn["id"] == txn_id:
+                        unmatched_amazon.append((txn, um_reason))
                         found_unmatched = True
                         break
                 if found_unmatched:
