@@ -32,7 +32,7 @@ from categorizer import (
     filter_categories_by_usage,
     MIN_OBSERVATIONS,
 )
-from amazon_matcher import MatchResult
+from amazon_matcher import MatchResult, is_amazon_payee
 
 
 def _v2_entry(cat_id, cat_name, count=1):
@@ -2431,7 +2431,7 @@ def test_categorize_transactions_excluded_shipment_unmatched():
 
 
 def test_integration_orchestrator_end_to_end():
-    """End-to-end: parse CSV → match → categorize with real fixture data."""
+    """End-to-end: parse CSV → match → categorize with real fixture data, all txn types."""
     from amazon_matcher import (
         parse_order_history, filter_amazon_transactions, match_shipments_to_transactions
     )
@@ -2444,21 +2444,38 @@ def test_integration_orchestrator_end_to_end():
     shipments, _ = parse_order_history(csv_text)
     ynab_txns = json.loads(txns_path.read_text())
 
-    # Filter to only uncategorized Amazon txns for this test
+    # Include uncategorized AND create a Transfer txn to test skipping
     uncategorized = [t for t in ynab_txns if t.get("category_id") is None]
+    transfer_txn = {
+        "id": "txn-transfer-001",
+        "payee_name": "Transfer : Some Account",
+        "amount": -5000,
+        "date": "2026-01-17",
+        "account_name": "Visa"
+    }
+    # Note: match_result will only know about Amazon txns in the filtered set
     amazon_txns = filter_amazon_transactions(uncategorized)
-
-    # For this test, only use matched Amazon txns (exclude those with no shipment match)
-    test_txns = [t for t in uncategorized if any(
-        m.ynab_txn["id"] == t["id"] for m in match_shipments_to_transactions(amazon_txns, shipments).matched
-    )]
-
-    # Run matcher
     match_result = match_shipments_to_transactions(amazon_txns, shipments)
 
-    # Check: we have some matched and some unmatched
-    assert len(match_result.matched) > 0, "Fixture should have at least one matched shipment"
-    assert len(match_result.unmatched_ynab) > 0, "Fixture should have some unmatched YNAB txns"
+    # Build test_txns: include only txns that match_result knows about
+    # (either matched, unmatched, or non-Amazon per filter criteria)
+    matched_ids = {m.ynab_txn["id"] for m in match_result.matched}
+    unmatched_ids = {t["id"] for t, _ in match_result.unmatched_ynab}
+    amazon_in_result = matched_ids | unmatched_ids
+    amazon_txn_ids = {t["id"] for t in amazon_txns}
+
+    # Include: Amazon txns in match_result, non-Amazon txns, Transfer
+    test_txns = []
+    for t in uncategorized:
+        if t["id"] in amazon_in_result:  # Amazon txn in match_result
+            test_txns.append(t)
+        elif t["id"] not in amazon_txn_ids and not is_amazon_payee(t.get("payee_name")):  # Non-Amazon
+            test_txns.append(t)
+    test_txns.append(transfer_txn)
+
+    # Verify fixture has the expected structure
+    assert len(match_result.matched) > 0, "Fixture should have matched shipments"
+    assert len(match_result.unmatched_ynab) > 0, "Fixture should have unmatched YNAB txns"
 
     # Mock Claude to return categorizations for all items
     def mock_claude_response(parent_txn, allocations, categories, api_key):
@@ -2477,28 +2494,49 @@ def test_integration_orchestrator_end_to_end():
 
     cache = {}
 
+    def mock_claude_categorize(batch, categories, api_key):
+        """Mock claude_categorize for non-Amazon txns (Target, etc.)."""
+        return [CategoryResult(
+            transaction_id=t["id"],
+            category_id="e5d6a5ee-c297-4e4f-8bc9-64c3b15b4c90",
+            category_name="Shopping",
+            confidence=0.9,
+            rationale="Non-Amazon mock",
+            tier="claude"
+        ) for t in batch]
+
     with patch("categorizer.claude_categorize_amazon_items", side_effect=mock_claude_response):
-        results, skipped, unmatched_amazon, split_proposals = categorize_transactions(
-            test_txns, cache, CATEGORIES_FIXTURE, "key", amazon_matches=match_result
-        )
+        with patch("categorizer.claude_categorize", side_effect=mock_claude_categorize):
+            results, skipped, unmatched_amazon, split_proposals = categorize_transactions(
+                test_txns, cache, CATEGORIES_FIXTURE, "key", amazon_matches=match_result
+            )
 
-    # Assertions
+    # Assertions: verify all txn types routed correctly
     assert len(split_proposals) == len(match_result.matched), \
-        "Should have one proposal per matched shipment"
+        f"Expected {len(match_result.matched)} proposals, got {len(split_proposals)}"
 
-    # Check each proposal totals correctly
+    # Each proposal must sum to parent amount
     for proposal in split_proposals:
         parent_amount = abs(Decimal(proposal.parent_ynab_txn["amount"])) / Decimal("1000")
         parent_quantized = parent_amount.quantize(Decimal("0.01"), rounding=ROUND_HALF_EVEN)
         assert proposal.total_allocated() == parent_quantized, \
             f"Proposal {proposal.shipment.order_id} totals mismatch"
 
-    # Check unmatched are actually unmatched
+    # Unmatched Amazon txns: verify tuple unpacking and reason preservation
+    unmatched_ids = {t["id"] for t, _ in match_result.unmatched_ynab}
+    assert len(unmatched_amazon) == len(match_result.unmatched_ynab), \
+        f"Expected {len(match_result.unmatched_ynab)} unmatched Amazon, got {len(unmatched_amazon)}"
     for unmatched_txn, reason in unmatched_amazon:
-        assert unmatched_txn["id"] in [t["id"] for t in match_result.unmatched_ynab]
+        assert unmatched_txn["id"] in unmatched_ids, \
+            f"Txn {unmatched_txn['id']} not in matcher.unmatched_ynab"
+        assert reason, "Reason should be non-empty"
 
-    # Cache should remain empty (Amazon doesn't touch it)
-    assert cache == {}
+    # Transfer must be skipped
+    assert any(t["id"] == transfer_txn["id"] for t in skipped), \
+        "Transfer txn should be in skipped"
+
+    # Cache remains empty (Amazon never writes to it)
+    assert cache == {}, "Amazon processing should not modify cache"
 
 
 def test_categorize_transactions_unmatched_ynab_tuple_unpacking():
