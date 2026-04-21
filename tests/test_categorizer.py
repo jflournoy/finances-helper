@@ -2358,6 +2358,75 @@ def test_categorize_transactions_matcher_invariant_violation():
         categorize_transactions([amazon_txn], {}, [], "key", amazon_matches=match_result)
 
 
+def test_categorize_transactions_allocation_invariant_violation():
+    """If allocations don't sum to parent amount, RuntimeError with diagnostic."""
+    from amazon_matcher import AmazonShipment, MatchCandidate
+
+    item = _make_item()
+    shipment = AmazonShipment(
+        order_id="111-0000001", ship_date=date(2026,1,15),
+        payment_method_raw="Visa - 1234", payment_method_last4="1234",
+        is_split_tender=False, currency="USD",
+        item_subtotal=Decimal("10.00"), tax=Decimal("0"),
+        shipping=Decimal("0"), discounts=Decimal("0"),
+        total_amount=Decimal("10.00"), items=[item],
+        shipment_status="Shipped",
+    )
+    amazon_txn = {"id": "amz1", "payee_name": "Amazon.com", "amount": -10000,
+                  "date": "2026-01-15", "account_name": "Visa"}
+    match = MatchCandidate(ynab_txn=amazon_txn, shipment=shipment, date_delta_days=0)
+    match_result = MatchResult(
+        matched=[match],
+        unmatched_ynab=[],
+        unmatched_shipments=[],
+        excluded_shipments=[],
+        parse_errors=[],
+    )
+
+    # Mock allocator to return wrong total
+    mock_alloc = Mock()
+    mock_alloc.item = item
+    mock_alloc.allocated_amount = Decimal("9.00")  # Should be 10.00
+
+    with patch("categorizer.allocate_shipment_to_items", return_value=[mock_alloc]):
+        with patch("categorizer.claude_categorize_amazon_items") as mock_claude:
+            # Claude returns one result with allocated_amount from the mock
+            mock_claude.return_value = [ItemCategoryResult(
+                ynab_transaction_id="amz1", item=item, allocated_amount=Decimal("9.00"),
+                category_id="c1", category_name="Shopping", confidence=0.9, rationale="r"
+            )]
+            with pytest.raises(RuntimeError, match="total_allocated.*parent_amount"):
+                categorize_transactions(
+                    [amazon_txn], {}, CATEGORIES_FIXTURE, "key", amazon_matches=match_result
+                )
+
+
+def test_categorize_transactions_excluded_shipment_unmatched():
+    """YNAB Amazon txn whose only shipment was excluded → unmatched_amazon with reason."""
+    amazon_txn = {
+        "id": "amz-excluded",
+        "payee_name": "Amazon.com",
+        "amount": -5000,
+        "date": "2026-01-15",
+        "account_name": "Visa"
+    }
+    match_result = MatchResult(
+        matched=[],
+        unmatched_ynab=[(amazon_txn, "shipment excluded: split tender")],
+        unmatched_shipments=[],
+        excluded_shipments=[],
+        parse_errors=[],
+    )
+
+    results, skipped, unmatched_amazon, split_proposals = categorize_transactions(
+        [amazon_txn], {}, CATEGORIES_FIXTURE, "key", amazon_matches=match_result
+    )
+
+    assert len(unmatched_amazon) == 1
+    assert unmatched_amazon[0][0]["id"] == "amz-excluded"
+    assert "split tender" in unmatched_amazon[0][1]
+
+
 def test_categorize_transactions_unmatched_ynab_tuple_unpacking():
     """Amazon txn in unmatched_ynab → lands in unmatched_amazon with reason preserved."""
     amazon_txn = {
