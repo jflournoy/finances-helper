@@ -915,3 +915,318 @@ def _resolve_account_name(
         return account_name_lookup[txn["account_id"]], False
 
     return txn.get("account_id", "unknown"), True
+
+
+def _build_json_payload(
+    match_result: MatchResult,
+    split_proposals,
+    single_results,
+    unmatched_amazon,
+    account_name_lookup: dict[str, str] | None = None,
+    now: datetime | None = None,
+) -> dict:
+    """Build structured JSON payload for changeset.
+
+    Args:
+        match_result: MatchResult from phase B
+        split_proposals: list[AmazonSplitProposal]
+        single_results: list[CategoryResult]
+        unmatched_amazon: list[tuple[dict, str]] (txn, reason)
+        account_name_lookup: Optional {account_id: account_name}
+        now: Current datetime for generated_at
+
+    Returns:
+        Dict ready for JSON serialization via json.dumps with _json_default
+    """
+    if now is None:
+        now = datetime.now()
+
+    payload = {
+        "version": 1,
+        "generated_at": now,
+        "summary": {
+            "proposed_splits": len(split_proposals),
+            "proposed_singles": len(single_results),
+            "unmatched_ynab": len(unmatched_amazon),
+            "unmatched_shipments": len(match_result.unmatched_shipments),
+            "excluded_shipments": len(match_result.excluded_shipments),
+            "parse_errors": len(match_result.parse_errors),
+        },
+        "proposed_splits": [],
+        "proposed_singles": [],
+        "unmatched_ynab": [],
+        "unmatched_shipments": [],
+        "excluded_shipments": [],
+        "parse_errors": [],
+    }
+
+    for proposal in sorted(
+        split_proposals, key=lambda p: (p.parent_ynab_txn_date, p.parent_ynab_txn["id"])
+    ):
+        subtxns = []
+        for sub in proposal.subtransactions:
+            subtxns.append({
+                "item": asdict(sub.item),
+                "allocated_amount": sub.allocated_amount,
+                "category_id": sub.category_id,
+                "category_name": sub.category_name,
+                "confidence": sub.confidence,
+                "rationale": sub.rationale,
+            })
+
+        payload["proposed_splits"].append({
+            "parent_ynab_transaction_id": proposal.parent_ynab_txn["id"],
+            "parent_ynab_transaction": proposal.parent_ynab_txn,
+            "shipment": {
+                "order_id": proposal.shipment.order_id,
+                "ship_date": proposal.shipment.ship_date,
+                "payment_method_last4": proposal.shipment.payment_method_last4,
+                "total_amount": proposal.shipment.total_amount,
+                "item_count": len(proposal.shipment.items),
+            },
+            "subtransactions": subtxns,
+        })
+
+    for result in sorted(single_results, key=lambda r: r.transaction_id):
+        payload["proposed_singles"].append({
+            "transaction_id": result.transaction_id,
+            "transaction": None,
+            "order_id": None,
+            "category_id": result.category_id,
+            "category_name": result.category_name,
+            "confidence": result.confidence,
+            "rationale": result.rationale,
+        })
+
+    for txn, reason in sorted(unmatched_amazon, key=lambda x: (x[1], x[0]["date"], x[0]["id"])):
+        payload["unmatched_ynab"].append({
+            "transaction": txn,
+            "reason": reason,
+        })
+
+    for shipment in match_result.unmatched_shipments:
+        payload["unmatched_shipments"].append({
+            "order_id": shipment.order_id,
+            "ship_date": shipment.ship_date,
+            "payment_method_last4": shipment.payment_method_last4,
+            "total_amount": shipment.total_amount,
+            "item_count": len(shipment.items),
+        })
+
+    for shipment, reason in match_result.excluded_shipments:
+        payload["excluded_shipments"].append({
+            "shipment": {
+                "order_id": shipment.order_id,
+                "ship_date": shipment.ship_date,
+                "payment_method_last4": shipment.payment_method_last4,
+                "total_amount": shipment.total_amount,
+                "item_count": len(shipment.items),
+            },
+            "reason": reason,
+        })
+
+    for error in match_result.parse_errors:
+        payload["parse_errors"].append({
+            "row_index": error.row_index,
+            "reason": error.reason,
+            "raw_row": getattr(error, "raw_row", None),
+        })
+
+    return payload
+
+
+def _render_markdown(
+    payload: dict,
+    json_path: Path,
+) -> str:
+    """Render markdown from JSON payload.
+
+    Args:
+        payload: Dict structure from _build_json_payload
+        json_path: Path to JSON file (for reference in markdown)
+
+    Returns:
+        Markdown string
+    """
+    summary = payload["summary"]
+    generated_at = payload["generated_at"]
+    if isinstance(generated_at, datetime):
+        timestamp_str = generated_at.strftime("%Y-%m-%d %H:%M:%S")
+    else:
+        timestamp_str = str(generated_at)
+
+    md = f"# Amazon Changeset — {timestamp_str}\n\n"
+
+    md += "## Summary\n\n"
+    md += "| Category | Count |\n"
+    md += "|---|---|\n"
+    md += f"| Proposed splits (multi-item) | {summary['proposed_splits']} |\n"
+    md += f"| Proposed single categorizations | {summary['proposed_singles']} |\n"
+    md += f"| Unmatched YNAB Amazon transactions | {summary['unmatched_ynab']} |\n"
+    md += f"| Unmatched Amazon shipments | {summary['unmatched_shipments']} |\n"
+    md += f"| Excluded shipments | {summary['excluded_shipments']} |\n"
+    md += f"| Parse errors | {summary['parse_errors']} |\n\n"
+
+    md += f"## Proposed splits ({summary['proposed_splits']})\n\n"
+    for split in payload["proposed_splits"]:
+        ship = split["shipment"]
+        md += f"### {ship['order_id']} — {ship['ship_date']} — ${ship['total_amount']}\n"
+        parent = split["parent_ynab_transaction"]
+        parent_amount = abs(Decimal(parent["amount"])) / Decimal(1000)
+        parent_date = parent.get("date", "?")
+        parent_payee = parent.get("payee_name", "?")
+        md += f"Parent: {parent_date} | {parent.get('account_name', parent.get('account_id', '?'))} | ${parent_amount:.2f} | {parent_payee}\n"
+        md += f"Shipment: {ship['order_id']} | {ship['ship_date']} | {ship['item_count']} items\n\n"
+        md += "| Item | ASIN | Qty | Allocated | Category | Confidence | Rationale |\n"
+        md += "|---|---|---|---|---|---|---|\n"
+        for sub in split["subtransactions"]:
+            item = sub["item"]
+            name = _md_escape(item["product_name"])
+            asin = item["asin"]
+            qty = item["quantity"]
+            alloc = sub["allocated_amount"]
+            cat = sub["category_name"] if sub["category_id"] else "—"
+            conf = sub["confidence"]
+            ratio = _md_escape(sub["rationale"])
+            prefix = "[UNCATEGORIZED] " if sub["category_id"] is None else ""
+            md += f"| {prefix}{name} | {asin} | {qty} | ${alloc} | {cat} | {conf:.2f} | {ratio} |\n"
+        md += "\n"
+
+    md += f"## Proposed single categorizations ({summary['proposed_singles']})\n\n"
+    for single in payload["proposed_singles"]:
+        if single["transaction"]:
+            txn = single["transaction"]
+            date = txn.get("date", "?")
+            account = txn.get("account_name", txn.get("account_id", "?"))
+            amount = abs(Decimal(txn.get("amount", 0))) / Decimal(1000)
+            cat = single["category_name"] or "?"
+            conf = single["confidence"]
+            ratio = single["rationale"]
+            md += f"- {date} | {account} | ${amount:.2f} | {single['order_id']} | {cat} (confidence: {conf:.2f}) — {ratio}\n"
+
+    md += f"\n## Unmatched YNAB Amazon transactions ({summary['unmatched_ynab']})\n\n"
+    reasons_map = {}
+    for entry in payload["unmatched_ynab"]:
+        reason = entry["reason"]
+        if reason not in reasons_map:
+            reasons_map[reason] = []
+        reasons_map[reason].append(entry["transaction"])
+
+    for reason in sorted(reasons_map.keys()):
+        txns = reasons_map[reason]
+        md += f"### {reason} ({len(txns)})\n"
+        for txn in txns:
+            date = txn.get("date", "?")
+            account = txn.get("account_name", txn.get("account_id", "?"))
+            amount = abs(Decimal(txn.get("amount", 0))) / Decimal(1000)
+            txn_id = txn.get("id", "?")
+            md += f"- {date} | {account} | ${amount:.2f} | txn_id: {txn_id}\n"
+        md += "\n"
+
+    md += f"## Unmatched Amazon shipments ({summary['unmatched_shipments']})\n\n"
+    md += "These are Amazon shipments in the dump with no matching YNAB charge. Usually means YNAB hasn't synced recently or the transaction is in a closed account.\n\n"
+    for ship in payload["unmatched_shipments"]:
+        order_id = ship["order_id"]
+        ship_date = ship["ship_date"]
+        amount = ship["total_amount"]
+        last4 = ship["payment_method_last4"] or "?????"
+        md += f"- {order_id} | {ship_date} | ${amount} | last-4: {last4}\n"
+    md += "\n"
+
+    md += f"## Excluded shipments ({summary['excluded_shipments']})\n\n"
+    excluded_map = {}
+    for entry in payload["excluded_shipments"]:
+        reason = entry["reason"]
+        if reason not in excluded_map:
+            excluded_map[reason] = []
+        excluded_map[reason].append(entry["shipment"])
+
+    for reason in sorted(excluded_map.keys()):
+        ships = excluded_map[reason]
+        md += f"### {reason} ({len(ships)})\n"
+        for ship in ships:
+            md += f"- {ship['order_id']} | {ship['ship_date']} | ${ship['total_amount']}\n"
+        md += "\n"
+
+    md += f"## Parse errors ({summary['parse_errors']})\n\n"
+    errors = payload["parse_errors"]
+    if len(errors) <= 50:
+        for error in errors:
+            md += f"- row {error['row_index']}: {error['reason']}\n"
+    else:
+        for error in errors[:50]:
+            md += f"- row {error['row_index']}: {error['reason']}\n"
+        remainder = len(errors) - 50
+        md += f"\n... and {remainder} more parse errors. See JSON for full list.\n"
+
+    md += "\n## How to apply\n\n"
+    md += "Review this file carefully. When ready to apply, run:\n\n"
+    md += f"    uv run python amazon_matcher.py --confirm {json_path}\n\n"
+    md += "(Confirm command not yet implemented — see issue tracking the confirm step.)\n"
+    md += f"Corresponding JSON: {json_path}\n"
+
+    return md
+
+
+def write_amazon_changeset(
+    match_result: MatchResult,
+    split_proposals,
+    single_results,
+    unmatched_amazon,
+    *,
+    account_name_lookup: dict[str, str] | None = None,
+    out_dir: Path = Path("data/cache"),
+    now: datetime | None = None,
+) -> tuple[Path, Path]:
+    """Write Amazon changeset to paired markdown + JSON artifacts.
+
+    Output ordering is deterministic:
+    - Splits/singles sorted by transaction date and ID
+    - Unmatched YNAB grouped by reason, then by date and ID
+    - Parse errors preserved in input order
+
+    Args:
+        match_result: MatchResult from match_shipments_to_transactions.
+        split_proposals: list[AmazonSplitProposal] from categorizer.
+        single_results: list[CategoryResult] from categorizer.
+        unmatched_amazon: list[tuple[dict, str]] (txn, reason) from orchestrator.
+        account_name_lookup: Optional {account_id: account_name}.
+        out_dir: Directory for output files (created if missing).
+        now: Injectable clock for deterministic tests.
+
+    Returns:
+        (markdown_path, json_path)
+
+    Raises:
+        RuntimeError: If invariants violated or file cannot be written.
+    """
+    _validate_invariants(split_proposals, single_results, unmatched_amazon)
+
+    if now is None:
+        now = datetime.now()
+
+    out_dir = Path(out_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    timestamp = now.strftime("%Y%m%d-%H%M%S")
+    base_path = out_dir / f"amazon-changeset-{timestamp}"
+
+    payload = _build_json_payload(
+        match_result,
+        split_proposals,
+        single_results,
+        unmatched_amazon,
+        account_name_lookup,
+        now,
+    )
+
+    json_path = _next_free_path(base_path, ".json")
+    md_path = json_path.with_suffix(".md")
+
+    json_content = json.dumps(payload, default=_json_default, indent=2)
+    json_path.write_text(json_content)
+
+    markdown = _render_markdown(payload, json_path)
+    md_path.write_text(markdown)
+
+    return md_path, json_path

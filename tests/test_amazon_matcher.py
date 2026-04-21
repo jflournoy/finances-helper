@@ -2147,3 +2147,60 @@ def test_resolve_account_name_fallback_to_id():
     result, warning = _resolve_account_name(txn, None)
     assert result == "acc-1"
     assert warning is True
+
+
+def test_write_amazon_changeset_empty_result(tmp_path):
+    """write_amazon_changeset writes files with all zeros when result is empty."""
+    from amazon_matcher import write_amazon_changeset, MatchResult
+    from datetime import datetime
+
+    match_result = MatchResult(
+        matched=[],
+        unmatched_ynab=[],
+        unmatched_shipments=[],
+        excluded_shipments=[],
+        parse_errors=[]
+    )
+    now = datetime(2026, 4, 21, 15, 30, 0)
+
+    md_path, json_path = write_amazon_changeset(
+        match_result=match_result,
+        split_proposals=[],
+        single_results=[],
+        unmatched_amazon=[],
+        out_dir=tmp_path,
+        now=now
+    )
+
+    assert md_path.exists()
+    assert json_path.exists()
+    assert md_path.read_text().count("## ") == 8
+    assert "| 0 |" in md_path.read_text()
+
+    import json as json_mod
+    data = json.loads(json_path.read_text())
+    assert data["summary"]["proposed_splits"] == 0
+    assert data["summary"]["proposed_singles"] == 0
+
+
+def test_write_amazon_changeset_filename_format(tmp_path):
+    """write_amazon_changeset uses YYYYMMDD-HHMMSS format in filename."""
+    from amazon_matcher import write_amazon_changeset, MatchResult
+    from datetime import datetime
+
+    match_result = MatchResult(matched=[], unmatched_ynab=[], unmatched_shipments=[], excluded_shipments=[], parse_errors=[])
+    now = datetime(2026, 4, 21, 15, 30, 45)
+
+    md_path, json_path = write_amazon_changeset(
+        match_result=match_result,
+        split_proposals=[],
+        single_results=[],
+        unmatched_amazon=[],
+        out_dir=tmp_path,
+        now=now
+    )
+
+    assert "20260421-153045" in md_path.name
+    assert "20260421-153045" in json_path.name
+    assert md_path.name.endswith(".md")
+    assert json_path.name.endswith(".json")
