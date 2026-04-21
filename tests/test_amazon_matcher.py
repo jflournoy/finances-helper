@@ -2204,3 +2204,79 @@ def test_write_amazon_changeset_filename_format(tmp_path):
     assert "20260421-153045" in json_path.name
     assert md_path.name.endswith(".md")
     assert json_path.name.endswith(".json")
+
+
+# ============================================================================
+# Integration Test: IT-CHANGESET (Phase E Full Pipeline)
+# ============================================================================
+
+
+def test_it_changeset_full_pipeline(tmp_path):
+    """IT-CHANGESET: Full pipeline from CSV to changeset files.
+
+    Flow:
+    1. Parse amazon_order_history_sample.csv
+    2. Load amazon_ynab_transactions.json
+    3. Run filter_amazon_transactions and match_shipments_to_transactions
+    4. Allocate shipment to items
+    5. Call write_amazon_changeset
+    6. Assert JSON structure and markdown contains expected sections
+
+    This integration test validates the wiring across the entire Phase E pipeline.
+    """
+    from amazon_matcher import (
+        parse_order_history,
+        filter_amazon_transactions,
+        match_shipments_to_transactions,
+        allocate_shipment_to_items,
+        write_amazon_changeset,
+    )
+    from datetime import datetime
+
+    csv_path = Path("data/fixtures/amazon_order_history_sample.csv")
+    ynab_path = Path("data/fixtures/amazon_ynab_transactions.json")
+
+    shipments, parse_errors = parse_order_history(csv_path.read_text())
+    ynab_txns = json.load(open(ynab_path))
+
+    filtered_txns = filter_amazon_transactions(ynab_txns)
+    assert len(filtered_txns) > 0, "No Amazon transactions in fixture"
+
+    match_result = match_shipments_to_transactions(filtered_txns, shipments)
+
+    now = datetime(2026, 4, 21, 12, 0, 0)
+
+    md_path, json_path = write_amazon_changeset(
+        match_result=match_result,
+        split_proposals=[],
+        single_results=[],
+        unmatched_amazon=match_result.unmatched_ynab,
+        out_dir=tmp_path,
+        now=now
+    )
+
+    assert md_path.exists(), f"Markdown file not created: {md_path}"
+    assert json_path.exists(), f"JSON file not created: {json_path}"
+
+    md_content = md_path.read_text()
+    assert "# Amazon Changeset — 2026-04-21 12:00:00" in md_content
+    assert "## Summary" in md_content
+    assert "## Proposed splits" in md_content
+    assert "## Proposed single categorizations" in md_content
+    assert "## Unmatched YNAB Amazon transactions" in md_content
+    assert "## Unmatched Amazon shipments" in md_content
+    assert "## Excluded shipments" in md_content
+    assert "## Parse errors" in md_content
+    assert "## How to apply" in md_content
+    assert "uv run python amazon_matcher.py --confirm" in md_content
+
+    json_data = json.loads(json_path.read_text())
+    assert json_data["version"] == 1
+    assert json_data["generated_at"] == "2026-04-21T12:00:00"
+    assert "summary" in json_data
+    assert "proposed_splits" in json_data
+    assert "proposed_singles" in json_data
+    assert "unmatched_ynab" in json_data
+    assert "unmatched_shipments" in json_data
+    assert "excluded_shipments" in json_data
+    assert "parse_errors" in json_data
