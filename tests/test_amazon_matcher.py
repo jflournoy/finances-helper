@@ -1966,3 +1966,28 @@ def test_ynab_fixture_amounts_are_whole_cents():
     txns = json.load(open("data/fixtures/amazon_ynab_transactions.json"))
     for txn in txns:
         assert txn["amount"] % 10 == 0, f"{txn['id']} has sub-cent amount {txn['amount']}"
+
+
+# ============================================================================
+# Unit Tests: is_amazon_payee() function
+# ============================================================================
+
+
+def test_is_amazon_payee():
+    """Test is_amazon_payee predicate for Amazon payee detection."""
+    from amazon_matcher import is_amazon_payee
+
+    # True cases
+    assert is_amazon_payee("Amazon.com") is True
+    assert is_amazon_payee("amazon") is True
+    assert is_amazon_payee("AMAZON MKTPL") is True
+    assert is_amazon_payee("AMZN Mktp US") is True
+    assert is_amazon_payee("MY AMZN ORDER") is True   # "amzn" anywhere
+    assert is_amazon_payee("FOO amzn bar") is True    # "amzn" anywhere
+
+    # False cases
+    assert is_amazon_payee(None) is False
+    assert is_amazon_payee("") is False
+    assert is_amazon_payee("FOO AMAZON") is False     # "amazon" NOT at start, no "amzn"
+    assert is_amazon_payee("Target") is False
+    assert is_amazon_payee("PRIME AMAZON REWARDS") is False  # "amazon" mid-string, no "amzn"

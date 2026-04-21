@@ -446,6 +446,22 @@ class MatchResult:
     parse_errors: list[ParseError]
 
 
+def is_amazon_payee(payee: str | None) -> bool:
+    """Return True if payee name looks like an Amazon transaction.
+
+    Matches the same logic used by filter_amazon_transactions:
+    - Starts with "amazon" (case-insensitive), OR
+    - Contains "amzn" (case-insensitive)
+
+    Used by both filter_amazon_transactions and categorizer's Amazon router
+    to ensure consistent payee detection across the pipeline.
+    """
+    if not payee:
+        return False
+    p = payee.lower()
+    return p.startswith("amazon") or "amzn" in p
+
+
 def filter_amazon_transactions(ynab_txns: list[dict]) -> list[dict]:
     """Filter YNAB transactions to keep only Amazon purchases.
 
@@ -464,10 +480,8 @@ def filter_amazon_transactions(ynab_txns: list[dict]) -> list[dict]:
     result = []
 
     for txn in ynab_txns:
-        payee = txn.get("payee_name", "").lower()
-
         # Check payee
-        if not (payee.startswith("amazon") or "amzn" in payee):
+        if not is_amazon_payee(txn.get("payee_name")):
             continue
 
         # Check category
