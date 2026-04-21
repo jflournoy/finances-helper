@@ -5,9 +5,10 @@ assigns categories via Claude, and writes item descriptions to memo fields.
 """
 
 import csv
+import json
 import logging
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, asdict
 from datetime import date, datetime, timedelta
 from decimal import Decimal, InvalidOperation, ROUND_HALF_EVEN
 from pathlib import Path
@@ -765,3 +766,152 @@ def allocate_shipment_to_items(shipment: AmazonShipment) -> list[ItemAllocation]
         allocations[-1].allocated_amount += rounding_delta
 
     return allocations
+
+
+# ============================================================================
+# Phase E: Changeset Writer Helper Functions
+# ============================================================================
+
+
+def _json_default(obj):
+    """Handle non-JSON-serializable types in json.dumps().
+
+    Converts:
+    - Decimal → string
+    - date → ISO8601 string
+    - datetime → ISO8601 string with time
+    - dataclass instances → dict (via dataclasses.asdict)
+
+    Args:
+        obj: Object to serialize
+
+    Returns:
+        JSON-serializable form
+
+    Raises:
+        TypeError: If object type cannot be serialized
+    """
+    if isinstance(obj, Decimal):
+        return str(obj)
+    if isinstance(obj, datetime):
+        return obj.isoformat()
+    if isinstance(obj, date):
+        return obj.isoformat()
+    raise TypeError(f"Unknown type {type(obj).__name__} in JSON serialization")
+
+
+def _md_escape(s: str) -> str:
+    """Escape user-controlled strings for markdown table cells.
+
+    Replaces:
+    - Pipe `|` with `\\|`
+    - Newlines/carriage returns with nothing (strip)
+    - Strips leading/trailing whitespace
+
+    Args:
+        s: User-controlled string
+
+    Returns:
+        Escaped and trimmed string
+    """
+    if not s:
+        return s
+    s = s.replace("|", "\\|").replace("\n", "").replace("\r", "")
+    return s.strip()
+
+
+def _next_free_path(base: Path, suffix: str) -> Path:
+    """Return a non-existent file path, appending microsecond suffix if needed.
+
+    If base.with_suffix(suffix) doesn't exist, returns it. Otherwise appends
+    a microsecond suffix (nnnnnn) to avoid collision.
+
+    Args:
+        base: Base path without suffix (e.g., Path("out/amazon-changeset-20260421-153000"))
+        suffix: File suffix (e.g., ".md" or ".json")
+
+    Returns:
+        Path to a non-existent file
+
+    Raises:
+        RuntimeError: If unable to find a free path (highly unlikely)
+    """
+    candidate = base.with_suffix(suffix)
+    if not candidate.exists():
+        return candidate
+
+    for micro in range(1, 1_000_000):
+        candidate = base.parent / f"{base.name}-{micro:06d}{suffix}"
+        if not candidate.exists():
+            return candidate
+
+    raise RuntimeError(f"Cannot find free path for {base}")
+
+
+def _validate_invariants(
+    split_proposals,
+    single_results,
+    unmatched_amazon,
+) -> None:
+    """Validate changeset invariants before writing.
+
+    Checks:
+    1. Each split proposal's allocated total equals parent YNAB amount
+    2. No transaction ID appears in multiple buckets
+
+    Args:
+        split_proposals: list[AmazonSplitProposal]
+        single_results: list[CategoryResult]
+        unmatched_amazon: list[tuple[dict, str]]
+
+    Raises:
+        RuntimeError: If any invariant is violated
+    """
+    for proposal in split_proposals:
+        parent_amt = abs(Decimal(proposal.parent_ynab_txn["amount"])) / Decimal(1000)
+        total_allocated = sum(
+            s.allocated_amount for s in proposal.subtransactions
+        )
+        if abs(total_allocated - parent_amt) > Decimal("0.01"):
+            raise RuntimeError(
+                f"Split proposal for txn {proposal.parent_ynab_txn['id']} "
+                f"allocates {total_allocated} but parent is {parent_amt}"
+            )
+
+    all_txn_ids = (
+        {p.parent_ynab_txn["id"] for p in split_proposals}
+        | {r.transaction_id for r in single_results}
+        | {t["id"] for t, _ in unmatched_amazon}
+    )
+    expected_count = len(split_proposals) + len(single_results) + len(unmatched_amazon)
+    if len(all_txn_ids) != expected_count:
+        raise RuntimeError(
+            f"Duplicate transaction across buckets: {expected_count} entries, "
+            f"{len(all_txn_ids)} unique txn IDs"
+        )
+
+
+def _resolve_account_name(
+    txn: dict,
+    account_name_lookup: dict[str, str] | None = None,
+) -> tuple[str, bool]:
+    """Resolve account name for a transaction.
+
+    Returns account name if present in txn. Falls back to lookup by account_id.
+    Finally falls back to account_id itself and signals a warning.
+
+    Args:
+        txn: YNAB transaction dict
+        account_name_lookup: Optional {account_id: account_name} mapping
+
+    Returns:
+        (account_name_or_id, warning_needed)
+        - warning_needed is True if fell back to account_id
+    """
+    if txn.get("account_name"):
+        return txn["account_name"], False
+
+    if account_name_lookup and txn.get("account_id") in account_name_lookup:
+        return account_name_lookup[txn["account_id"]], False
+
+    return txn.get("account_id", "unknown"), True

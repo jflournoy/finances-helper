@@ -1991,3 +1991,159 @@ def test_is_amazon_payee():
     assert is_amazon_payee("FOO AMAZON") is False     # "amazon" NOT at start, no "amzn"
     assert is_amazon_payee("Target") is False
     assert is_amazon_payee("PRIME AMAZON REWARDS") is False  # "amazon" mid-string, no "amzn"
+
+
+# ============================================================================
+# Unit Tests: Changeset Writer Helper Functions (Phase E)
+# ============================================================================
+
+
+def test_json_default_decimal():
+    """_json_default converts Decimal to string."""
+    from amazon_matcher import _json_default
+    assert _json_default(Decimal("123.45")) == "123.45"
+    assert _json_default(Decimal("0")) == "0"
+
+
+def test_json_default_date():
+    """_json_default converts date to ISO8601 string."""
+    from amazon_matcher import _json_default
+    d = date(2026, 4, 21)
+    assert _json_default(d) == "2026-04-21"
+
+
+def test_json_default_datetime():
+    """_json_default converts datetime to ISO8601 string."""
+    from amazon_matcher import _json_default
+    from datetime import datetime
+    dt = datetime(2026, 4, 21, 15, 30, 45, 123456)
+    assert _json_default(dt) == "2026-04-21T15:30:45.123456"
+
+
+def test_json_default_unknown_type_raises():
+    """_json_default raises TypeError for unknown types."""
+    from amazon_matcher import _json_default
+    with pytest.raises(TypeError, match="Unknown type"):
+        _json_default(object())
+
+
+def test_md_escape_pipe():
+    """_md_escape escapes pipe character."""
+    from amazon_matcher import _md_escape
+    assert _md_escape("foo|bar") == "foo\\|bar"
+
+
+def test_md_escape_newline():
+    """_md_escape removes newlines."""
+    from amazon_matcher import _md_escape
+    assert _md_escape("foo\nbar") == "foobar"
+    assert _md_escape("foo\rbar") == "foobar"
+
+
+def test_md_escape_whitespace():
+    """_md_escape strips leading/trailing whitespace."""
+    from amazon_matcher import _md_escape
+    assert _md_escape("  foo  ") == "foo"
+
+
+def test_md_escape_combined():
+    """_md_escape handles combined escape cases."""
+    from amazon_matcher import _md_escape
+    assert _md_escape("  foo|bar\nbaz  ") == "foo\\|barbaz"
+
+
+def test_next_free_path_no_collision():
+    """_next_free_path returns base path when it doesn't exist."""
+    from amazon_matcher import _next_free_path
+    from pathlib import Path
+    with tempfile.TemporaryDirectory() as tmpdir:
+        base = Path(tmpdir) / "test"
+        result = _next_free_path(base, ".txt")
+        assert result == Path(tmpdir) / "test.txt"
+        assert not result.exists()
+
+
+def test_next_free_path_collision():
+    """_next_free_path appends microsecond suffix on collision."""
+    from amazon_matcher import _next_free_path
+    with tempfile.TemporaryDirectory() as tmpdir:
+        base = Path(tmpdir) / "test"
+        target = Path(tmpdir) / "test.txt"
+        target.write_text("existing")
+        result = _next_free_path(base, ".txt")
+        assert result != target
+        assert result.name.startswith("test-")
+        assert result.name.endswith(".txt")
+
+
+def test_validate_invariants_ok():
+    """_validate_invariants passes when invariants hold."""
+    from amazon_matcher import _validate_invariants
+    from categorizer import AmazonSplitProposal, ItemCategoryResult, CategoryResult
+
+    split_proposals = []
+    single_results = []
+    unmatched = []
+    _validate_invariants(split_proposals, single_results, unmatched)
+
+
+def test_validate_invariants_split_total_mismatch(monkeypatch):
+    """_validate_invariants raises on split total != parent amount."""
+    from amazon_matcher import _validate_invariants
+    from types import SimpleNamespace
+
+    parent_txn = {"id": "txn-1", "amount": -100000}
+    subtxn = SimpleNamespace(allocated_amount=Decimal("30.00"))
+    proposal = SimpleNamespace(
+        parent_ynab_txn=parent_txn,
+        subtransactions=[subtxn]
+    )
+
+    with pytest.raises(RuntimeError, match="allocates.*but parent"):
+        _validate_invariants([proposal], [], [])
+
+
+def test_validate_invariants_duplicate_txn():
+    """_validate_invariants raises on duplicate txn across buckets."""
+    from amazon_matcher import _validate_invariants
+    from types import SimpleNamespace
+
+    parent_txn = {"id": "txn-1", "amount": -100000}
+    subtxn = SimpleNamespace(allocated_amount=Decimal("100.00"))
+    proposal = SimpleNamespace(
+        parent_ynab_txn=parent_txn,
+        subtransactions=[subtxn]
+    )
+
+    single = SimpleNamespace(transaction_id="txn-1")
+
+    with pytest.raises(RuntimeError, match="Duplicate transaction"):
+        _validate_invariants([proposal], [single], [])
+
+
+def test_resolve_account_name_present():
+    """_resolve_account_name uses account_name when present."""
+    from amazon_matcher import _resolve_account_name
+    txn = {"id": "txn-1", "account_id": "acc-1", "account_name": "Checking"}
+    result, warning = _resolve_account_name(txn, None)
+    assert result == "Checking"
+    assert warning is False
+
+
+def test_resolve_account_name_lookup():
+    """_resolve_account_name falls back to lookup."""
+    from amazon_matcher import _resolve_account_name
+    txn = {"id": "txn-1", "account_id": "acc-1"}
+    lookup = {"acc-1": "Savings"}
+    result, warning = _resolve_account_name(txn, lookup)
+    assert result == "Savings"
+    assert warning is False
+
+
+def test_resolve_account_name_fallback_to_id():
+    """_resolve_account_name falls back to account_id, signals warning."""
+    from amazon_matcher import _resolve_account_name
+    txn = {"id": "txn-1", "account_id": "acc-1"}
+    result, warning = _resolve_account_name(txn, None)
+    assert result == "acc-1"
+    assert warning is True
