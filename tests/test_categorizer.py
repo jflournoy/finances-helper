@@ -1819,3 +1819,288 @@ def test_orchestrator_records_claude_with_strength():
     assert results[0].prior_strength == 12
 
 
+
+
+# ============================================================================
+# Tests for Phase D: Amazon item categorization (Issue #83)
+# ============================================================================
+
+from decimal import Decimal
+from datetime import date
+from amazon_matcher import AmazonItem, AmazonShipment, ItemAllocation
+
+
+CATEGORIES_FIXTURE = [
+    {
+        "id": "grp1",
+        "name": "Shopping",
+        "categories": [
+            {"id": "e5d6a5ee-c297-4e4f-8bc9-64c3b15b4c90", "name": "Shopping"},
+            {"id": "c5f3b2a1-d8f4-4c9b-a1e2-9f8c7d6e5f4a", "name": "Electronics"},
+        ],
+    }
+]
+
+
+def _make_item(order_id="111-0000001", ship_date=None, asin="B001", product_name="Test Product", qty=1, price="10.00"):
+    return AmazonItem(
+        order_id=order_id,
+        ship_date=ship_date or date(2026, 1, 15),
+        asin=asin,
+        product_name=product_name,
+        quantity=qty,
+        unit_price=Decimal(price),
+        unit_price_tax=Decimal("0"),
+        raw_row_index=2,
+    )
+
+
+def _make_allocation(item, amount="10.00"):
+    return ItemAllocation(item=item, allocated_amount=Decimal(amount), share_of_subtotal=Decimal("1"))
+
+
+def _make_parent_txn(txn_id="txn-001", amount=-10000, date_str="2026-01-15", account="Visa"):
+    return {"id": txn_id, "amount": amount, "date": date_str, "account_name": account}
+
+
+def test_claude_categorize_amazon_items_happy_path():
+    """Test happy path: 3 items, 1 with null category_id."""
+    from categorizer import claude_categorize_amazon_items, ItemCategoryResult
+    
+    items = [
+        _make_item(asin="B001", product_name="Product A"),
+        _make_item(asin="B002", product_name="Product B"),
+        _make_item(asin="B003", product_name="Product C"),
+    ]
+    allocations = [
+        _make_allocation(items[0], "26.75"),
+        _make_allocation(items[1], "16.05"),
+        _make_allocation(items[2], "10.70"),
+    ]
+    parent_txn = _make_parent_txn(amount=-53500)
+
+    response_data = json.dumps([
+        {"item_index": 1, "category_id": "e5d6a5ee-c297-4e4f-8bc9-64c3b15b4c90",
+         "category_name": "Shopping", "confidence": 0.92, "rationale": "Office supplies"},
+        {"item_index": 2, "category_id": "c5f3b2a1-d8f4-4c9b-a1e2-9f8c7d6e5f4a",
+         "category_name": "Electronics", "confidence": 0.88, "rationale": "Consumer electronics"},
+        {"item_index": 3, "category_id": None,
+         "category_name": None, "confidence": 0.0, "rationale": "Unable to categorize"},
+    ])
+
+    mock_response = Mock()
+    mock_response.content = [Mock(text=response_data)]
+    mock_response.stop_reason = "end_turn"
+
+    with patch("categorizer.anthropic.Anthropic") as mock_cls:
+        mock_cls.return_value.messages.create.return_value = mock_response
+        results = claude_categorize_amazon_items(parent_txn, allocations, CATEGORIES_FIXTURE, "key")
+
+    assert len(results) == 3
+    assert results[0].category_id == "e5d6a5ee-c297-4e4f-8bc9-64c3b15b4c90"
+    assert results[0].allocated_amount == Decimal("26.75")
+    assert results[0].item is items[0]
+    assert results[0].ynab_transaction_id == "txn-001"
+    assert results[2].category_id is None
+    assert results[2].category_name is None
+
+
+def test_claude_categorize_amazon_items_length_mismatch():
+    """Test error when Claude returns wrong number of items."""
+    from categorizer import claude_categorize_amazon_items
+    
+    allocations = [_make_allocation(_make_item(), "10.00"), _make_allocation(_make_item(), "10.00")]
+    response_data = json.dumps([
+        {"item_index": 1, "category_id": "e5d6a5ee-c297-4e4f-8bc9-64c3b15b4c90",
+         "category_name": "Shopping", "confidence": 0.9, "rationale": "r"},
+        {"item_index": 2, "category_id": "e5d6a5ee-c297-4e4f-8bc9-64c3b15b4c90",
+         "category_name": "Shopping", "confidence": 0.9, "rationale": "r"},
+        {"item_index": 3, "category_id": "e5d6a5ee-c297-4e4f-8bc9-64c3b15b4c90",
+         "category_name": "Shopping", "confidence": 0.9, "rationale": "r"},
+    ])
+    mock_response = Mock()
+    mock_response.content = [Mock(text=response_data)]
+    mock_response.stop_reason = "end_turn"
+
+    with patch("categorizer.anthropic.Anthropic") as mock_cls:
+        mock_cls.return_value.messages.create.return_value = mock_response
+        with pytest.raises(ValueError, match="3 results for 2 allocations"):
+            claude_categorize_amazon_items(_make_parent_txn(), allocations, CATEGORIES_FIXTURE, "key")
+
+
+def test_claude_categorize_amazon_items_item_index_mismatch():
+    """Test error when item_index doesn't match position."""
+    from categorizer import claude_categorize_amazon_items
+    
+    items = [_make_item() for _ in range(3)]
+    allocations = [_make_allocation(i) for i in items]
+    response_data = json.dumps([
+        {"item_index": 1, "category_id": "e5d6a5ee-c297-4e4f-8bc9-64c3b15b4c90", "category_name": "Shopping", "confidence": 0.9, "rationale": "r"},
+        {"item_index": 3, "category_id": "e5d6a5ee-c297-4e4f-8bc9-64c3b15b4c90", "category_name": "Shopping", "confidence": 0.9, "rationale": "r"},
+        {"item_index": 2, "category_id": "e5d6a5ee-c297-4e4f-8bc9-64c3b15b4c90", "category_name": "Shopping", "confidence": 0.9, "rationale": "r"},
+    ])
+    mock_response = Mock()
+    mock_response.content = [Mock(text=response_data)]
+    mock_response.stop_reason = "end_turn"
+
+    with patch("categorizer.anthropic.Anthropic") as mock_cls:
+        mock_cls.return_value.messages.create.return_value = mock_response
+        with pytest.raises(ValueError, match="item_index"):
+            claude_categorize_amazon_items(_make_parent_txn(), allocations, CATEGORIES_FIXTURE, "key")
+
+
+def test_claude_categorize_amazon_items_unknown_category_id():
+    """Test error when Claude returns unknown category_id."""
+    from categorizer import claude_categorize_amazon_items
+    
+    allocations = [_make_allocation(_make_item())]
+    response_data = json.dumps([
+        {"item_index": 1, "category_id": "ffffffff-ffff-ffff-ffff-ffffffffffff",
+         "category_name": "Fake", "confidence": 0.9, "rationale": "r"},
+    ])
+    mock_response = Mock()
+    mock_response.content = [Mock(text=response_data)]
+    mock_response.stop_reason = "end_turn"
+
+    with patch("categorizer.anthropic.Anthropic") as mock_cls:
+        mock_cls.return_value.messages.create.return_value = mock_response
+        with pytest.raises(ValueError, match="unknown category_id"):
+            claude_categorize_amazon_items(_make_parent_txn(), allocations, CATEGORIES_FIXTURE, "key")
+
+
+def test_claude_categorize_amazon_items_null_category_id_accepted():
+    """Test that null category_id is accepted (no error)."""
+    from categorizer import claude_categorize_amazon_items
+    
+    allocations = [_make_allocation(_make_item())]
+    response_data = json.dumps([
+        {"item_index": 1, "category_id": None, "category_name": None, "confidence": 0.0, "rationale": "unsure"},
+    ])
+    mock_response = Mock()
+    mock_response.content = [Mock(text=response_data)]
+    mock_response.stop_reason = "end_turn"
+
+    with patch("categorizer.anthropic.Anthropic") as mock_cls:
+        mock_cls.return_value.messages.create.return_value = mock_response
+        results = claude_categorize_amazon_items(_make_parent_txn(), allocations, CATEGORIES_FIXTURE, "key")
+
+    assert results[0].category_id is None
+
+
+def test_claude_categorize_amazon_items_missing_field():
+    """Test error when required field is missing."""
+    from categorizer import claude_categorize_amazon_items
+    
+    allocations = [_make_allocation(_make_item())]
+    response_data = json.dumps([
+        {"item_index": 1, "category_id": None, "category_name": None, "confidence": 0.0},
+        # "rationale" missing
+    ])
+    mock_response = Mock()
+    mock_response.content = [Mock(text=response_data)]
+    mock_response.stop_reason = "end_turn"
+
+    with patch("categorizer.anthropic.Anthropic") as mock_cls:
+        mock_cls.return_value.messages.create.return_value = mock_response
+        with pytest.raises(ValueError, match="rationale"):
+            claude_categorize_amazon_items(_make_parent_txn(), allocations, CATEGORIES_FIXTURE, "key")
+
+
+@pytest.mark.parametrize("bad_confidence", [1.5, -0.1, "high"])
+def test_claude_categorize_amazon_items_bad_confidence(bad_confidence):
+    """Test error for confidence out of range."""
+    from categorizer import claude_categorize_amazon_items
+    
+    allocations = [_make_allocation(_make_item())]
+    response_data = json.dumps([
+        {"item_index": 1, "category_id": None, "category_name": None,
+         "confidence": bad_confidence, "rationale": "r"},
+    ])
+    mock_response = Mock()
+    mock_response.content = [Mock(text=response_data)]
+    mock_response.stop_reason = "end_turn"
+
+    with patch("categorizer.anthropic.Anthropic") as mock_cls:
+        mock_cls.return_value.messages.create.return_value = mock_response
+        with pytest.raises(ValueError, match="confidence"):
+            claude_categorize_amazon_items(_make_parent_txn(), allocations, CATEGORIES_FIXTURE, "key")
+
+
+def test_claude_categorize_amazon_items_markdown_fences_stripped():
+    """Test markdown fence stripping."""
+    from categorizer import claude_categorize_amazon_items
+    
+    allocations = [_make_allocation(_make_item())]
+    inner = json.dumps([
+        {"item_index": 1, "category_id": None, "category_name": None, "confidence": 0.0, "rationale": "r"}
+    ])
+    fenced = f"```json\n{inner}\n```"
+    mock_response = Mock()
+    mock_response.content = [Mock(text=fenced)]
+    mock_response.stop_reason = "end_turn"
+
+    with patch("categorizer.anthropic.Anthropic") as mock_cls:
+        mock_cls.return_value.messages.create.return_value = mock_response
+        results = claude_categorize_amazon_items(_make_parent_txn(), allocations, CATEGORIES_FIXTURE, "key")
+
+    assert len(results) == 1
+
+
+def test_claude_categorize_amazon_items_empty_content():
+    """Test error on empty Claude content."""
+    from categorizer import claude_categorize_amazon_items
+    
+    mock_response = Mock()
+    mock_response.content = []
+    mock_response.stop_reason = "end_turn"
+    mock_response.usage = Mock()
+
+    with patch("categorizer.anthropic.Anthropic") as mock_cls:
+        mock_cls.return_value.messages.create.return_value = mock_response
+        with pytest.raises(ValueError, match="empty content"):
+            claude_categorize_amazon_items(_make_parent_txn(), [_make_allocation(_make_item())], CATEGORIES_FIXTURE, "key")
+
+
+def test_claude_categorize_amazon_items_max_tokens():
+    """Test error when Claude hits max_tokens."""
+    from categorizer import claude_categorize_amazon_items
+    
+    mock_response = Mock()
+    mock_response.content = [Mock(text="[truncated")]
+    mock_response.stop_reason = "max_tokens"
+
+    with patch("categorizer.anthropic.Anthropic") as mock_cls:
+        mock_cls.return_value.messages.create.return_value = mock_response
+        with pytest.raises(ValueError, match="max_tokens"):
+            claude_categorize_amazon_items(_make_parent_txn(), [_make_allocation(_make_item())], CATEGORIES_FIXTURE, "key")
+
+
+def test_claude_categorize_amazon_items_prompt_contents():
+    """Test that prompt contains required fields."""
+    from categorizer import claude_categorize_amazon_items
+    
+    item = _make_item(asin="B0TEST123", product_name="My Test Widget", qty=2)
+    allocation = _make_allocation(item, "23.45")
+    parent_txn = _make_parent_txn(amount=-23450, date_str="2026-01-15", account="Rewards Visa")
+
+    response_data = json.dumps([
+        {"item_index": 1, "category_id": None, "category_name": None, "confidence": 0.0, "rationale": "r"}
+    ])
+    mock_response = Mock()
+    mock_response.content = [Mock(text=response_data)]
+    mock_response.stop_reason = "end_turn"
+
+    with patch("categorizer.anthropic.Anthropic") as mock_cls:
+        mock_client = Mock()
+        mock_cls.return_value = mock_client
+        mock_client.messages.create.return_value = mock_response
+        claude_categorize_amazon_items(parent_txn, [allocation], CATEGORIES_FIXTURE, "key")
+
+    call_kwargs = mock_client.messages.create.call_args.kwargs
+    user_msg = call_kwargs["messages"][0]["content"]
+    assert "My Test Widget" in user_msg
+    assert "B0TEST123" in user_msg
+    assert "qty: 2" in user_msg
+    assert "$23.45" in user_msg
+    assert "2026-01-15" in user_msg
+    assert "Rewards Visa" in user_msg

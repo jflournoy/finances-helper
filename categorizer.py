@@ -8,10 +8,20 @@ Three-tier categorization strategy:
 import re
 import json
 from dataclasses import dataclass
+from decimal import Decimal, ROUND_HALF_EVEN
 from pathlib import Path
 from thefuzz import fuzz, process
 import anthropic
 from ynab_client import milliunits_to_dollars
+from amazon_matcher import (
+    AmazonItem,
+    AmazonShipment,
+    ItemAllocation,
+    MatchCandidate,
+    MatchResult,
+    allocate_shipment_to_items,
+    is_amazon_payee,
+)
 
 
 @dataclass
@@ -24,6 +34,41 @@ class CategoryResult:
     rationale: str         # Brief explanation
     tier: str              # "history", "fuzzy", or "claude"
     prior_strength: int | None = None  # Claude's confidence weight (1-20), only set for tier="claude"
+
+
+@dataclass
+class ItemCategoryResult:
+    """Categorization result for a single item in an Amazon shipment.
+
+    Distinct from CategoryResult: payee-level concepts (tier, prior_strength)
+    do not apply to item-level categorization.
+    """
+    ynab_transaction_id: str
+    item: AmazonItem
+    allocated_amount: Decimal
+    category_id: str | None
+    category_name: str | None
+    confidence: float
+    rationale: str
+
+
+@dataclass
+class AmazonSplitProposal:
+    """Proposed subtransaction split for an Amazon YNAB transaction.
+
+    Used for both single-item (1 subtransaction) and multi-item (N subtransactions)
+    shipments. The sum of subtransaction allocated_amounts must equal the
+    absolute value of the parent YNAB transaction amount.
+    """
+    parent_ynab_txn: dict
+    shipment: AmazonShipment
+    subtransactions: list[ItemCategoryResult]
+
+    def total_allocated(self) -> Decimal:
+        return sum(
+            (s.allocated_amount for s in self.subtransactions),
+            start=Decimal("0"),
+        )
 
 
 FUZZY_THRESHOLD = 70   # thefuzz token_sort_ratio score (0-100), lowered from 85
@@ -730,6 +775,174 @@ Only use category IDs from the list above. Return ONLY the JSON array, no other 
             rationale=item["rationale"],
             tier="claude",
             prior_strength=ps,
+        ))
+
+    return results
+
+
+def claude_categorize_amazon_items(
+    parent_txn: dict,
+    allocations: list[ItemAllocation],
+    categories: list[dict],
+    api_key: str,
+) -> list[ItemCategoryResult]:
+    """Categorize Amazon shipment items using Claude Haiku.
+
+    One Claude call per shipment (not batched across shipments).
+
+    Args:
+        parent_txn: The parent YNAB transaction being split.
+        allocations: Pro-rata allocations from allocate_shipment_to_items.
+                    Must be non-empty.
+        categories: YNAB category groups (filtered to recently-used).
+        api_key: Anthropic API key.
+
+    Returns:
+        List of ItemCategoryResult, one per allocation, in input order.
+
+    Raises:
+        ValueError: On malformed Claude response (empty, max_tokens, bad JSON,
+                   length mismatch, missing fields, item_index drift,
+                   unknown category_id, invalid confidence).
+    """
+    if not allocations:
+        raise ValueError("allocations must be non-empty")
+
+    category_text = ""
+    valid_category_ids = set()
+    for group in categories:
+        category_text += f"{group['name']}:\n"
+        for cat in group.get("categories", []):
+            category_text += f"  - {cat['name']} (ID: {cat['id']})\n"
+            valid_category_ids.add(cat["id"])
+
+    order_id = allocations[0].item.order_id
+    ship_date = allocations[0].item.ship_date
+
+    system_prompt = f"""You are categorizing individual items from a single Amazon shipment
+against a user's YNAB budget categories. Each item's allocated amount
+already includes a pro-rata share of shipment tax and shipping.
+
+Available categories:
+{category_text}
+
+Respond with a JSON array, one object per item, in the same order as
+provided:
+[
+  {{
+    "item_index": 1,
+    "category_id": "uuid",
+    "category_name": "Groceries",
+    "confidence": 0.95,
+    "rationale": "Canned fish, pantry staple"
+  }},
+  ...
+]
+
+Rules:
+- Use only category IDs from the list above.
+- If you cannot confidently assign an item to any category, set
+  category_id to null and explain in rationale.
+- Return ONLY the JSON array, no prose."""
+
+    amount_dollars = milliunits_to_dollars(parent_txn.get("amount", 0))
+    lines = [
+        f"YNAB transaction: {parent_txn.get('date', 'Unknown')} | "
+        f"{parent_txn.get('account_name', 'Unknown')} | ${amount_dollars:.2f}",
+        f"Amazon shipment: {order_id} shipped {ship_date}",
+        "",
+        "Items (1-indexed):",
+    ]
+    for i, alloc in enumerate(allocations, 1):
+        item = alloc.item
+        lines.append(f'{i}. "{item.product_name}"')
+        lines.append(
+            f"   ASIN: {item.asin}, qty: {item.quantity}, "
+            f"allocated: ${alloc.allocated_amount:.2f}"
+        )
+    user_message = "\n".join(lines)
+
+    max_tokens = max(2048, len(allocations) * 400)
+    client = anthropic.Anthropic(api_key=api_key)
+    response = client.messages.create(
+        model="claude-haiku-4-5-20251001",
+        max_tokens=max_tokens,
+        system=system_prompt,
+        messages=[{"role": "user", "content": user_message}],
+    )
+
+    if not response.content:
+        raise ValueError(
+            f"Claude returned empty content. stop_reason={response.stop_reason}, "
+            f"usage={response.usage}"
+        )
+    response_text = response.content[0].text
+    if not response_text or not response_text.strip():
+        raise ValueError(
+            f"Claude returned empty text. stop_reason={response.stop_reason}"
+        )
+    if response.stop_reason == "max_tokens":
+        raise ValueError(
+            f"Claude response truncated (max_tokens={max_tokens}, "
+            f"items={len(allocations)}). Last 200 chars: ...{response_text[-200:]}"
+        )
+
+    stripped = response_text.strip()
+    if stripped.startswith("```"):
+        first_newline = stripped.index("\n")
+        stripped = stripped[first_newline + 1:]
+        if stripped.endswith("```"):
+            stripped = stripped[:-3]
+        response_text = stripped.strip()
+
+    try:
+        data = json.loads(response_text)
+    except json.JSONDecodeError as e:
+        raise ValueError(
+            f"Claude returned unparseable JSON: {e}. "
+            f"First 500 chars: {response_text[:500]}"
+        )
+
+    if not isinstance(data, list):
+        raise ValueError("Claude response is not a JSON array")
+
+    if len(data) != len(allocations):
+        raise ValueError(
+            f"Claude returned {len(data)} results for {len(allocations)} allocations"
+        )
+
+    required_fields = {"item_index", "category_id", "category_name", "confidence", "rationale"}
+    results = []
+    for i, (alloc, item_data) in enumerate(zip(allocations, data)):
+        missing = required_fields - set(item_data.keys())
+        if missing:
+            raise ValueError(
+                f"Response item {i} missing fields: {', '.join(sorted(missing))}"
+            )
+        if item_data["item_index"] != i + 1:
+            raise ValueError(
+                f"Response item at position {i} has item_index "
+                f"{item_data['item_index']}, expected {i + 1}"
+            )
+        cat_id = item_data["category_id"]
+        if cat_id is not None and cat_id not in valid_category_ids:
+            raise ValueError(
+                f"Response item {i} has unknown category_id: {cat_id}"
+            )
+        conf = item_data["confidence"]
+        if not isinstance(conf, (int, float)) or conf < 0 or conf > 1:
+            raise ValueError(
+                f"Response item {i} has invalid confidence: {conf!r} (must be in [0, 1])"
+            )
+
+        results.append(ItemCategoryResult(
+            ynab_transaction_id=parent_txn["id"],
+            item=alloc.item,
+            allocated_amount=alloc.allocated_amount,
+            category_id=cat_id,
+            category_name=item_data["category_name"],
+            confidence=float(conf),
+            rationale=item_data["rationale"],
         ))
 
     return results
