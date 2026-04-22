@@ -3612,6 +3612,145 @@ def test_write_amazon_changeset_deterministic_unmatched_ynab_order(tmp_path):
     assert normalized1 == normalized2
 
 
+def test_render_markdown_contains_no_emoji_codepoints(tmp_path):
+    """_render_markdown output contains no emoji codepoints (>= U+2600)."""
+    from amazon_matcher import write_amazon_changeset, MatchResult, AmazonShipment, AmazonItem
+    from categorizer import AmazonSplitProposal, ItemCategoryResult
+    from datetime import datetime, date
+    from decimal import Decimal
+
+    item = AmazonItem(
+        order_id="111",
+        ship_date=date(2026, 3, 22),
+        asin="B",
+        product_name="Widget's price",
+        quantity=1,
+        unit_price=Decimal("50"),
+        unit_price_tax=Decimal("0"),
+        raw_row_index=1,
+    )
+    ship = AmazonShipment(
+        order_id="111",
+        ship_date=date(2026, 3, 22),
+        payment_method_raw="V",
+        payment_method_last4="0804",
+        is_split_tender=False,
+        currency="USD",
+        item_subtotal=Decimal("50"),
+        tax=Decimal("0"),
+        shipping=Decimal("0"),
+        discounts=Decimal("0"),
+        total_amount=Decimal("50"),
+        items=[item],
+        shipment_status="Shipped",
+    )
+    parent = {
+        "id": "txn-1",
+        "amount": -50000,
+        "date": "2026-03-22",
+        "payee_name": "Amazon",
+        "account_id": "acc-1",
+    }
+    subtxn = ItemCategoryResult(
+        ynab_transaction_id="txn-1",
+        item=item,
+        allocated_amount=Decimal("50"),
+        category_id="cat-1",
+        category_name="Groceries",
+        confidence=0.9,
+        rationale="test",
+    )
+    proposal = AmazonSplitProposal(
+        parent_ynab_txn=parent,
+        shipment=ship,
+        subtransactions=[subtxn],
+    )
+    match = MatchResult(matched=[], unmatched_ynab=[], unmatched_shipments=[], excluded_shipments=[], parse_errors=[])
+
+    md_path, json_path = write_amazon_changeset(
+        match,
+        [proposal],
+        [],
+        [],
+        out_dir=tmp_path,
+        now=datetime(2026, 4, 21, 12, 0, 0),
+    )
+
+    md = md_path.read_text()
+    assert all(ord(c) < 0x2600 for c in md), "Markdown contains emoji codepoints"
+
+
+def test_write_amazon_changeset_files_contain_no_emoji_codepoints(tmp_path):
+    """write_amazon_changeset output files contain no emoji codepoints."""
+    from amazon_matcher import write_amazon_changeset, MatchResult, AmazonShipment, AmazonItem
+    from categorizer import AmazonSplitProposal, ItemCategoryResult
+    from datetime import datetime, date
+    from decimal import Decimal
+
+    item = AmazonItem(
+        order_id="111",
+        ship_date=date(2026, 3, 22),
+        asin="B",
+        product_name="Test item",
+        quantity=1,
+        unit_price=Decimal("50"),
+        unit_price_tax=Decimal("0"),
+        raw_row_index=1,
+    )
+    ship = AmazonShipment(
+        order_id="111",
+        ship_date=date(2026, 3, 22),
+        payment_method_raw="V",
+        payment_method_last4="0804",
+        is_split_tender=False,
+        currency="USD",
+        item_subtotal=Decimal("50"),
+        tax=Decimal("0"),
+        shipping=Decimal("0"),
+        discounts=Decimal("0"),
+        total_amount=Decimal("50"),
+        items=[item],
+        shipment_status="Shipped",
+    )
+    parent = {
+        "id": "txn-1",
+        "amount": -50000,
+        "date": "2026-03-22",
+        "payee_name": "Amazon",
+        "account_id": "acc-1",
+    }
+    subtxn = ItemCategoryResult(
+        ynab_transaction_id="txn-1",
+        item=item,
+        allocated_amount=Decimal("50"),
+        category_id="cat-1",
+        category_name="Groceries",
+        confidence=0.9,
+        rationale="test",
+    )
+    proposal = AmazonSplitProposal(
+        parent_ynab_txn=parent,
+        shipment=ship,
+        subtransactions=[subtxn],
+    )
+    match = MatchResult(matched=[], unmatched_ynab=[], unmatched_shipments=[], excluded_shipments=[], parse_errors=[])
+
+    md_path, json_path = write_amazon_changeset(
+        match,
+        [proposal],
+        [],
+        [],
+        out_dir=tmp_path,
+        now=datetime(2026, 4, 21, 12, 0, 0),
+    )
+
+    md = md_path.read_text()
+    json = json_path.read_text()
+
+    assert all(ord(c) < 0x2600 for c in md), "Markdown contains emoji codepoints"
+    assert all(ord(c) < 0x2600 for c in json), "JSON contains emoji codepoints"
+
+
 def test_write_amazon_changeset_deterministic_excluded_order(tmp_path):
     """write_amazon_changeset produces identical output with excluded_shipments in different order."""
     from amazon_matcher import write_amazon_changeset, MatchResult, AmazonShipment, AmazonItem
