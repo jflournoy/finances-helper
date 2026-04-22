@@ -2747,6 +2747,188 @@ def test_write_amazon_changeset_logs_warning_on_missing_account_name(caplog):
     assert any("account_name" in record.message.lower() for record in caplog.records)
 
 
+def test_write_amazon_changeset_warns_on_singles_missing_account_name(caplog):
+    """write_amazon_changeset warns if single_result txn lacks account_name and no lookup."""
+    from amazon_matcher import write_amazon_changeset, MatchResult, MatchCandidate, AmazonShipment, AmazonItem
+    from categorizer import CategoryResult
+    from datetime import datetime, date
+    from decimal import Decimal
+    from pathlib import Path
+    import tempfile
+    import logging
+
+    caplog.set_level(logging.WARNING)
+
+    item = AmazonItem(
+        order_id="111",
+        ship_date=date(2026, 3, 22),
+        asin="B",
+        product_name="W",
+        quantity=1,
+        unit_price=Decimal("50"),
+        unit_price_tax=Decimal("0"),
+        raw_row_index=1,
+    )
+    ship = AmazonShipment(
+        order_id="111",
+        ship_date=date(2026, 3, 22),
+        payment_method_raw="V",
+        payment_method_last4="0804",
+        is_split_tender=False,
+        currency="USD",
+        item_subtotal=Decimal("50"),
+        tax=Decimal("0"),
+        shipping=Decimal("0"),
+        discounts=Decimal("0"),
+        total_amount=Decimal("50"),
+        items=[item],
+        shipment_status="Shipped",
+    )
+    ynab_txn = {
+        "id": "txn-1",
+        "amount": -50000,
+        "date": "2026-03-22",
+        "payee_name": "Amazon",
+        "account_id": "acc-1",
+    }
+    candidate = MatchCandidate(ynab_txn=ynab_txn, shipment=ship, date_delta_days=0)
+    single = CategoryResult(
+        transaction_id="txn-1",
+        category_id="cat-1",
+        category_name="Groceries",
+        confidence=0.9,
+        rationale="test",
+        tier="amazon-single",
+    )
+    match = MatchResult(
+        matched=[candidate],
+        unmatched_ynab=[],
+        unmatched_shipments=[],
+        excluded_shipments=[],
+        parse_errors=[]
+    )
+
+    with tempfile.TemporaryDirectory() as tmp:
+        md, j = write_amazon_changeset(
+            match,
+            [],
+            [single],
+            [],
+            account_name_lookup=None,
+            out_dir=Path(tmp),
+            now=datetime(2026, 4, 21, 12, 0, 0),
+        )
+
+    assert any("account_name" in record.message.lower() for record in caplog.records)
+
+
+def test_write_amazon_changeset_no_warning_when_all_have_account_name(caplog):
+    """write_amazon_changeset doesn't warn if all txns have account_name."""
+    from amazon_matcher import write_amazon_changeset, MatchResult, MatchCandidate, AmazonShipment, AmazonItem
+    from categorizer import AmazonSplitProposal, ItemCategoryResult, CategoryResult
+    from datetime import datetime, date
+    from decimal import Decimal
+    from pathlib import Path
+    import tempfile
+    import logging
+
+    caplog.set_level(logging.WARNING)
+
+    item = AmazonItem(
+        order_id="111",
+        ship_date=date(2026, 3, 22),
+        asin="B",
+        product_name="W",
+        quantity=1,
+        unit_price=Decimal("50"),
+        unit_price_tax=Decimal("0"),
+        raw_row_index=1,
+    )
+    ship = AmazonShipment(
+        order_id="111",
+        ship_date=date(2026, 3, 22),
+        payment_method_raw="V",
+        payment_method_last4="0804",
+        is_split_tender=False,
+        currency="USD",
+        item_subtotal=Decimal("50"),
+        tax=Decimal("0"),
+        shipping=Decimal("0"),
+        discounts=Decimal("0"),
+        total_amount=Decimal("50"),
+        items=[item],
+        shipment_status="Shipped",
+    )
+    parent = {
+        "id": "txn-1",
+        "amount": -50000,
+        "date": "2026-03-22",
+        "payee_name": "Amazon",
+        "account_id": "acc-1",
+        "account_name": "Amazon Visa",
+    }
+    subtxn = ItemCategoryResult(
+        ynab_transaction_id="txn-1",
+        item=item,
+        allocated_amount=Decimal("50"),
+        category_id="cat-1",
+        category_name="Groceries",
+        confidence=0.9,
+        rationale="test",
+    )
+    proposal = AmazonSplitProposal(
+        parent_ynab_txn=parent,
+        shipment=ship,
+        subtransactions=[subtxn],
+    )
+    single_txn = {
+        "id": "txn-2",
+        "amount": -50000,
+        "date": "2026-03-22",
+        "payee_name": "Amazon",
+        "account_id": "acc-2",
+        "account_name": "Amazon Debit",
+    }
+    single = CategoryResult(
+        transaction_id="txn-2",
+        category_id="cat-1",
+        category_name="Groceries",
+        confidence=0.9,
+        rationale="test",
+        tier="amazon-single",
+    )
+    ship2 = AmazonShipment(
+        order_id="222",
+        ship_date=date(2026, 3, 23),
+        payment_method_raw="D",
+        payment_method_last4="0805",
+        is_split_tender=False,
+        currency="USD",
+        item_subtotal=Decimal("50"),
+        tax=Decimal("0"),
+        shipping=Decimal("0"),
+        discounts=Decimal("0"),
+        total_amount=Decimal("50"),
+        items=[item],
+        shipment_status="Shipped",
+    )
+    candidate = MatchCandidate(ynab_txn=single_txn, shipment=ship2, date_delta_days=0)
+    match = MatchResult(matched=[candidate], unmatched_ynab=[], unmatched_shipments=[], excluded_shipments=[], parse_errors=[])
+
+    with tempfile.TemporaryDirectory() as tmp:
+        md, j = write_amazon_changeset(
+            match,
+            [proposal],
+            [single],
+            [],
+            account_name_lookup=None,
+            out_dir=Path(tmp),
+            now=datetime(2026, 4, 21, 12, 0, 0),
+        )
+
+    assert not any("account_name" in record.message.lower() for record in caplog.records)
+
+
 def test_write_amazon_changeset_empty_result(tmp_path):
     """write_amazon_changeset writes files with all zeros when result is empty."""
     from amazon_matcher import write_amazon_changeset, MatchResult

@@ -1268,6 +1268,13 @@ def write_amazon_changeset(
             if not txn.get("account_name") and not account_name_lookup:
                 warn_account_name = True
                 break
+    if not warn_account_name:
+        single_ids = {r.transaction_id for r in single_results}
+        for candidate in match_result.matched:
+            if candidate.ynab_txn["id"] in single_ids:
+                if not candidate.ynab_txn.get("account_name") and not account_name_lookup:
+                    warn_account_name = True
+                    break
 
     if warn_account_name:
         logger.warning("Some transactions lack account_name and no lookup provided; using account_id")
