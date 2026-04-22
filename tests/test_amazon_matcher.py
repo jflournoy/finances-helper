@@ -2282,6 +2282,240 @@ def test_resolve_account_name_fallback_to_id():
     assert warning is True
 
 
+def test_build_json_payload_singles_with_matched_txn():
+    """_build_json_payload populates single transaction and order_id from match_result."""
+    from amazon_matcher import (
+        _build_json_payload,
+        MatchResult,
+        MatchCandidate,
+        AmazonShipment,
+        AmazonItem,
+    )
+    from categorizer import CategoryResult
+    from datetime import datetime, date
+    from decimal import Decimal
+
+    item = AmazonItem(
+        order_id="111-1234567-1234567",
+        ship_date=date(2026, 3, 22),
+        asin="B0B6DHGF7S",
+        product_name="Widget",
+        quantity=1,
+        unit_price=Decimal("50.00"),
+        unit_price_tax=Decimal("0"),
+        raw_row_index=1,
+    )
+    ship = AmazonShipment(
+        order_id="111-1234567-1234567",
+        ship_date=date(2026, 3, 22),
+        payment_method_raw="Visa",
+        payment_method_last4="0804",
+        is_split_tender=False,
+        currency="USD",
+        item_subtotal=Decimal("50.00"),
+        tax=Decimal("0"),
+        shipping=Decimal("0"),
+        discounts=Decimal("0"),
+        total_amount=Decimal("50.00"),
+        items=[item],
+        shipment_status="Shipped",
+    )
+    txn = {
+        "id": "txn-single-1",
+        "date": "2026-03-22",
+        "amount": -50000,
+        "payee_name": "Amazon",
+        "account_id": "acc-1",
+        "account_name": "Visa",
+    }
+    candidate = MatchCandidate(ynab_txn=txn, shipment=ship, date_delta_days=0)
+
+    single = CategoryResult(
+        transaction_id="txn-single-1",
+        category_id="cat-1",
+        category_name="Groceries",
+        confidence=0.9,
+        rationale="test",
+        tier="amazon-single",
+    )
+
+    match = MatchResult(
+        matched=[candidate],
+        unmatched_ynab=[],
+        unmatched_shipments=[],
+        excluded_shipments=[],
+        parse_errors=[],
+    )
+
+    payload = _build_json_payload(match, [], [single], [], now=datetime(2026, 4, 21, 12, 0, 0))
+    assert len(payload["proposed_singles"]) == 1
+    assert payload["proposed_singles"][0]["transaction"] == txn
+    assert payload["proposed_singles"][0]["order_id"] == "111-1234567-1234567"
+
+
+def test_build_json_payload_singles_missing_match_raises():
+    """_build_json_payload raises if single_result txn_id not in match_result.matched."""
+    from amazon_matcher import _build_json_payload, MatchResult
+    from categorizer import CategoryResult
+    from datetime import datetime
+
+    single = CategoryResult(
+        transaction_id="txn-missing",
+        category_id="cat-1",
+        category_name="Groceries",
+        confidence=0.9,
+        rationale="test",
+        tier="amazon-single",
+    )
+
+    match = MatchResult(
+        matched=[],
+        unmatched_ynab=[],
+        unmatched_shipments=[],
+        excluded_shipments=[],
+        parse_errors=[],
+    )
+
+    with pytest.raises(RuntimeError, match="txn-missing"):
+        _build_json_payload(match, [], [single], [], now=datetime(2026, 4, 21, 12, 0, 0))
+
+
+def test_build_json_payload_singles_sorted_by_date_and_txn_id():
+    """_build_json_payload sorts singles by (txn_date, txn_id)."""
+    from amazon_matcher import (
+        _build_json_payload,
+        MatchResult,
+        MatchCandidate,
+        AmazonShipment,
+        AmazonItem,
+    )
+    from categorizer import CategoryResult
+    from datetime import datetime, date
+    from decimal import Decimal
+
+    def make_single_with_match(txn_id, date_str):
+        item = AmazonItem(
+            order_id=f"111-{txn_id}",
+            ship_date=date.fromisoformat(date_str),
+            asin="B",
+            product_name="W",
+            quantity=1,
+            unit_price=Decimal("50"),
+            unit_price_tax=Decimal("0"),
+            raw_row_index=1,
+        )
+        ship = AmazonShipment(
+            order_id=f"111-{txn_id}",
+            ship_date=date.fromisoformat(date_str),
+            payment_method_raw="V",
+            payment_method_last4="0804",
+            is_split_tender=False,
+            currency="USD",
+            item_subtotal=Decimal("50"),
+            tax=Decimal("0"),
+            shipping=Decimal("0"),
+            discounts=Decimal("0"),
+            total_amount=Decimal("50"),
+            items=[item],
+            shipment_status="Shipped",
+        )
+        txn = {
+            "id": txn_id,
+            "date": date_str,
+            "amount": -50000,
+            "payee_name": "Amazon",
+            "account_id": "acc",
+            "account_name": "Visa",
+        }
+        return (
+            CategoryResult(
+                transaction_id=txn_id,
+                category_id="cat",
+                category_name="G",
+                confidence=0.9,
+                rationale="t",
+                tier="amazon-single",
+            ),
+            MatchCandidate(ynab_txn=txn, shipment=ship, date_delta_days=0),
+        )
+
+    single_3, match_3 = make_single_with_match("txn-3", "2026-03-22")
+    single_1, match_1 = make_single_with_match("txn-1", "2026-03-20")
+    single_2, match_2 = make_single_with_match("txn-2", "2026-03-21")
+
+    match = MatchResult(
+        matched=[match_3, match_1, match_2],
+        unmatched_ynab=[],
+        unmatched_shipments=[],
+        excluded_shipments=[],
+        parse_errors=[],
+    )
+
+    payload = _build_json_payload(
+        match, [], [single_3, single_1, single_2], [], now=datetime(2026, 4, 21, 12, 0, 0)
+    )
+    assert len(payload["proposed_singles"]) == 3
+    assert payload["proposed_singles"][0]["transaction_id"] == "txn-1"
+    assert payload["proposed_singles"][1]["transaction_id"] == "txn-2"
+    assert payload["proposed_singles"][2]["transaction_id"] == "txn-3"
+
+
+def test_render_markdown_single_populated():
+    """_render_markdown renders single with transaction data in markdown."""
+    from amazon_matcher import _render_markdown
+    from pathlib import Path
+    from tempfile import TemporaryDirectory
+
+    payload = {
+        "version": 1,
+        "generated_at": "2026-04-21T12:00:00",
+        "summary": {
+            "proposed_splits": 0,
+            "proposed_singles": 1,
+            "unmatched_ynab": 0,
+            "unmatched_shipments": 0,
+            "excluded_shipments": 0,
+            "parse_errors": 0,
+        },
+        "proposed_splits": [],
+        "proposed_singles": [
+            {
+                "transaction_id": "txn-1",
+                "transaction": {
+                    "id": "txn-1",
+                    "date": "2026-03-22",
+                    "amount": -50000,
+                    "payee_name": "Amazon",
+                    "account_id": "acc-1",
+                    "account_name": "Visa",
+                },
+                "order_id": "111-1234567",
+                "category_id": "cat-1",
+                "category_name": "Groceries",
+                "confidence": 0.95,
+                "rationale": "test item",
+            }
+        ],
+        "unmatched_ynab": [],
+        "unmatched_shipments": [],
+        "excluded_shipments": [],
+        "parse_errors": [],
+    }
+
+    with TemporaryDirectory() as tmp:
+        json_path = Path(tmp) / "test.json"
+        md = _render_markdown(payload, json_path)
+
+        assert "## Proposed single categorizations (1)" in md
+        assert "2026-03-22" in md
+        assert "Visa" in md or "acc-1" in md
+        assert "$50.00" in md
+        assert "111-1234567" in md
+        assert "Groceries" in md
+        assert "0.95" in md
+        assert "test item" in md
+
+
 def test_write_amazon_changeset_empty_result(tmp_path):
     """write_amazon_changeset writes files with all zeros when result is empty."""
     from amazon_matcher import write_amazon_changeset, MatchResult

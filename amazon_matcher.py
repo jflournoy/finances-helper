@@ -987,11 +987,22 @@ def _build_json_payload(
             "subtransactions": subtxns,
         })
 
-    for result in sorted(single_results, key=lambda r: r.transaction_id):
+    match_by_txn = {c.ynab_txn["id"]: c for c in match_result.matched}
+
+    single_with_date = []
+    for result in single_results:
+        if result.transaction_id not in match_by_txn:
+            raise RuntimeError(
+                f"Single result txn_id {result.transaction_id} not found in match_result.matched"
+            )
+        candidate = match_by_txn[result.transaction_id]
+        single_with_date.append((candidate.ynab_txn["date"], result.transaction_id, result, candidate))
+
+    for _, _, result, candidate in sorted(single_with_date, key=lambda x: (x[0], x[1])):
         payload["proposed_singles"].append({
             "transaction_id": result.transaction_id,
-            "transaction": None,
-            "order_id": None,
+            "transaction": candidate.ynab_txn,
+            "order_id": candidate.shipment.order_id,
             "category_id": result.category_id,
             "category_name": result.category_name,
             "confidence": result.confidence,
@@ -1094,15 +1105,15 @@ def _render_markdown(
 
     md += f"## Proposed single categorizations ({summary['proposed_singles']})\n\n"
     for single in payload["proposed_singles"]:
-        if single["transaction"]:
-            txn = single["transaction"]
-            date = txn.get("date", "?")
-            account = txn.get("account_name", txn.get("account_id", "?"))
-            amount = abs(Decimal(txn.get("amount", 0))) / Decimal(1000)
-            cat = single["category_name"] or "?"
-            conf = single["confidence"]
-            ratio = single["rationale"]
-            md += f"- {date} | {account} | ${amount:.2f} | {single['order_id']} | {cat} (confidence: {conf:.2f}) — {ratio}\n"
+        txn = single["transaction"]
+        date = txn.get("date", "?")
+        account = txn.get("account_name", txn.get("account_id", "?"))
+        amount = abs(Decimal(str(txn.get("amount", 0)))) / Decimal(1000)
+        cat = single["category_name"] or "?"
+        conf = single["confidence"]
+        ratio = _md_escape(single["rationale"])
+        order_id = single["order_id"] or "?"
+        md += f"- {date} | {account} | ${amount:.2f} | {order_id} | {cat} (confidence: {conf:.2f}) — {ratio}\n"
 
     md += f"\n## Unmatched YNAB Amazon transactions ({summary['unmatched_ynab']})\n\n"
     reasons_map = {}
