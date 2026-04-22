@@ -2236,6 +2236,22 @@ def test_validate_invariants_split_total_mismatch(monkeypatch):
         _validate_invariants([proposal], [], [])
 
 
+def test_validate_invariants_one_cent_drift_raises():
+    """_validate_invariants raises on 1-cent drift between allocated and parent."""
+    from amazon_matcher import _validate_invariants
+    from types import SimpleNamespace
+
+    parent_txn = {"id": "txn-1", "amount": -10000}
+    subtxn = SimpleNamespace(allocated_amount=Decimal("10.01"))
+    proposal = SimpleNamespace(
+        parent_ynab_txn=parent_txn,
+        subtransactions=[subtxn]
+    )
+
+    with pytest.raises(RuntimeError, match="allocates.*but parent"):
+        _validate_invariants([proposal], [], [])
+
+
 def test_validate_invariants_duplicate_txn():
     """_validate_invariants raises on duplicate txn across buckets."""
     from amazon_matcher import _validate_invariants

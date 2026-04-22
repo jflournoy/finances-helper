@@ -880,7 +880,7 @@ def _validate_invariants(
         total_allocated = sum(
             s.allocated_amount for s in proposal.subtransactions
         )
-        if abs(total_allocated - parent_amt) > Decimal("0.01"):
+        if total_allocated != parent_amt:
             raise RuntimeError(
                 f"Split proposal for txn {proposal.parent_ynab_txn['id']} "
                 f"allocates {total_allocated} but parent is {parent_amt}"
