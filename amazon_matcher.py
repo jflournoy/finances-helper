@@ -849,49 +849,101 @@ def _next_free_path(base: Path, suffix: str) -> Path:
     raise RuntimeError(f"Cannot find free path for {base}")
 
 
+def _reject_nan_inf(label: str, value: Decimal) -> None:
+    """Raise RuntimeError if Decimal value is NaN or Infinity."""
+    if value.is_nan() or value.is_infinite():
+        raise RuntimeError(f"Invalid Decimal {value} at {label}")
+
+
 def _validate_invariants(
     split_proposals,
     single_results,
     unmatched_amazon,
+    *,
+    match_result: "MatchResult | None" = None,
 ) -> None:
     """Validate changeset invariants before writing.
 
     Checks:
-    1. Each split proposal's allocated total equals parent YNAB amount
+    1. Each split proposal's allocated total equals parent YNAB amount (exact equality)
     2. No transaction ID appears in multiple buckets
-    3. No NaN or Infinity Decimals in monetary fields
+    3. No NaN or Infinity Decimals in monetary fields, across:
+       - subtxn.allocated_amount
+       - shipment.total_amount (split proposals, unmatched, excluded)
+       - item.unit_price and item.unit_price_tax (all items in every shipment)
+       - parent_ynab_txn["amount"] (parsed as Decimal)
 
     Args:
         split_proposals: list[AmazonSplitProposal]
         single_results: list[CategoryResult]
         unmatched_amazon: list[tuple[dict, str]]
+        match_result: MatchResult (optional). If given, its unmatched_shipments
+            and excluded_shipments Decimals are also checked.
 
     Raises:
         RuntimeError: If any invariant is violated
     """
     for proposal in split_proposals:
-        for subtxn in proposal.subtransactions:
-            if subtxn.allocated_amount.is_nan() or subtxn.allocated_amount.is_infinite():
-                raise RuntimeError(
-                    f"Invalid Decimal {subtxn.allocated_amount} in allocated_amount "
-                    f"for txn {proposal.parent_ynab_txn['id']}"
-                )
-        parent_amt = abs(Decimal(proposal.parent_ynab_txn["amount"])) / Decimal(1000)
-        total_allocated = sum(
-            s.allocated_amount for s in proposal.subtransactions
+        parent_id = proposal.parent_ynab_txn["id"]
+        parent_amt_raw = Decimal(str(proposal.parent_ynab_txn["amount"]))
+        _reject_nan_inf(f"parent_ynab_txn[{parent_id}].amount", parent_amt_raw)
+        parent_amt = abs(parent_amt_raw) / Decimal(1000)
+
+        _reject_nan_inf(
+            f"split_proposal[{parent_id}].shipment.total_amount",
+            proposal.shipment.total_amount,
         )
+        for item in proposal.shipment.items:
+            _reject_nan_inf(
+                f"split_proposal[{parent_id}].shipment.item[{item.asin}].unit_price",
+                item.unit_price,
+            )
+            _reject_nan_inf(
+                f"split_proposal[{parent_id}].shipment.item[{item.asin}].unit_price_tax",
+                item.unit_price_tax,
+            )
+
+        for subtxn in proposal.subtransactions:
+            _reject_nan_inf(
+                f"split_proposal[{parent_id}].allocated_amount",
+                subtxn.allocated_amount,
+            )
+
+        total_allocated = sum(s.allocated_amount for s in proposal.subtransactions)
         if total_allocated != parent_amt:
             raise RuntimeError(
-                f"Split proposal for txn {proposal.parent_ynab_txn['id']} "
+                f"Split proposal for txn {parent_id} "
                 f"allocates {total_allocated} but parent is {parent_amt}"
             )
 
-    for txn, total in unmatched_amazon:
-        if isinstance(total, Decimal):
-            if total.is_nan() or total.is_infinite():
-                raise RuntimeError(
-                    f"Invalid Decimal {total} in unmatched shipment total "
-                    f"for txn {txn['id']}"
+    if match_result is not None:
+        for ship in match_result.unmatched_shipments:
+            _reject_nan_inf(
+                f"unmatched_shipment[{ship.order_id}].total_amount",
+                ship.total_amount,
+            )
+            for item in ship.items:
+                _reject_nan_inf(
+                    f"unmatched_shipment[{ship.order_id}].item[{item.asin}].unit_price",
+                    item.unit_price,
+                )
+                _reject_nan_inf(
+                    f"unmatched_shipment[{ship.order_id}].item[{item.asin}].unit_price_tax",
+                    item.unit_price_tax,
+                )
+        for ship, _ in match_result.excluded_shipments:
+            _reject_nan_inf(
+                f"excluded_shipment[{ship.order_id}].total_amount",
+                ship.total_amount,
+            )
+            for item in ship.items:
+                _reject_nan_inf(
+                    f"excluded_shipment[{ship.order_id}].item[{item.asin}].unit_price",
+                    item.unit_price,
+                )
+                _reject_nan_inf(
+                    f"excluded_shipment[{ship.order_id}].item[{item.asin}].unit_price_tax",
+                    item.unit_price_tax,
                 )
 
     all_txn_ids = (
@@ -1235,7 +1287,10 @@ def write_amazon_changeset(
     Raises:
         RuntimeError: If invariants violated or file cannot be written.
     """
-    _validate_invariants(split_proposals, single_results, unmatched_amazon)
+    _validate_invariants(
+        split_proposals, single_results, unmatched_amazon,
+        match_result=match_result,
+    )
 
     if now is None:
         now = datetime.now()

@@ -2220,6 +2220,16 @@ def test_validate_invariants_ok():
     _validate_invariants(split_proposals, single_results, unmatched)
 
 
+def _stub_shipment():
+    """Minimal shipment stub for SimpleNamespace-based validator tests."""
+    from types import SimpleNamespace
+    return SimpleNamespace(
+        order_id="111-A",
+        total_amount=Decimal("0"),
+        items=[],
+    )
+
+
 def test_validate_invariants_split_total_mismatch(monkeypatch):
     """_validate_invariants raises on split total != parent amount."""
     from amazon_matcher import _validate_invariants
@@ -2229,7 +2239,8 @@ def test_validate_invariants_split_total_mismatch(monkeypatch):
     subtxn = SimpleNamespace(allocated_amount=Decimal("30.00"))
     proposal = SimpleNamespace(
         parent_ynab_txn=parent_txn,
-        subtransactions=[subtxn]
+        subtransactions=[subtxn],
+        shipment=_stub_shipment(),
     )
 
     with pytest.raises(RuntimeError, match="allocates.*but parent"):
@@ -2245,7 +2256,8 @@ def test_validate_invariants_one_cent_drift_raises():
     subtxn = SimpleNamespace(allocated_amount=Decimal("10.01"))
     proposal = SimpleNamespace(
         parent_ynab_txn=parent_txn,
-        subtransactions=[subtxn]
+        subtransactions=[subtxn],
+        shipment=_stub_shipment(),
     )
 
     with pytest.raises(RuntimeError, match="allocates.*but parent"):
@@ -2261,7 +2273,8 @@ def test_validate_invariants_duplicate_txn():
     subtxn = SimpleNamespace(allocated_amount=Decimal("100.00"))
     proposal = SimpleNamespace(
         parent_ynab_txn=parent_txn,
-        subtransactions=[subtxn]
+        subtransactions=[subtxn],
+        shipment=_stub_shipment(),
     )
 
     single = SimpleNamespace(transaction_id="txn-1")
@@ -3288,10 +3301,11 @@ def test_validate_invariants_rejects_nan_in_total_amount():
     subtxn = SimpleNamespace(allocated_amount=Decimal("NaN"))
     proposal = SimpleNamespace(
         parent_ynab_txn=parent_txn,
-        subtransactions=[subtxn]
+        subtransactions=[subtxn],
+        shipment=_stub_shipment(),
     )
 
-    with pytest.raises(RuntimeError, match="NaN|Infinity"):
+    with pytest.raises(RuntimeError, match="NaN|Infinity|Invalid"):
         _validate_invariants([proposal], [], [])
 
 
@@ -3304,26 +3318,12 @@ def test_validate_invariants_rejects_infinity_in_allocated_amount():
     subtxn = SimpleNamespace(allocated_amount=Decimal("Infinity"))
     proposal = SimpleNamespace(
         parent_ynab_txn=parent_txn,
-        subtransactions=[subtxn]
+        subtransactions=[subtxn],
+        shipment=_stub_shipment(),
     )
 
-    with pytest.raises(RuntimeError, match="NaN|Infinity"):
+    with pytest.raises(RuntimeError, match="NaN|Infinity|Invalid"):
         _validate_invariants([proposal], [], [])
-
-
-def test_validate_invariants_rejects_nan_in_unmatched_shipment():
-    """_validate_invariants raises RuntimeError for unmatched shipment with NaN total."""
-    from amazon_matcher import _validate_invariants
-
-    unmatched = [
-        (
-            {"id": "txn-1", "account_id": "acct-1"},
-            Decimal("Infinity")
-        )
-    ]
-
-    with pytest.raises(RuntimeError, match="NaN|Infinity"):
-        _validate_invariants([], [], unmatched)
 
 
 def test_validate_invariants_accepts_zero():
@@ -3335,7 +3335,8 @@ def test_validate_invariants_accepts_zero():
     subtxn = SimpleNamespace(allocated_amount=Decimal("0"))
     proposal = SimpleNamespace(
         parent_ynab_txn=parent_txn,
-        subtransactions=[subtxn]
+        subtransactions=[subtxn],
+        shipment=_stub_shipment(),
     )
 
     _validate_invariants([proposal], [], [])
@@ -3919,3 +3920,141 @@ def test_build_json_payload_excluded_shipments_mixed_none_and_dated_same_order()
     payload_a = _build_json_payload(match_a, [], [], [])
     payload_b = _build_json_payload(match_b, [], [], [])
     assert payload_a["excluded_shipments"] == payload_b["excluded_shipments"]
+
+
+def _make_item_104(asin="B1", unit_price=Decimal("10"), unit_price_tax=Decimal("1")):
+    """Helper for #104 tests — builds AmazonItem with all required kwargs."""
+    from amazon_matcher import AmazonItem
+    from datetime import date
+    return AmazonItem(
+        order_id="111-A",
+        ship_date=date(2024, 1, 1),
+        asin=asin,
+        product_name="Test",
+        quantity=1,
+        unit_price=unit_price,
+        unit_price_tax=unit_price_tax,
+        raw_row_index=1,
+    )
+
+
+def _make_subtxn_104(allocated_amount=Decimal("10"), item=None):
+    from categorizer import ItemCategoryResult
+    return ItemCategoryResult(
+        ynab_transaction_id="txn-1",
+        item=item or _make_item_104(),
+        allocated_amount=allocated_amount,
+        category_id="cat-1",
+        category_name="Groceries",
+        confidence=0.9,
+        rationale="test",
+    )
+
+
+def _make_split_proposal_104(parent_amount=-10000, subtxns=None, shipment=None):
+    from categorizer import AmazonSplitProposal
+    from datetime import date
+    parent_txn = {
+        "id": "txn-1",
+        "date": "2024-01-01",
+        "amount": parent_amount,
+        "account_id": "acct-1",
+        "account_name": "Acct",
+    }
+    ship = shipment or _make_shipment_105("111-A", date(2024, 1, 1), total_amount=Decimal("10"))
+    return AmazonSplitProposal(
+        parent_ynab_txn=parent_txn,
+        shipment=ship,
+        subtransactions=subtxns or [_make_subtxn_104()],
+    )
+
+
+def test_validate_invariants_rejects_nan_in_shipment_total_amount_split():
+    """NaN in split_proposals[].shipment.total_amount must raise RuntimeError."""
+    from amazon_matcher import _validate_invariants
+    from datetime import date
+    bad_ship = _make_shipment_105("111-A", date(2024, 1, 1), total_amount=Decimal("NaN"))
+    subtxn = _make_subtxn_104(allocated_amount=Decimal("10"))
+    proposal = _make_split_proposal_104(parent_amount=-10000, subtxns=[subtxn], shipment=bad_ship)
+    with pytest.raises(RuntimeError, match="NaN|Infinity|invalid"):
+        _validate_invariants([proposal], [], [])
+
+
+def test_validate_invariants_rejects_infinity_in_item_unit_price():
+    """Infinity in AmazonItem.unit_price must raise RuntimeError."""
+    from amazon_matcher import _validate_invariants
+    from datetime import date
+    bad_item = _make_item_104(unit_price=Decimal("Infinity"))
+    ship = _make_shipment_105("111-A", date(2024, 1, 1), total_amount=Decimal("10"), items=[bad_item])
+    subtxn = _make_subtxn_104(allocated_amount=Decimal("10"), item=bad_item)
+    proposal = _make_split_proposal_104(parent_amount=-10000, subtxns=[subtxn], shipment=ship)
+    with pytest.raises(RuntimeError, match="NaN|Infinity|invalid"):
+        _validate_invariants([proposal], [], [])
+
+
+def test_validate_invariants_rejects_nan_in_item_unit_price_tax():
+    """NaN in AmazonItem.unit_price_tax must raise RuntimeError."""
+    from amazon_matcher import _validate_invariants
+    from datetime import date
+    bad_item = _make_item_104(unit_price_tax=Decimal("NaN"))
+    ship = _make_shipment_105("111-A", date(2024, 1, 1), total_amount=Decimal("10"), items=[bad_item])
+    subtxn = _make_subtxn_104(allocated_amount=Decimal("10"), item=bad_item)
+    proposal = _make_split_proposal_104(parent_amount=-10000, subtxns=[subtxn], shipment=ship)
+    with pytest.raises(RuntimeError, match="NaN|Infinity|invalid"):
+        _validate_invariants([proposal], [], [])
+
+
+def test_validate_invariants_rejects_nan_in_parent_ynab_amount():
+    """NaN in parent_ynab_txn['amount'] (as Decimal) must raise RuntimeError."""
+    from amazon_matcher import _validate_invariants
+    subtxn = _make_subtxn_104(allocated_amount=Decimal("10"))
+    proposal = _make_split_proposal_104(parent_amount="NaN", subtxns=[subtxn])
+    with pytest.raises(RuntimeError, match="NaN|Infinity|invalid"):
+        _validate_invariants([proposal], [], [])
+
+
+def test_validate_invariants_rejects_nan_in_unmatched_shipment_total():
+    """NaN in match_result.unmatched_shipments[].total_amount must raise RuntimeError."""
+    from amazon_matcher import _validate_invariants, MatchResult
+    from datetime import date
+    bad_ship = _make_shipment_105("111-A", date(2024, 1, 1), total_amount=Decimal("NaN"))
+    match_result = MatchResult(
+        matched=[], unmatched_ynab=[],
+        unmatched_shipments=[bad_ship],
+        excluded_shipments=[], parse_errors=[],
+    )
+    with pytest.raises(RuntimeError, match="NaN|Infinity|invalid"):
+        _validate_invariants([], [], [], match_result=match_result)
+
+
+def test_validate_invariants_rejects_nan_in_excluded_shipment_total():
+    """NaN in match_result.excluded_shipments[].total_amount must raise RuntimeError."""
+    from amazon_matcher import _validate_invariants, MatchResult
+    from datetime import date
+    bad_ship = _make_shipment_105("111-A", date(2024, 1, 1), total_amount=Decimal("Infinity"))
+    match_result = MatchResult(
+        matched=[], unmatched_ynab=[],
+        unmatched_shipments=[],
+        excluded_shipments=[(bad_ship, "zero price item")],
+        parse_errors=[],
+    )
+    with pytest.raises(RuntimeError, match="NaN|Infinity|invalid"):
+        _validate_invariants([], [], [], match_result=match_result)
+
+
+def test_validate_invariants_accepts_valid_full_payload():
+    """A fully valid payload with all fields populated passes validation."""
+    from amazon_matcher import _validate_invariants, MatchResult
+    from datetime import date
+    item = _make_item_104(unit_price=Decimal("10.00"), unit_price_tax=Decimal("0.80"))
+    ship = _make_shipment_105("111-A", date(2024, 1, 1), total_amount=Decimal("10"), items=[item])
+    subtxn = _make_subtxn_104(allocated_amount=Decimal("10"), item=item)
+    proposal = _make_split_proposal_104(parent_amount=-10000, subtxns=[subtxn], shipment=ship)
+    good_ship = _make_shipment_105("111-B", date(2024, 1, 2), total_amount=Decimal("5"))
+    match_result = MatchResult(
+        matched=[], unmatched_ynab=[],
+        unmatched_shipments=[good_ship],
+        excluded_shipments=[(good_ship, "reason")],
+        parse_errors=[],
+    )
+    _validate_invariants([proposal], [], [], match_result=match_result)
