@@ -4058,3 +4058,98 @@ def test_validate_invariants_accepts_valid_full_payload():
         parse_errors=[],
     )
     _validate_invariants([proposal], [], [], match_result=match_result)
+
+
+def test_write_amazon_changeset_deterministic_single_order(tmp_path):
+    """write_amazon_changeset produces identical output with single_results in different order."""
+    from amazon_matcher import (
+        write_amazon_changeset, MatchResult, MatchCandidate,
+        AmazonShipment, AmazonItem,
+    )
+    from categorizer import CategoryResult
+    from datetime import datetime, date
+    import json as _json
+    import re as _re
+
+    def _make_shipment_for_single(order_id, ship_date):
+        return AmazonShipment(
+            order_id=order_id,
+            ship_date=ship_date,
+            payment_method_raw="V",
+            payment_method_last4="1111",
+            is_split_tender=False,
+            currency="USD",
+            item_subtotal=Decimal("15"),
+            tax=Decimal("0"),
+            shipping=Decimal("0"),
+            discounts=Decimal("0"),
+            total_amount=Decimal("15"),
+            items=[AmazonItem(
+                order_id=order_id, ship_date=ship_date,
+                asin="B0", product_name="Solo", quantity=1,
+                unit_price=Decimal("15"), unit_price_tax=Decimal("0"),
+                raw_row_index=1,
+            )],
+            shipment_status="Shipped",
+        )
+
+    txns = [
+        ({"id": "txn-3", "amount": -15000, "date": "2026-03-24",
+          "payee_name": "Amazon", "account_id": "acc-1", "account_name": "Checking"},
+         _make_shipment_for_single("111", date(2026, 3, 24))),
+        ({"id": "txn-1", "amount": -15000, "date": "2026-03-22",
+          "payee_name": "Amazon", "account_id": "acc-1", "account_name": "Checking"},
+         _make_shipment_for_single("222", date(2026, 3, 22))),
+        ({"id": "txn-2", "amount": -15000, "date": "2026-03-23",
+          "payee_name": "Amazon", "account_id": "acc-1", "account_name": "Checking"},
+         _make_shipment_for_single("333", date(2026, 3, 23))),
+    ]
+    candidates = [MatchCandidate(ynab_txn=t, shipment=s, date_delta_days=0) for t, s in txns]
+
+    def make_singles(ids):
+        return [
+            CategoryResult(
+                transaction_id=tid,
+                category_id="cat-1",
+                category_name="Groceries",
+                confidence=0.9,
+                rationale="test",
+                tier="amazon-single",
+            )
+            for tid in ids
+        ]
+
+    singles_order1 = make_singles(["txn-3", "txn-1", "txn-2"])
+    singles_order2 = list(reversed(singles_order1))
+
+    match_a = MatchResult(
+        matched=candidates, unmatched_ynab=[],
+        unmatched_shipments=[], excluded_shipments=[], parse_errors=[],
+    )
+    match_b = MatchResult(
+        matched=list(reversed(candidates)), unmatched_ynab=[],
+        unmatched_shipments=[], excluded_shipments=[], parse_errors=[],
+    )
+
+    md1, json1 = write_amazon_changeset(
+        match_a, [], singles_order1, [],
+        out_dir=tmp_path, now=datetime(2026, 4, 21, 12, 0, 0),
+    )
+    md2, json2 = write_amazon_changeset(
+        match_b, [], singles_order2, [],
+        out_dir=tmp_path, now=datetime(2026, 4, 21, 12, 0, 1),
+    )
+
+    json_content1 = _json.loads(json1.read_text())
+    json_content2 = _json.loads(json2.read_text())
+
+    assert json_content1["proposed_singles"] == json_content2["proposed_singles"]
+    assert [s["transaction_id"] for s in json_content1["proposed_singles"]] == ["txn-1", "txn-2", "txn-3"]
+
+    md_text1 = md1.read_text()
+    md_text2 = md2.read_text()
+    normalized1 = _re.sub(r"2026-04-21 \d{2}:\d{2}:\d{2}", "TIME", md_text1)
+    normalized1 = normalized1.replace(json1.name, "JSON")
+    normalized2 = _re.sub(r"2026-04-21 \d{2}:\d{2}:\d{2}", "TIME", md_text2)
+    normalized2 = normalized2.replace(json2.name, "JSON")
+    assert normalized1 == normalized2
