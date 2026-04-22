@@ -3468,3 +3468,229 @@ def test_write_amazon_changeset_json_contains_all_parse_errors_when_truncated(tm
 
     data = json.loads(json_path.read_text())
     assert len(data["parse_errors"]) == 75
+
+
+def test_write_amazon_changeset_deterministic_split_order(tmp_path):
+    """write_amazon_changeset produces identical output with splits in different order."""
+    from amazon_matcher import write_amazon_changeset, MatchResult, AmazonShipment, AmazonItem
+    from categorizer import AmazonSplitProposal, ItemCategoryResult
+    from datetime import datetime, date
+    from decimal import Decimal
+    import json
+
+    item1 = AmazonItem(
+        order_id="111",
+        ship_date=date(2026, 3, 22),
+        asin="B1",
+        product_name="Item 1",
+        quantity=1,
+        unit_price=Decimal("50"),
+        unit_price_tax=Decimal("0"),
+        raw_row_index=1,
+    )
+    item2 = AmazonItem(
+        order_id="222",
+        ship_date=date(2026, 3, 23),
+        asin="B2",
+        product_name="Item 2",
+        quantity=1,
+        unit_price=Decimal("30"),
+        unit_price_tax=Decimal("0"),
+        raw_row_index=2,
+    )
+    item3 = AmazonItem(
+        order_id="333",
+        ship_date=date(2026, 3, 24),
+        asin="B3",
+        product_name="Item 3",
+        quantity=1,
+        unit_price=Decimal("20"),
+        unit_price_tax=Decimal("0"),
+        raw_row_index=3,
+    )
+
+    def make_proposals(items_with_txns):
+        proposals = []
+        for item, (txn_id, amt) in items_with_txns:
+            ship = AmazonShipment(
+                order_id=item.order_id,
+                ship_date=item.ship_date,
+                payment_method_raw="V",
+                payment_method_last4="0804",
+                is_split_tender=False,
+                currency="USD",
+                item_subtotal=item.unit_price,
+                tax=Decimal("0"),
+                shipping=Decimal("0"),
+                discounts=Decimal("0"),
+                total_amount=item.unit_price,
+                items=[item],
+                shipment_status="Shipped",
+            )
+            subtxn = ItemCategoryResult(
+                ynab_transaction_id=txn_id,
+                item=item,
+                allocated_amount=amt,
+                category_id="cat-1",
+                category_name="Groceries",
+                confidence=0.9,
+                rationale="test",
+            )
+            proposals.append(AmazonSplitProposal(
+                parent_ynab_txn={
+                    "id": txn_id,
+                    "amount": int(amt * 1000),
+                    "date": "2026-03-22",
+                    "payee_name": "Amazon",
+                    "account_id": "acc-1",
+                },
+                shipment=ship,
+                subtransactions=[subtxn],
+            ))
+        return proposals
+
+    items_with_txns = [
+        (item1, ("txn-1", Decimal("50"))),
+        (item2, ("txn-2", Decimal("30"))),
+        (item3, ("txn-3", Decimal("20"))),
+    ]
+
+    proposals_order1 = make_proposals(items_with_txns)
+    proposals_order2 = make_proposals(list(reversed(items_with_txns)))
+
+    match = MatchResult(matched=[], unmatched_ynab=[], unmatched_shipments=[], excluded_shipments=[], parse_errors=[])
+
+    md1, json1 = write_amazon_changeset(match, proposals_order1, [], [], out_dir=tmp_path, now=datetime(2026, 4, 21, 12, 0, 0))
+    md2, json2 = write_amazon_changeset(match, proposals_order2, [], [], out_dir=tmp_path, now=datetime(2026, 4, 21, 12, 0, 1))
+
+    json_content1 = json.loads(json1.read_text())
+    json_content2 = json.loads(json2.read_text())
+
+    assert json_content1["proposed_splits"] == json_content2["proposed_splits"]
+
+    md_text1 = md1.read_text()
+    md_text2 = md2.read_text()
+
+    import re
+    normalized1 = re.sub(r"2026-04-21 \d{2}:\d{2}:\d{2}", "TIME", md_text1)
+    normalized1 = normalized1.replace(json1.name, "JSON")
+    normalized2 = re.sub(r"2026-04-21 \d{2}:\d{2}:\d{2}", "TIME", md_text2)
+    normalized2 = normalized2.replace(json2.name, "JSON")
+    assert normalized1 == normalized2
+
+
+def test_write_amazon_changeset_deterministic_unmatched_ynab_order(tmp_path):
+    """write_amazon_changeset produces identical output with unmatched_ynab in different order."""
+    from amazon_matcher import write_amazon_changeset, MatchResult
+    from datetime import datetime
+    import json
+
+    unmatched1 = [
+        ({"id": "txn-1", "amount": -5000, "date": "2026-03-22", "account_id": "acc-1"}, "No shipment"),
+        ({"id": "txn-2", "amount": -3000, "date": "2026-03-23", "account_id": "acc-1"}, "No shipment"),
+    ]
+    unmatched2 = list(reversed(unmatched1))
+
+    match = MatchResult(matched=[], unmatched_ynab=[], unmatched_shipments=[], excluded_shipments=[], parse_errors=[])
+
+    md1, json1 = write_amazon_changeset(match, [], [], unmatched1, out_dir=tmp_path, now=datetime(2026, 4, 21, 12, 0, 0))
+    md2, json2 = write_amazon_changeset(match, [], [], unmatched2, out_dir=tmp_path, now=datetime(2026, 4, 21, 12, 0, 1))
+
+    json_content1 = json.loads(json1.read_text())
+    json_content2 = json.loads(json2.read_text())
+
+    assert json_content1["unmatched_ynab"] == json_content2["unmatched_ynab"]
+
+    md_text1 = md1.read_text()
+    md_text2 = md2.read_text()
+
+    import re
+    normalized1 = re.sub(r"2026-04-21 \d{2}:\d{2}:\d{2}", "TIME", md_text1)
+    normalized1 = normalized1.replace(json1.name, "JSON")
+    normalized2 = re.sub(r"2026-04-21 \d{2}:\d{2}:\d{2}", "TIME", md_text2)
+    normalized2 = normalized2.replace(json2.name, "JSON")
+    assert normalized1 == normalized2
+
+
+def test_write_amazon_changeset_deterministic_excluded_order(tmp_path):
+    """write_amazon_changeset produces identical output with excluded_shipments in different order."""
+    from amazon_matcher import write_amazon_changeset, MatchResult, AmazonShipment, AmazonItem
+    from datetime import datetime, date
+    from decimal import Decimal
+    import json
+
+    item1 = AmazonItem(
+        order_id="111",
+        ship_date=date(2026, 3, 22),
+        asin="B1",
+        product_name="Item 1",
+        quantity=1,
+        unit_price=Decimal("50"),
+        unit_price_tax=Decimal("0"),
+        raw_row_index=1,
+    )
+    item2 = AmazonItem(
+        order_id="222",
+        ship_date=date(2026, 3, 23),
+        asin="B2",
+        product_name="Item 2",
+        quantity=1,
+        unit_price=Decimal("30"),
+        unit_price_tax=Decimal("0"),
+        raw_row_index=2,
+    )
+
+    ship1 = AmazonShipment(
+        order_id="111",
+        ship_date=date(2026, 3, 22),
+        payment_method_raw="V",
+        payment_method_last4="0804",
+        is_split_tender=False,
+        currency="USD",
+        item_subtotal=Decimal("50"),
+        tax=Decimal("0"),
+        shipping=Decimal("0"),
+        discounts=Decimal("0"),
+        total_amount=Decimal("50"),
+        items=[item1],
+        shipment_status="Shipped",
+    )
+    ship2 = AmazonShipment(
+        order_id="222",
+        ship_date=date(2026, 3, 23),
+        payment_method_raw="V",
+        payment_method_last4="0804",
+        is_split_tender=False,
+        currency="USD",
+        item_subtotal=Decimal("30"),
+        tax=Decimal("0"),
+        shipping=Decimal("0"),
+        discounts=Decimal("0"),
+        total_amount=Decimal("30"),
+        items=[item2],
+        shipment_status="Shipped",
+    )
+
+    excluded1 = [(ship1, "reason1"), (ship2, "reason2")]
+    excluded2 = list(reversed(excluded1))
+
+    match = MatchResult(matched=[], unmatched_ynab=[], unmatched_shipments=[], excluded_shipments=excluded1, parse_errors=[])
+    match2 = MatchResult(matched=[], unmatched_ynab=[], unmatched_shipments=[], excluded_shipments=excluded2, parse_errors=[])
+
+    md1, json1 = write_amazon_changeset(match, [], [], [], out_dir=tmp_path, now=datetime(2026, 4, 21, 12, 0, 0))
+    md2, json2 = write_amazon_changeset(match2, [], [], [], out_dir=tmp_path, now=datetime(2026, 4, 21, 12, 0, 1))
+
+    json_content1 = json.loads(json1.read_text())
+    json_content2 = json.loads(json2.read_text())
+
+    assert json_content1["excluded_shipments"] == json_content2["excluded_shipments"]
+
+    md_text1 = md1.read_text()
+    md_text2 = md2.read_text()
+
+    import re
+    normalized1 = re.sub(r"2026-04-21 \d{2}:\d{2}:\d{2}", "TIME", md_text1)
+    normalized1 = normalized1.replace(json1.name, "JSON")
+    normalized2 = re.sub(r"2026-04-21 \d{2}:\d{2}:\d{2}", "TIME", md_text2)
+    normalized2 = normalized2.replace(json2.name, "JSON")
+    assert normalized1 == normalized2
