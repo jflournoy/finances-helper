@@ -2,14 +2,98 @@
   "version": 1,
   "generated_at": "2026-04-21T12:00:00",
   "summary": {
-    "proposed_splits": 3,
-    "proposed_singles": 3,
-    "unmatched_ynab": 0,
+    "proposed_splits": 6,
+    "proposed_singles": 0,
+    "unmatched_ynab": 3,
     "unmatched_shipments": 0,
     "excluded_shipments": 4,
-    "parse_errors": 0
+    "parse_errors": 4
   },
   "proposed_splits": [
+    {
+      "parent_ynab_transaction_id": "txn-001",
+      "parent_ynab_transaction": {
+        "id": "txn-001",
+        "account_id": "account-visa-1",
+        "date": "2024-01-15",
+        "payee_id": null,
+        "payee_name": "Amazon.com",
+        "category_id": null,
+        "cleared": "uncleared",
+        "approved": true,
+        "amount": -37090,
+        "memo": "Order 111-0000001 ($37.09)",
+        "account_name": "Account 1"
+      },
+      "shipment": {
+        "order_id": "111-0000001-0000001",
+        "ship_date": "2024-01-16",
+        "payment_method_last4": "0804",
+        "total_amount": "37.09",
+        "item_count": 1
+      },
+      "subtransactions": [
+        {
+          "item": {
+            "order_id": "111-0000001-0000001",
+            "ship_date": "2024-01-16",
+            "asin": "B0C1234567",
+            "product_name": "Test Widget",
+            "quantity": 1,
+            "unit_price": "29.99",
+            "unit_price_tax": "2.10",
+            "raw_row_index": 2
+          },
+          "allocated_amount": "37.09",
+          "category_id": "dddddddd-0000-0000-0000-000000000003",
+          "category_name": "Groceries",
+          "confidence": 0.9,
+          "rationale": "IT-CHANGESET mock rationale for item 1"
+        }
+      ]
+    },
+    {
+      "parent_ynab_transaction_id": "txn-002",
+      "parent_ynab_transaction": {
+        "id": "txn-002",
+        "account_id": "account-visa-2",
+        "date": "2024-01-16",
+        "payee_id": null,
+        "payee_name": "Amazon.com",
+        "category_id": null,
+        "cleared": "uncleared",
+        "approved": true,
+        "amount": -48120,
+        "memo": "Order 111-0000002 ($48.12)",
+        "account_name": "Account 2"
+      },
+      "shipment": {
+        "order_id": "111-0000002-0000002",
+        "ship_date": "2024-01-17",
+        "payment_method_last4": "1523",
+        "total_amount": "48.12",
+        "item_count": 1
+      },
+      "subtransactions": [
+        {
+          "item": {
+            "order_id": "111-0000002-0000002",
+            "ship_date": "2024-01-17",
+            "asin": "B0C2234567",
+            "product_name": "Test Gadget",
+            "quantity": 3,
+            "unit_price": "14.99",
+            "unit_price_tax": "1.05",
+            "raw_row_index": 3
+          },
+          "allocated_amount": "48.12",
+          "category_id": "dddddddd-0000-0000-0000-000000000003",
+          "category_name": "Groceries",
+          "confidence": 0.9,
+          "rationale": "IT-CHANGESET mock rationale for item 1"
+        }
+      ]
+    },
     {
       "parent_ynab_transaction_id": "txn-010",
       "parent_ynab_transaction": {
@@ -45,10 +129,10 @@
             "raw_row_index": 4
           },
           "allocated_amount": "11.78",
-          "category_id": "cat-groceries",
+          "category_id": "dddddddd-0000-0000-0000-000000000003",
           "category_name": "Groceries",
-          "confidence": 0.85,
-          "rationale": "test item"
+          "confidence": 0.9,
+          "rationale": "IT-CHANGESET mock rationale for item 1"
         },
         {
           "item": {
@@ -62,10 +146,10 @@
             "raw_row_index": 5
           },
           "allocated_amount": "15.32",
-          "category_id": "cat-groceries",
+          "category_id": "dddddddd-0000-0000-0000-000000000003",
           "category_name": "Groceries",
-          "confidence": 0.85,
-          "rationale": "test item"
+          "confidence": 0.9,
+          "rationale": "IT-CHANGESET mock rationale for item 2"
         },
         {
           "item": {
@@ -79,10 +163,10 @@
             "raw_row_index": 6
           },
           "allocated_amount": "10.61",
-          "category_id": "cat-groceries",
+          "category_id": "dddddddd-0000-0000-0000-000000000003",
           "category_name": "Groceries",
-          "confidence": 0.85,
-          "rationale": "test item"
+          "confidence": 0.9,
+          "rationale": "IT-CHANGESET mock rationale for item 3"
         }
       ]
     },
@@ -121,10 +205,10 @@
             "raw_row_index": 13
           },
           "allocated_amount": "28.84",
-          "category_id": "cat-groceries",
+          "category_id": "dddddddd-0000-0000-0000-000000000003",
           "category_name": "Groceries",
-          "confidence": 0.85,
-          "rationale": "test item"
+          "confidence": 0.9,
+          "rationale": "IT-CHANGESET mock rationale for item 1"
         },
         {
           "item": {
@@ -138,10 +222,10 @@
             "raw_row_index": 14
           },
           "allocated_amount": "17.31",
-          "category_id": "cat-groceries",
+          "category_id": "dddddddd-0000-0000-0000-000000000003",
           "category_name": "Groceries",
-          "confidence": 0.85,
-          "rationale": "test item"
+          "confidence": 0.9,
+          "rationale": "IT-CHANGESET mock rationale for item 2"
         },
         {
           "item": {
@@ -155,10 +239,10 @@
             "raw_row_index": 15
           },
           "allocated_amount": "11.54",
-          "category_id": "cat-groceries",
+          "category_id": "dddddddd-0000-0000-0000-000000000003",
           "category_name": "Groceries",
-          "confidence": 0.85,
-          "rationale": "test item"
+          "confidence": 0.9,
+          "rationale": "IT-CHANGESET mock rationale for item 3"
         },
         {
           "item": {
@@ -172,10 +256,10 @@
             "raw_row_index": 16
           },
           "allocated_amount": "10.37",
-          "category_id": "cat-groceries",
+          "category_id": "dddddddd-0000-0000-0000-000000000003",
           "category_name": "Groceries",
-          "confidence": 0.85,
-          "rationale": "test item"
+          "confidence": 0.9,
+          "rationale": "IT-CHANGESET mock rationale for item 4"
         },
         {
           "item": {
@@ -189,10 +273,52 @@
             "raw_row_index": 17
           },
           "allocated_amount": "14.42",
-          "category_id": "cat-groceries",
+          "category_id": "dddddddd-0000-0000-0000-000000000003",
           "category_name": "Groceries",
-          "confidence": 0.85,
-          "rationale": "test item"
+          "confidence": 0.9,
+          "rationale": "IT-CHANGESET mock rationale for item 5"
+        }
+      ]
+    },
+    {
+      "parent_ynab_transaction_id": "txn-008",
+      "parent_ynab_transaction": {
+        "id": "txn-008",
+        "account_id": "account-unknown",
+        "date": "2024-02-04",
+        "payee_id": null,
+        "payee_name": "Amazon.com",
+        "category_id": null,
+        "cleared": "uncleared",
+        "approved": true,
+        "amount": -12830,
+        "memo": "Unknown account",
+        "account_name": "Account n"
+      },
+      "shipment": {
+        "order_id": "111-0000020-0000020",
+        "ship_date": "2024-02-04",
+        "payment_method_last4": "8901",
+        "total_amount": "12.83",
+        "item_count": 1
+      },
+      "subtransactions": [
+        {
+          "item": {
+            "order_id": "111-0000020-0000020",
+            "ship_date": "2024-02-04",
+            "asin": "B0C2234568",
+            "product_name": "Test withembedded newline",
+            "quantity": 1,
+            "unit_price": "11.99",
+            "unit_price_tax": "0.84",
+            "raw_row_index": 29
+          },
+          "allocated_amount": "12.83",
+          "category_id": "dddddddd-0000-0000-0000-000000000003",
+          "category_name": "Groceries",
+          "confidence": 0.9,
+          "rationale": "IT-CHANGESET mock rationale for item 1"
         }
       ]
     },
@@ -231,10 +357,10 @@
             "raw_row_index": 32
           },
           "allocated_amount": "19.26",
-          "category_id": "cat-groceries",
+          "category_id": "dddddddd-0000-0000-0000-000000000003",
           "category_name": "Groceries",
-          "confidence": 0.85,
-          "rationale": "test item"
+          "confidence": 0.9,
+          "rationale": "IT-CHANGESET mock rationale for item 1"
         },
         {
           "item": {
@@ -248,80 +374,65 @@
             "raw_row_index": 33
           },
           "allocated_amount": "23.54",
-          "category_id": "cat-groceries",
+          "category_id": "dddddddd-0000-0000-0000-000000000003",
           "category_name": "Groceries",
-          "confidence": 0.85,
-          "rationale": "test item"
+          "confidence": 0.9,
+          "rationale": "IT-CHANGESET mock rationale for item 2"
         }
       ]
     }
   ],
-  "proposed_singles": [
+  "proposed_singles": [],
+  "unmatched_ynab": [
     {
-      "transaction_id": "txn-001",
       "transaction": {
-        "id": "txn-001",
-        "account_id": "account-visa-1",
-        "date": "2024-01-15",
+        "id": "txn-003",
+        "account_id": "account-visa-3",
+        "date": "2024-01-17",
         "payee_id": null,
         "payee_name": "Amazon.com",
         "category_id": null,
         "cleared": "uncleared",
         "approved": true,
-        "amount": -37090,
-        "memo": "Order 111-0000001 ($37.09)",
+        "amount": -14200,
+        "memo": "No matching shipment ($14.20)",
+        "account_name": "Account 3"
+      },
+      "reason": "no matching shipment in dump"
+    },
+    {
+      "transaction": {
+        "id": "txn-004",
+        "account_id": "account-visa-4",
+        "date": "2024-01-17",
+        "payee_id": null,
+        "payee_name": "AMZN Mktp US",
+        "category_id": null,
+        "cleared": "uncleared",
+        "approved": true,
+        "amount": -17410,
+        "memo": "No matching shipment ($17.41)",
+        "account_name": "Account 4"
+      },
+      "reason": "no matching shipment in dump"
+    },
+    {
+      "transaction": {
+        "id": "txn-005",
+        "account_id": "account-visa-1",
+        "date": "2024-02-15",
+        "payee_id": null,
+        "payee_name": "Amazon.com",
+        "category_id": null,
+        "cleared": "uncleared",
+        "approved": true,
+        "amount": -54710,
+        "memo": "Date too far from matching shipment ($54.71)",
         "account_name": "Account 1"
       },
-      "order_id": "111-0000001-0000001",
-      "category_id": "cat-groceries",
-      "category_name": "Groceries",
-      "confidence": 0.85,
-      "rationale": "test"
-    },
-    {
-      "transaction_id": "txn-002",
-      "transaction": {
-        "id": "txn-002",
-        "account_id": "account-visa-2",
-        "date": "2024-01-16",
-        "payee_id": null,
-        "payee_name": "Amazon.com",
-        "category_id": null,
-        "cleared": "uncleared",
-        "approved": true,
-        "amount": -48120,
-        "memo": "Order 111-0000002 ($48.12)",
-        "account_name": "Account 2"
-      },
-      "order_id": "111-0000002-0000002",
-      "category_id": "cat-groceries",
-      "category_name": "Groceries",
-      "confidence": 0.85,
-      "rationale": "test"
-    },
-    {
-      "transaction_id": "txn-008",
-      "transaction": {
-        "id": "txn-008",
-        "account_id": "account-unknown",
-        "date": "2024-02-04",
-        "payee_id": null,
-        "payee_name": "Amazon.com",
-        "category_id": null,
-        "cleared": "uncleared",
-        "approved": true,
-        "amount": -12830,
-        "memo": "Unknown account",
-        "account_name": "Account n"
-      },
-      "order_id": "111-0000020-0000020",
-      "category_id": "cat-groceries",
-      "category_name": "Groceries",
-      "confidence": 0.85,
-      "rationale": "test"
+      "reason": "no matching shipment in dump"
     }
   ],
-  "unmatched_ynab": [],
   "unmatched_shipments": [],
   "excluded_shipments": [
     {
@@ -365,5 +476,26 @@
       "reason": "unshipped (status Not Available)"
     }
   ],
-  "parse_errors": []
+  "parse_errors": [
+    {
+      "row_index": 30,
+      "reason": "non-USD currency: EUR",
+      "raw_row": null
+    },
+    {
+      "row_index": 13,
+      "reason": "charge math mismatch: expected 76.49, got 82.48",
+      "raw_row": null
+    },
+    {
+      "row_index": 22,
+      "reason": "charge math mismatch: expected 53.85, got 58.85",
+      "raw_row": null
+    },
+    {
+      "row_index": 31,
+      "reason": "charge math mismatch: expected 32.57, got 32.02",
+      "raw_row": null
+    }
+  ]
 }

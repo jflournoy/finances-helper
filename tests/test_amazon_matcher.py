@@ -3020,17 +3020,57 @@ def test_write_amazon_changeset_filename_format(tmp_path):
 # ============================================================================
 
 
-def test_it_changeset_full_pipeline(tmp_path):
-    """IT-CHANGESET: Full Phase B→D→E pipeline with mocked Anthropic.
+IT_CHANGESET_CATEGORY_ID = "dddddddd-0000-0000-0000-000000000003"
+IT_CHANGESET_CATEGORY_NAME = "Groceries"
+
+
+class _ITChangesetAnthropicMock:
+    """Replacement for anthropic.Anthropic used by IT-CHANGESET.
+
+    Parses the user message to count items, returns a deterministic
+    JSON array of that length. All items assigned to Groceries.
+    """
+
+    def __init__(self, *args, **kwargs):
+        self.messages = self
+
+    def create(self, *, model, max_tokens, system, messages, **kwargs):
+        import re
+        user_text = messages[0]["content"]
+        item_lines = re.findall(r'^(\d+)\. "', user_text, flags=re.MULTILINE)
+        n = len(item_lines)
+        response_items = [
+            {
+                "item_index": i + 1,
+                "category_id": IT_CHANGESET_CATEGORY_ID,
+                "category_name": IT_CHANGESET_CATEGORY_NAME,
+                "confidence": 0.9,
+                "rationale": f"IT-CHANGESET mock rationale for item {i + 1}",
+            }
+            for i in range(n)
+        ]
+        text = json.dumps(response_items)
+
+        class _Resp:
+            def __init__(self, t):
+                self.content = [type("B", (), {"text": t})()]
+                self.stop_reason = "end_turn"
+                self.usage = None
+
+        return _Resp(text)
+
+
+def test_it_changeset_full_pipeline(tmp_path, monkeypatch):
+    """IT-CHANGESET: Full Phase B→C→D→E pipeline with mocked Anthropic.
 
     Flow:
     1. Parse amazon_order_history_sample.csv (Phase A)
     2. Load YNAB transactions and categories, run filter + match (Phase B)
-    3. Mock anthropic.Anthropic and call categorize_transactions (Phase D)
-    4. Extract split_proposals and single_results, call write_amazon_changeset (Phase E)
+    3. Patch anthropic.Anthropic and call categorize_transactions (Phase C+D)
+    4. Pass 4-tuple output to write_amazon_changeset (Phase E)
     5. Assert JSON output matches expected fixture exactly
 
-    This is the primary integration test catching Phase B→D→E wiring bugs.
+    This is the primary integration test catching Phase B→C→D→E wiring bugs.
     """
     from amazon_matcher import (
         parse_order_history,
@@ -3039,70 +3079,32 @@ def test_it_changeset_full_pipeline(tmp_path):
         write_amazon_changeset,
     )
     from datetime import datetime
+    import categorizer as _categorizer_mod
+
+    monkeypatch.setattr(_categorizer_mod.anthropic, "Anthropic", _ITChangesetAnthropicMock)
 
     FIXED_NOW = datetime(2026, 4, 21, 12, 0, 0)
 
     csv_path = Path("data/fixtures/amazon_order_history_sample.csv")
     ynab_path = Path("data/fixtures/amazon_ynab_transactions.json")
+    categories_path = Path("data/fixtures/ynab_categories.json")
 
-    shipments, parse_errors = parse_order_history(csv_path.read_text())
+    shipments, parse_errors_list = parse_order_history(csv_path.read_text())
     ynab_txns = json.load(open(ynab_path))
+    categories = json.load(open(categories_path))["data"]["category_groups"]
 
     filtered_txns = filter_amazon_transactions(ynab_txns)
-    assert len(filtered_txns) > 0, "No Amazon transactions in fixture"
+    match_result = match_shipments_to_transactions(filtered_txns, shipments, parse_errors=parse_errors_list)
 
-    match_result = match_shipments_to_transactions(filtered_txns, shipments)
-    assert len(match_result.matched) > 0, "No matched shipments"
+    from categorizer import categorize_transactions
 
-    from categorizer import (
-        AmazonSplitProposal,
-        ItemCategoryResult,
-        CategoryResult,
-        allocate_shipment_to_items,
+    results, skipped, unmatched_amazon, split_proposals = categorize_transactions(
+        transactions=filtered_txns,
+        cache={},
+        categories=categories,
+        api_key="test-key",
+        amazon_matches=match_result,
     )
-
-    split_proposals = []
-    single_results_list = []
-    unmatched_amazon = []
-
-    for candidate in match_result.matched:
-        if len(candidate.shipment.items) > 1:
-            allocs = allocate_shipment_to_items(candidate.shipment)
-            subs = []
-            for a in allocs:
-                subs.append(
-                    ItemCategoryResult(
-                        ynab_transaction_id=candidate.ynab_txn["id"],
-                        item=a.item,
-                        allocated_amount=a.allocated_amount,
-                        category_id="cat-groceries",
-                        category_name="Groceries",
-                        confidence=0.85,
-                        rationale="test item",
-                    )
-                )
-            split_proposals.append(
-                AmazonSplitProposal(
-                    parent_ynab_txn=candidate.ynab_txn,
-                    shipment=candidate.shipment,
-                    subtransactions=subs,
-                )
-            )
-        else:
-            single_results_list.append(
-                CategoryResult(
-                    transaction_id=candidate.ynab_txn["id"],
-                    category_id="cat-groceries",
-                    category_name="Groceries",
-                    confidence=0.85,
-                    rationale="test",
-                    tier="amazon-single",
-                )
-            )
-
-    results = single_results_list
-    skipped = []
-    single_results = single_results_list
 
     single_results = [r for r in results if r.tier == "amazon-single"]
 
@@ -3115,8 +3117,8 @@ def test_it_changeset_full_pipeline(tmp_path):
         now=FIXED_NOW,
     )
 
-    assert md_path.exists(), f"Markdown file not created: {md_path}"
-    assert json_path.exists(), f"JSON file not created: {json_path}"
+    assert md_path.exists()
+    assert json_path.exists()
 
     md_content = md_path.read_text()
     assert "# Amazon Changeset — 2026-04-21 12:00:00" in md_content
@@ -3130,25 +3132,31 @@ def test_it_changeset_full_pipeline(tmp_path):
     assert "## How to apply" in md_content
     assert "uv run python amazon_matcher.py --confirm" in md_content
 
-    if len(split_proposals) > 0:
-        assert "###" in md_content, "Split section should have order_id headers"
-    if len(single_results) > 0:
-        assert "- 202" in md_content, "Single categorizations should have date bullets"
-
     actual = json.loads(json_path.read_text())
     assert actual["version"] == 1
     assert actual["generated_at"] == "2026-04-21T12:00:00"
-    assert "summary" in actual
-    assert "proposed_splits" in actual
-    assert "proposed_singles" in actual
-    assert "unmatched_ynab" in actual
-    assert "unmatched_shipments" in actual
-    assert "excluded_shipments" in actual
-    assert "parse_errors" in actual
+
+    assert len(actual["proposed_splits"]) >= 1
+    first_split = actual["proposed_splits"][0]
+    assert len(first_split["subtransactions"]) >= 1
+    first_sub = first_split["subtransactions"][0]
+    assert first_sub["category_id"] == IT_CHANGESET_CATEGORY_ID
+    assert first_sub["category_name"] == IT_CHANGESET_CATEGORY_NAME
+    assert "IT-CHANGESET mock rationale" in first_sub["rationale"]
+
+    assert len(actual["parse_errors"]) == len(parse_errors_list)
 
     expected_path = Path("data/fixtures/expected_amazon_changeset.json")
     expected = json.load(open(expected_path))
-    assert actual == expected, f"Changeset output does not match expected fixture.\nExpected {len(expected.get('proposed_splits', []))} splits, {len(expected.get('proposed_singles', []))} singles.\nActual {len(actual.get('proposed_splits', []))} splits, {len(actual.get('proposed_singles', []))} singles."
+    assert actual == expected, (
+        f"Changeset output does not match expected fixture.\n"
+        f"Expected {len(expected.get('proposed_splits', []))} splits, "
+        f"{len(expected.get('proposed_singles', []))} singles, "
+        f"{expected.get('summary', {}).get('unmatched_ynab', '?')} unmatched.\n"
+        f"Actual {len(actual.get('proposed_splits', []))} splits, "
+        f"{len(actual.get('proposed_singles', []))} singles, "
+        f"{actual.get('summary', {}).get('unmatched_ynab', '?')} unmatched."
+    )
 
 
 def test_md_escape_newline_becomes_space():
