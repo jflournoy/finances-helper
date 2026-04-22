@@ -2516,6 +2516,237 @@ def test_render_markdown_single_populated():
         assert "test item" in md
 
 
+def test_render_markdown_dollar_formatting():
+    """_render_markdown formats all dollar amounts with 2-decimal precision."""
+    from amazon_matcher import _render_markdown
+    from pathlib import Path
+    from tempfile import TemporaryDirectory
+
+    payload = {
+        "version": 1,
+        "generated_at": "2026-04-21T12:00:00",
+        "summary": {
+            "proposed_splits": 1,
+            "proposed_singles": 0,
+            "unmatched_ynab": 0,
+            "unmatched_shipments": 1,
+            "unmatched_shipments": 1,
+            "excluded_shipments": 1,
+            "parse_errors": 0,
+        },
+        "proposed_splits": [
+            {
+                "parent_ynab_transaction_id": "txn-1",
+                "parent_ynab_transaction": {
+                    "id": "txn-1",
+                    "date": "2026-03-22",
+                    "amount": -10000,
+                    "payee_name": "Amazon",
+                    "account_id": "acc-1",
+                    "account_name": "Visa",
+                },
+                "shipment": {
+                    "order_id": "111-1234567",
+                    "ship_date": "2026-03-22",
+                    "payment_method_last4": "0804",
+                    "total_amount": "10",
+                    "item_count": 1,
+                },
+                "subtransactions": [
+                    {
+                        "item": {"asin": "B", "product_name": "W", "quantity": 1, "unit_price": "10.5"},
+                        "allocated_amount": "10",
+                        "category_id": "cat-1",
+                        "category_name": "G",
+                        "confidence": 0.95,
+                        "rationale": "test",
+                    }
+                ],
+            }
+        ],
+        "proposed_singles": [],
+        "unmatched_ynab": [],
+        "unmatched_shipments": [
+            {
+                "order_id": "222-1234567",
+                "ship_date": "2026-03-23",
+                "payment_method_last4": "1234",
+                "total_amount": "42",
+                "item_count": 1,
+            }
+        ],
+        "excluded_shipments": [
+            {
+                "shipment": {
+                    "order_id": "333-1234567",
+                    "ship_date": "2026-03-24",
+                    "payment_method_last4": "5678",
+                    "total_amount": "7.5",
+                    "item_count": 1,
+                },
+                "reason": "test",
+            }
+        ],
+        "parse_errors": [],
+    }
+
+    with TemporaryDirectory() as tmp:
+        json_path = Path(tmp) / "test.json"
+        md = _render_markdown(payload, json_path)
+
+        assert "$10.00" in md
+        assert "$42.00" in md
+        assert "$7.50" in md
+
+
+def test_render_markdown_escapes_user_strings():
+    """_render_markdown escapes payee_name, rationale, and reasons."""
+    from amazon_matcher import _render_markdown
+    from pathlib import Path
+    from tempfile import TemporaryDirectory
+
+    payload = {
+        "version": 1,
+        "generated_at": "2026-04-21T12:00:00",
+        "summary": {
+            "proposed_splits": 1,
+            "proposed_singles": 0,
+            "unmatched_ynab": 1,
+            "unmatched_shipments": 0,
+            "excluded_shipments": 0,
+            "parse_errors": 0,
+        },
+        "proposed_splits": [
+            {
+                "parent_ynab_transaction_id": "txn-1",
+                "parent_ynab_transaction": {
+                    "id": "txn-1",
+                    "date": "2026-03-22",
+                    "amount": -10000,
+                    "payee_name": "Amazon | Corp",
+                    "account_id": "acc-1",
+                },
+                "shipment": {
+                    "order_id": "111-1234567",
+                    "ship_date": "2026-03-22",
+                    "payment_method_last4": "0804",
+                    "total_amount": "10",
+                    "item_count": 1,
+                },
+                "subtransactions": [
+                    {
+                        "item": {"asin": "B", "product_name": "Test|Product", "quantity": 1, "unit_price": "10"},
+                        "allocated_amount": "10",
+                        "category_id": "cat-1",
+                        "category_name": "G",
+                        "confidence": 0.95,
+                        "rationale": "reason|with|pipes",
+                    }
+                ],
+            }
+        ],
+        "proposed_singles": [],
+        "unmatched_ynab": [
+            {
+                "transaction": {
+                    "id": "txn-2",
+                    "date": "2026-03-23",
+                    "amount": -50000,
+                    "payee_name": "Amazon",
+                    "account_id": "acc-1",
+                },
+                "reason": "no|match",
+            }
+        ],
+        "unmatched_shipments": [],
+        "excluded_shipments": [],
+        "parse_errors": [],
+    }
+
+    with TemporaryDirectory() as tmp:
+        json_path = Path(tmp) / "test.json"
+        md = _render_markdown(payload, json_path)
+
+        assert "Amazon \\| Corp" in md
+        assert "Test\\|Product" in md
+        assert "reason\\|with\\|pipes" in md
+        assert "no\\|match" in md
+
+
+def test_write_amazon_changeset_logs_warning_on_missing_account_name(caplog):
+    """write_amazon_changeset logs warning once if txn lacks account_name and lookup is None."""
+    from amazon_matcher import write_amazon_changeset, MatchResult, AmazonShipment, AmazonItem
+    from categorizer import AmazonSplitProposal, ItemCategoryResult
+    from datetime import datetime, date
+    from decimal import Decimal
+    from pathlib import Path
+    import tempfile
+    import logging
+
+    caplog.set_level(logging.WARNING)
+
+    item = AmazonItem(
+        order_id="111",
+        ship_date=date(2026, 3, 22),
+        asin="B",
+        product_name="W",
+        quantity=1,
+        unit_price=Decimal("50"),
+        unit_price_tax=Decimal("0"),
+        raw_row_index=1,
+    )
+    ship = AmazonShipment(
+        order_id="111",
+        ship_date=date(2026, 3, 22),
+        payment_method_raw="V",
+        payment_method_last4="0804",
+        is_split_tender=False,
+        currency="USD",
+        item_subtotal=Decimal("50"),
+        tax=Decimal("0"),
+        shipping=Decimal("0"),
+        discounts=Decimal("0"),
+        total_amount=Decimal("50"),
+        items=[item],
+        shipment_status="Shipped",
+    )
+    parent = {
+        "id": "txn-1",
+        "amount": -50000,
+        "date": "2026-03-22",
+        "payee_name": "Amazon",
+        "account_id": "acc-1",
+    }
+    subtxn = ItemCategoryResult(
+        ynab_transaction_id="txn-1",
+        item=item,
+        allocated_amount=Decimal("50"),
+        category_id="cat-1",
+        category_name="Groceries",
+        confidence=0.9,
+        rationale="test",
+    )
+    proposal = AmazonSplitProposal(
+        parent_ynab_txn=parent,
+        shipment=ship,
+        subtransactions=[subtxn],
+    )
+    match = MatchResult(matched=[], unmatched_ynab=[], unmatched_shipments=[], excluded_shipments=[], parse_errors=[])
+
+    with tempfile.TemporaryDirectory() as tmp:
+        md, j = write_amazon_changeset(
+            match,
+            [proposal],
+            [],
+            [],
+            account_name_lookup=None,
+            out_dir=Path(tmp),
+            now=datetime(2026, 4, 21, 12, 0, 0),
+        )
+
+    assert any("account_name" in record.message.lower() for record in caplog.records)
+
+
 def test_write_amazon_changeset_empty_result(tmp_path):
     """write_amazon_changeset writes files with all zeros when result is empty."""
     from amazon_matcher import write_amazon_changeset, MatchResult

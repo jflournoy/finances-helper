@@ -1049,12 +1049,14 @@ def _build_json_payload(
 def _render_markdown(
     payload: dict,
     json_path: Path,
+    account_name_lookup: dict[str, str] | None = None,
 ) -> str:
     """Render markdown from JSON payload.
 
     Args:
         payload: Dict structure from _build_json_payload
         json_path: Path to JSON file (for reference in markdown)
+        account_name_lookup: Optional {account_id: account_name} for fallback
 
     Returns:
         Markdown string
@@ -1081,12 +1083,14 @@ def _render_markdown(
     md += f"## Proposed splits ({summary['proposed_splits']})\n\n"
     for split in payload["proposed_splits"]:
         ship = split["shipment"]
-        md += f"### {ship['order_id']} — {ship['ship_date']} — ${ship['total_amount']}\n"
+        total_amt = Decimal(str(ship["total_amount"]))
+        md += f"### {ship['order_id']} — {ship['ship_date']} — ${total_amt:.2f}\n"
         parent = split["parent_ynab_transaction"]
-        parent_amount = abs(Decimal(parent["amount"])) / Decimal(1000)
+        parent_amount = abs(Decimal(str(parent["amount"]))) / Decimal(1000)
         parent_date = parent.get("date", "?")
-        parent_payee = parent.get("payee_name", "?")
-        md += f"Parent: {parent_date} | {parent.get('account_name', parent.get('account_id', '?'))} | ${parent_amount:.2f} | {parent_payee}\n"
+        parent_payee = _md_escape(parent.get("payee_name", "?"))
+        account_name, _ = _resolve_account_name(parent, account_name_lookup)
+        md += f"Parent: {parent_date} | {account_name} | ${parent_amount:.2f} | {parent_payee}\n"
         md += f"Shipment: {ship['order_id']} | {ship['ship_date']} | {ship['item_count']} items\n\n"
         md += "| Item | ASIN | Qty | Allocated | Category | Confidence | Rationale |\n"
         md += "|---|---|---|---|---|---|---|\n"
@@ -1095,12 +1099,12 @@ def _render_markdown(
             name = _md_escape(item["product_name"])
             asin = item["asin"]
             qty = item["quantity"]
-            alloc = sub["allocated_amount"]
+            alloc = Decimal(str(sub["allocated_amount"]))
             cat = sub["category_name"] if sub["category_id"] else "—"
             conf = sub["confidence"]
             ratio = _md_escape(sub["rationale"])
             prefix = "[UNCATEGORIZED] " if sub["category_id"] is None else ""
-            md += f"| {prefix}{name} | {asin} | {qty} | ${alloc} | {cat} | {conf:.2f} | {ratio} |\n"
+            md += f"| {prefix}{name} | {asin} | {qty} | ${alloc:.2f} | {cat} | {conf:.2f} | {ratio} |\n"
         md += "\n"
 
     md += f"## Proposed single categorizations ({summary['proposed_singles']})\n\n"
@@ -1125,13 +1129,14 @@ def _render_markdown(
 
     for reason in sorted(reasons_map.keys()):
         txns = reasons_map[reason]
-        md += f"### {reason} ({len(txns)})\n"
+        escaped_reason = _md_escape(reason)
+        md += f"### {escaped_reason} ({len(txns)})\n"
         for txn in txns:
             date = txn.get("date", "?")
-            account = txn.get("account_name", txn.get("account_id", "?"))
-            amount = abs(Decimal(txn.get("amount", 0))) / Decimal(1000)
+            account_name, _ = _resolve_account_name(txn, account_name_lookup)
+            amount = abs(Decimal(str(txn.get("amount", 0)))) / Decimal(1000)
             txn_id = txn.get("id", "?")
-            md += f"- {date} | {account} | ${amount:.2f} | txn_id: {txn_id}\n"
+            md += f"- {date} | {account_name} | ${amount:.2f} | txn_id: {txn_id}\n"
         md += "\n"
 
     md += f"## Unmatched Amazon shipments ({summary['unmatched_shipments']})\n\n"
@@ -1139,9 +1144,9 @@ def _render_markdown(
     for ship in payload["unmatched_shipments"]:
         order_id = ship["order_id"]
         ship_date = ship["ship_date"]
-        amount = ship["total_amount"]
+        amount = Decimal(str(ship["total_amount"]))
         last4 = ship["payment_method_last4"] or "?????"
-        md += f"- {order_id} | {ship_date} | ${amount} | last-4: {last4}\n"
+        md += f"- {order_id} | {ship_date} | ${amount:.2f} | last-4: {last4}\n"
     md += "\n"
 
     md += f"## Excluded shipments ({summary['excluded_shipments']})\n\n"
@@ -1154,9 +1159,11 @@ def _render_markdown(
 
     for reason in sorted(excluded_map.keys()):
         ships = excluded_map[reason]
-        md += f"### {reason} ({len(ships)})\n"
+        escaped_reason = _md_escape(reason)
+        md += f"### {escaped_reason} ({len(ships)})\n"
         for ship in ships:
-            md += f"- {ship['order_id']} | {ship['ship_date']} | ${ship['total_amount']}\n"
+            amount = Decimal(str(ship["total_amount"]))
+            md += f"- {ship['order_id']} | {ship['ship_date']} | ${amount:.2f}\n"
         md += "\n"
 
     md += f"## Parse errors ({summary['parse_errors']})\n\n"
@@ -1234,10 +1241,27 @@ def write_amazon_changeset(
     json_path = _next_free_path(base_path, ".json")
     md_path = json_path.with_suffix(".md")
 
+    warn_account_name = False
+    for proposal in split_proposals:
+        if not proposal.parent_ynab_txn.get("account_name") and not account_name_lookup:
+            warn_account_name = True
+            break
+    if not warn_account_name:
+        for single in single_results:
+            pass
+    if not warn_account_name:
+        for txn, _ in unmatched_amazon:
+            if not txn.get("account_name") and not account_name_lookup:
+                warn_account_name = True
+                break
+
+    if warn_account_name:
+        logger.warning("Some transactions lack account_name and no lookup provided; using account_id")
+
     json_content = json.dumps(payload, default=_json_default, indent=2)
     json_path.write_text(json_content)
 
-    markdown = _render_markdown(payload, json_path)
+    markdown = _render_markdown(payload, json_path, account_name_lookup)
     md_path.write_text(markdown)
 
     return md_path, json_path
