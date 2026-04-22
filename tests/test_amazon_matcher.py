@@ -2579,23 +2579,22 @@ def test_write_amazon_changeset_filename_format(tmp_path):
 
 
 def test_it_changeset_full_pipeline(tmp_path):
-    """IT-CHANGESET: Full pipeline from CSV to changeset files.
+    """IT-CHANGESET: Full pipeline from CSV → match → write changeset.
 
     Flow:
-    1. Parse amazon_order_history_sample.csv
+    1. Parse amazon_order_history_sample.csv (Phase A)
     2. Load amazon_ynab_transactions.json
-    3. Run filter_amazon_transactions and match_shipments_to_transactions
-    4. Allocate shipment to items
-    5. Call write_amazon_changeset
-    6. Assert JSON structure and markdown contains expected sections
+    3. Run filter_amazon_transactions and match_shipments_to_transactions (Phase B)
+    4. Call write_amazon_changeset (Phase E)
+    5. Assert JSON output matches expected fixture exactly
 
-    This integration test validates the wiring across the entire Phase E pipeline.
+    This integration test exercises the Phase B→E wiring with real data.
+    Note: Full Phase D integration is tested separately in categorizer tests.
     """
     from amazon_matcher import (
         parse_order_history,
         filter_amazon_transactions,
         match_shipments_to_transactions,
-        allocate_shipment_to_items,
         write_amazon_changeset,
     )
     from datetime import datetime
@@ -2611,7 +2610,7 @@ def test_it_changeset_full_pipeline(tmp_path):
 
     match_result = match_shipments_to_transactions(filtered_txns, shipments)
 
-    now = datetime(2026, 4, 21, 12, 0, 0)
+    fixed_now = datetime(2026, 4, 21, 12, 0, 0)
 
     md_path, json_path = write_amazon_changeset(
         match_result=match_result,
@@ -2619,7 +2618,7 @@ def test_it_changeset_full_pipeline(tmp_path):
         single_results=[],
         unmatched_amazon=match_result.unmatched_ynab,
         out_dir=tmp_path,
-        now=now
+        now=fixed_now,
     )
 
     assert md_path.exists(), f"Markdown file not created: {md_path}"
@@ -2637,13 +2636,17 @@ def test_it_changeset_full_pipeline(tmp_path):
     assert "## How to apply" in md_content
     assert "uv run python amazon_matcher.py --confirm" in md_content
 
-    json_data = json.loads(json_path.read_text())
-    assert json_data["version"] == 1
-    assert json_data["generated_at"] == "2026-04-21T12:00:00"
-    assert "summary" in json_data
-    assert "proposed_splits" in json_data
-    assert "proposed_singles" in json_data
-    assert "unmatched_ynab" in json_data
-    assert "unmatched_shipments" in json_data
-    assert "excluded_shipments" in json_data
-    assert "parse_errors" in json_data
+    actual = json.loads(json_path.read_text())
+    assert actual["version"] == 1
+    assert actual["generated_at"] == "2026-04-21T12:00:00"
+    assert "summary" in actual
+    assert "proposed_splits" in actual
+    assert "proposed_singles" in actual
+    assert "unmatched_ynab" in actual
+    assert "unmatched_shipments" in actual
+    assert "excluded_shipments" in actual
+    assert "parse_errors" in actual
+
+    expected_path = Path("data/fixtures/expected_amazon_changeset.json")
+    expected = json.load(open(expected_path))
+    assert actual == expected, "Changeset output does not match expected fixture"
