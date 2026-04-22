@@ -961,7 +961,7 @@ def _build_json_payload(
     }
 
     for proposal in sorted(
-        split_proposals, key=lambda p: (p.parent_ynab_txn_date, p.parent_ynab_txn["id"])
+        split_proposals, key=lambda p: (p.parent_ynab_txn["date"], p.parent_ynab_txn["id"])
     ):
         subtxns = []
         for sub in proposal.subtransactions:

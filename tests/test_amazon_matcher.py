@@ -2076,6 +2076,139 @@ def test_next_free_path_collision():
         assert result.name.endswith(".txt")
 
 
+def test_build_json_payload_single_split_no_crash(tmp_path):
+    """_build_json_payload with one real AmazonSplitProposal does not crash."""
+    from amazon_matcher import _build_json_payload, MatchResult, AmazonShipment, AmazonItem
+    from categorizer import AmazonSplitProposal, ItemCategoryResult
+    from datetime import datetime, date
+    from decimal import Decimal
+
+    item = AmazonItem(
+        order_id="111-1234567-1234567",
+        ship_date=date(2026, 3, 22),
+        asin="B0B6DHGF7S",
+        product_name="Widget",
+        quantity=2,
+        unit_price=Decimal("50.00"),
+        unit_price_tax=Decimal("0"),
+        raw_row_index=1,
+    )
+    ship = AmazonShipment(
+        order_id="111-1234567-1234567",
+        ship_date=date(2026, 3, 22),
+        payment_method_raw="Visa ending in 0804",
+        payment_method_last4="0804",
+        is_split_tender=False,
+        currency="USD",
+        item_subtotal=Decimal("100.00"),
+        tax=Decimal("0"),
+        shipping=Decimal("0"),
+        discounts=Decimal("0"),
+        total_amount=Decimal("100.00"),
+        items=[item],
+        shipment_status="Shipped",
+    )
+    parent = {
+        "id": "txn-1",
+        "amount": -100000,
+        "date": "2026-03-22",
+        "payee_name": "Amazon",
+        "account_id": "acc-1",
+        "account_name": "Visa",
+    }
+    subtxn = ItemCategoryResult(
+        ynab_transaction_id="txn-1",
+        item=item,
+        allocated_amount=Decimal("100.00"),
+        category_id="cat-1",
+        category_name="Groceries",
+        confidence=0.9,
+        rationale="test",
+    )
+    proposal = AmazonSplitProposal(
+        parent_ynab_txn=parent,
+        shipment=ship,
+        subtransactions=[subtxn],
+    )
+    match = MatchResult(
+        matched=[],
+        unmatched_ynab=[],
+        unmatched_shipments=[],
+        excluded_shipments=[],
+        parse_errors=[],
+    )
+
+    payload = _build_json_payload(match, [proposal], [], [], now=datetime(2026, 4, 21, 12, 0, 0))
+    assert len(payload["proposed_splits"]) == 1
+    assert payload["proposed_splits"][0]["parent_ynab_transaction_id"] == "txn-1"
+
+
+def test_build_json_payload_splits_sorted_by_date():
+    """_build_json_payload sorts splits by (parent_date, parent_txn_id)."""
+    from amazon_matcher import _build_json_payload, MatchResult, AmazonShipment, AmazonItem
+    from categorizer import AmazonSplitProposal, ItemCategoryResult
+    from datetime import datetime, date
+    from decimal import Decimal
+
+    def make_proposal(txn_id, date_str):
+        item = AmazonItem(
+            order_id=f"111-{txn_id}",
+            ship_date=date.fromisoformat(date_str),
+            asin="B0B6DHGF7S",
+            product_name="Widget",
+            quantity=1,
+            unit_price=Decimal("100.00"),
+            unit_price_tax=Decimal("0"),
+            raw_row_index=1,
+        )
+        ship = AmazonShipment(
+            order_id=f"111-{txn_id}",
+            ship_date=date.fromisoformat(date_str),
+            payment_method_raw="Visa",
+            payment_method_last4="0804",
+            is_split_tender=False,
+            currency="USD",
+            item_subtotal=Decimal("100.00"),
+            tax=Decimal("0"),
+            shipping=Decimal("0"),
+            discounts=Decimal("0"),
+            total_amount=Decimal("100.00"),
+            items=[item],
+            shipment_status="Shipped",
+        )
+        parent = {
+            "id": txn_id,
+            "amount": -100000,
+            "date": date_str,
+            "payee_name": "Amazon",
+            "account_id": "acc-1",
+            "account_name": "Visa",
+        }
+        subtxn = ItemCategoryResult(
+            ynab_transaction_id=txn_id,
+            item=item,
+            allocated_amount=Decimal("100.00"),
+            category_id="cat-1",
+            category_name="Groceries",
+            confidence=0.9,
+            rationale="test",
+        )
+        return AmazonSplitProposal(parent_ynab_txn=parent, shipment=ship, subtransactions=[subtxn])
+
+    proposals = [
+        make_proposal("txn-3", "2026-03-22"),
+        make_proposal("txn-1", "2026-03-20"),
+        make_proposal("txn-2", "2026-03-21"),
+    ]
+    match = MatchResult(matched=[], unmatched_ynab=[], unmatched_shipments=[], excluded_shipments=[], parse_errors=[])
+
+    payload = _build_json_payload(match, proposals, [], [], now=datetime(2026, 4, 21, 12, 0, 0))
+    assert len(payload["proposed_splits"]) == 3
+    assert payload["proposed_splits"][0]["parent_ynab_transaction_id"] == "txn-1"
+    assert payload["proposed_splits"][1]["parent_ynab_transaction_id"] == "txn-2"
+    assert payload["proposed_splits"][2]["parent_ynab_transaction_id"] == "txn-3"
+
+
 def test_validate_invariants_ok():
     """_validate_invariants passes when invariants hold."""
     from amazon_matcher import _validate_invariants

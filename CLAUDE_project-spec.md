@@ -139,25 +139,11 @@ You can ask me things like:
 I have full context on your budget structure, account IDs, and category names.
 Always confirm before writing anything back to YNAB.
 
-## Open Decision Points
+## Resolved Decisions
 
-### Amazon Order History Source
-Personal Amazon accounts no longer support CSV export. Options under consideration:
+### Amazon Order History Source — RESOLVED
+**Decision: Option 1 (Amazon Order History Reporter Firefox extension)**
 
-1. **Amazon Order History Reporter (Firefox extension)**
-   - Pros: fast, produces clean CSV, works on-demand
-   - Cons: requires trusting a third-party extension with your Amazon session; Firefox version is less maintained than Chrome
-   - Extension: https://addons.mozilla.org/en-US/firefox/addon/amazon-order-history-reporter/
+Rationale: Real fixture data (9856-row CSV dump) demonstrates the extension works and produces a parseable format. Implementation proceeded with this source.
 
-2. **Amazon "Request My Data"**
-   - Pros: official, no extension needed, comprehensive history
-   - Cons: takes 3-5 days, arrives as JSON (requires a parser), not practical for ongoing use
-
-3. **Simplify Amazon scope**
-   - Skip item-level enrichment entirely
-   - Route all Amazon charges to a single "Amazon / Online Shopping" category via history lookup
-   - Lose memo detail but categorization still works fine
-
-**Decision needed before implementing `amazon_matcher.py`.**
-If option 1: `amazon_matcher.py` expects a CSV with columns TBD based on what the extension actually exports.
-If option 3: `amazon_matcher.py` may not be needed at all — `categorizer.py` handles it via payee history.
+Extension: https://addons.mozilla.org/en-US/firefox/addon/amazon-order-history-reporter/
