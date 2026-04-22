@@ -857,7 +857,6 @@ def _reject_nan_inf(label: str, value: Decimal) -> None:
 
 def _validate_invariants(
     split_proposals,
-    single_results,
     unmatched_amazon,
     *,
     match_result: "MatchResult | None" = None,
@@ -875,7 +874,6 @@ def _validate_invariants(
 
     Args:
         split_proposals: list[AmazonSplitProposal]
-        single_results: list[CategoryResult]
         unmatched_amazon: list[tuple[dict, str]]
         match_result: MatchResult (optional). If given, its unmatched_shipments
             and excluded_shipments Decimals are also checked.
@@ -948,10 +946,9 @@ def _validate_invariants(
 
     all_txn_ids = (
         {p.parent_ynab_txn["id"] for p in split_proposals}
-        | {r.transaction_id for r in single_results}
         | {t["id"] for t, _ in unmatched_amazon}
     )
-    expected_count = len(split_proposals) + len(single_results) + len(unmatched_amazon)
+    expected_count = len(split_proposals) + len(unmatched_amazon)
     if len(all_txn_ids) != expected_count:
         raise RuntimeError(
             f"Duplicate transaction across buckets: {expected_count} entries, "
@@ -988,7 +985,6 @@ def _resolve_account_name(
 def _build_json_payload(
     match_result: MatchResult,
     split_proposals,
-    single_results,
     unmatched_amazon,
     account_name_lookup: dict[str, str] | None = None,
     now: datetime | None = None,
@@ -998,7 +994,6 @@ def _build_json_payload(
     Args:
         match_result: MatchResult from phase B
         split_proposals: list[AmazonSplitProposal]
-        single_results: list[CategoryResult]
         unmatched_amazon: list[tuple[dict, str]] (txn, reason)
         account_name_lookup: Optional {account_id: account_name}
         now: Current datetime for generated_at
@@ -1014,14 +1009,12 @@ def _build_json_payload(
         "generated_at": now,
         "summary": {
             "proposed_splits": len(split_proposals),
-            "proposed_singles": len(single_results),
             "unmatched_ynab": len(unmatched_amazon),
             "unmatched_shipments": len(match_result.unmatched_shipments),
             "excluded_shipments": len(match_result.excluded_shipments),
             "parse_errors": len(match_result.parse_errors),
         },
         "proposed_splits": [],
-        "proposed_singles": [],
         "unmatched_ynab": [],
         "unmatched_shipments": [],
         "excluded_shipments": [],
@@ -1055,27 +1048,6 @@ def _build_json_payload(
             "subtransactions": subtxns,
         })
 
-    match_by_txn = {c.ynab_txn["id"]: c for c in match_result.matched}
-
-    single_with_date = []
-    for result in single_results:
-        if result.transaction_id not in match_by_txn:
-            raise RuntimeError(
-                f"Single result txn_id {result.transaction_id} not found in match_result.matched"
-            )
-        candidate = match_by_txn[result.transaction_id]
-        single_with_date.append((candidate.ynab_txn["date"], result.transaction_id, result, candidate))
-
-    for _, _, result, candidate in sorted(single_with_date, key=lambda x: (x[0], x[1])):
-        payload["proposed_singles"].append({
-            "transaction_id": result.transaction_id,
-            "transaction": candidate.ynab_txn,
-            "order_id": candidate.shipment.order_id,
-            "category_id": result.category_id,
-            "category_name": result.category_name,
-            "confidence": result.confidence,
-            "rationale": result.rationale,
-        })
 
     for txn, reason in sorted(unmatched_amazon, key=lambda x: (x[1], x[0]["date"], x[0]["id"])):
         payload["unmatched_ynab"].append({
@@ -1141,8 +1113,7 @@ def _render_markdown(
     md += "## Summary\n\n"
     md += "| Category | Count |\n"
     md += "|---|---|\n"
-    md += f"| Proposed splits (multi-item) | {summary['proposed_splits']} |\n"
-    md += f"| Proposed single categorizations | {summary['proposed_singles']} |\n"
+    md += f"| Proposed splits | {summary['proposed_splits']} |\n"
     md += f"| Unmatched YNAB Amazon transactions | {summary['unmatched_ynab']} |\n"
     md += f"| Unmatched Amazon shipments | {summary['unmatched_shipments']} |\n"
     md += f"| Excluded shipments | {summary['excluded_shipments']} |\n"
@@ -1175,19 +1146,8 @@ def _render_markdown(
             md += f"| {prefix}{name} | {asin} | {qty} | ${alloc:.2f} | {cat} | {conf:.2f} | {ratio} |\n"
         md += "\n"
 
-    md += f"## Proposed single categorizations ({summary['proposed_singles']})\n\n"
-    for single in payload["proposed_singles"]:
-        txn = single["transaction"]
-        date = txn.get("date", "?")
-        account, _ = _resolve_account_name(txn, account_name_lookup)
-        amount = abs(Decimal(str(txn.get("amount", 0)))) / Decimal(1000)
-        cat = single["category_name"] or "?"
-        conf = single["confidence"]
-        ratio = _md_escape(single["rationale"])
-        order_id = single["order_id"] or "?"
-        md += f"- {date} | {account} | ${amount:.2f} | {order_id} | {cat} (confidence: {conf:.2f}) — {ratio}\n"
 
-    md += f"\n## Unmatched YNAB Amazon transactions ({summary['unmatched_ynab']})\n\n"
+    md += f"## Unmatched YNAB Amazon transactions ({summary['unmatched_ynab']})\n\n"
     reasons_map = {}
     for entry in payload["unmatched_ynab"]:
         reason = entry["reason"]
@@ -1258,7 +1218,6 @@ def _render_markdown(
 def write_amazon_changeset(
     match_result: MatchResult,
     split_proposals,
-    single_results,
     unmatched_amazon,
     *,
     account_name_lookup: dict[str, str] | None = None,
@@ -1268,14 +1227,15 @@ def write_amazon_changeset(
     """Write Amazon changeset to paired markdown + JSON artifacts.
 
     Output ordering is deterministic:
-    - Splits/singles sorted by transaction date and ID
+    - Splits sorted by parent transaction date and ID
     - Unmatched YNAB grouped by reason, then by date and ID
+    - Unmatched/excluded shipments sorted by order_id then ship_date (None-safe)
     - Parse errors preserved in input order
 
     Args:
         match_result: MatchResult from match_shipments_to_transactions.
-        split_proposals: list[AmazonSplitProposal] from categorizer.
-        single_results: list[CategoryResult] from categorizer.
+        split_proposals: list[AmazonSplitProposal] from categorizer. Every
+            matched Amazon shipment is routed here regardless of item count.
         unmatched_amazon: list[tuple[dict, str]] (txn, reason) from orchestrator.
         account_name_lookup: Optional {account_id: account_name}.
         out_dir: Directory for output files (created if missing).
@@ -1288,7 +1248,7 @@ def write_amazon_changeset(
         RuntimeError: If invariants violated or file cannot be written.
     """
     _validate_invariants(
-        split_proposals, single_results, unmatched_amazon,
+        split_proposals, unmatched_amazon,
         match_result=match_result,
     )
 
@@ -1304,7 +1264,6 @@ def write_amazon_changeset(
     payload = _build_json_payload(
         match_result,
         split_proposals,
-        single_results,
         unmatched_amazon,
         account_name_lookup,
         now,
@@ -1323,13 +1282,6 @@ def write_amazon_changeset(
             if not txn.get("account_name") and not account_name_lookup:
                 warn_account_name = True
                 break
-    if not warn_account_name:
-        single_ids = {r.transaction_id for r in single_results}
-        for candidate in match_result.matched:
-            if candidate.ynab_txn["id"] in single_ids:
-                if not candidate.ynab_txn.get("account_name") and not account_name_lookup:
-                    warn_account_name = True
-                    break
 
     if warn_account_name:
         logger.warning("Some transactions lack account_name and no lookup provided; using account_id")

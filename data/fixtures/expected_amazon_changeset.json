@@ -3,7 +3,6 @@
   "generated_at": "2026-04-21T12:00:00",
   "summary": {
     "proposed_splits": 6,
-    "proposed_singles": 0,
     "unmatched_ynab": 3,
     "unmatched_shipments": 0,
     "excluded_shipments": 4,
@@ -382,7 +381,6 @@
       ]
     }
   ],
-  "proposed_singles": [],
   "unmatched_ynab": [
     {
       "transaction": {

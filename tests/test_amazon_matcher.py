@@ -2212,12 +2212,10 @@ def test_build_json_payload_splits_sorted_by_date():
 def test_validate_invariants_ok():
     """_validate_invariants passes when invariants hold."""
     from amazon_matcher import _validate_invariants
-    from categorizer import AmazonSplitProposal, ItemCategoryResult, CategoryResult
 
     split_proposals = []
-    single_results = []
     unmatched = []
-    _validate_invariants(split_proposals, single_results, unmatched)
+    _validate_invariants(split_proposals, unmatched)
 
 
 def _stub_shipment():
@@ -2244,7 +2242,7 @@ def test_validate_invariants_split_total_mismatch(monkeypatch):
     )
 
     with pytest.raises(RuntimeError, match="allocates.*but parent"):
-        _validate_invariants([proposal], [], [])
+        _validate_invariants([proposal], [])
 
 
 def test_validate_invariants_one_cent_drift_raises():
@@ -2261,11 +2259,11 @@ def test_validate_invariants_one_cent_drift_raises():
     )
 
     with pytest.raises(RuntimeError, match="allocates.*but parent"):
-        _validate_invariants([proposal], [], [])
+        _validate_invariants([proposal], [])
 
 
 def test_validate_invariants_duplicate_txn():
-    """_validate_invariants raises on duplicate txn across buckets."""
+    """_validate_invariants raises on duplicate txn across buckets (split + unmatched)."""
     from amazon_matcher import _validate_invariants
     from types import SimpleNamespace
 
@@ -2277,10 +2275,10 @@ def test_validate_invariants_duplicate_txn():
         shipment=_stub_shipment(),
     )
 
-    single = SimpleNamespace(transaction_id="txn-1")
+    unmatched = [({"id": "txn-1"}, "no matching shipment")]
 
     with pytest.raises(RuntimeError, match="Duplicate transaction"):
-        _validate_invariants([proposal], [single], [])
+        _validate_invariants([proposal], unmatched)
 
 
 def test_resolve_account_name_present():
@@ -2309,240 +2307,6 @@ def test_resolve_account_name_fallback_to_id():
     result, warning = _resolve_account_name(txn, None)
     assert result == "acc-1"
     assert warning is True
-
-
-def test_build_json_payload_singles_with_matched_txn():
-    """_build_json_payload populates single transaction and order_id from match_result."""
-    from amazon_matcher import (
-        _build_json_payload,
-        MatchResult,
-        MatchCandidate,
-        AmazonShipment,
-        AmazonItem,
-    )
-    from categorizer import CategoryResult
-    from datetime import datetime, date
-    from decimal import Decimal
-
-    item = AmazonItem(
-        order_id="111-1234567-1234567",
-        ship_date=date(2026, 3, 22),
-        asin="B0B6DHGF7S",
-        product_name="Widget",
-        quantity=1,
-        unit_price=Decimal("50.00"),
-        unit_price_tax=Decimal("0"),
-        raw_row_index=1,
-    )
-    ship = AmazonShipment(
-        order_id="111-1234567-1234567",
-        ship_date=date(2026, 3, 22),
-        payment_method_raw="Visa",
-        payment_method_last4="0804",
-        is_split_tender=False,
-        currency="USD",
-        item_subtotal=Decimal("50.00"),
-        tax=Decimal("0"),
-        shipping=Decimal("0"),
-        discounts=Decimal("0"),
-        total_amount=Decimal("50.00"),
-        items=[item],
-        shipment_status="Shipped",
-    )
-    txn = {
-        "id": "txn-single-1",
-        "date": "2026-03-22",
-        "amount": -50000,
-        "payee_name": "Amazon",
-        "account_id": "acc-1",
-        "account_name": "Visa",
-    }
-    candidate = MatchCandidate(ynab_txn=txn, shipment=ship, date_delta_days=0)
-
-    single = CategoryResult(
-        transaction_id="txn-single-1",
-        category_id="cat-1",
-        category_name="Groceries",
-        confidence=0.9,
-        rationale="test",
-        tier="amazon-single",
-    )
-
-    match = MatchResult(
-        matched=[candidate],
-        unmatched_ynab=[],
-        unmatched_shipments=[],
-        excluded_shipments=[],
-        parse_errors=[],
-    )
-
-    payload = _build_json_payload(match, [], [single], [], now=datetime(2026, 4, 21, 12, 0, 0))
-    assert len(payload["proposed_singles"]) == 1
-    assert payload["proposed_singles"][0]["transaction"] == txn
-    assert payload["proposed_singles"][0]["order_id"] == "111-1234567-1234567"
-
-
-def test_build_json_payload_singles_missing_match_raises():
-    """_build_json_payload raises if single_result txn_id not in match_result.matched."""
-    from amazon_matcher import _build_json_payload, MatchResult
-    from categorizer import CategoryResult
-    from datetime import datetime
-
-    single = CategoryResult(
-        transaction_id="txn-missing",
-        category_id="cat-1",
-        category_name="Groceries",
-        confidence=0.9,
-        rationale="test",
-        tier="amazon-single",
-    )
-
-    match = MatchResult(
-        matched=[],
-        unmatched_ynab=[],
-        unmatched_shipments=[],
-        excluded_shipments=[],
-        parse_errors=[],
-    )
-
-    with pytest.raises(RuntimeError, match="txn-missing"):
-        _build_json_payload(match, [], [single], [], now=datetime(2026, 4, 21, 12, 0, 0))
-
-
-def test_build_json_payload_singles_sorted_by_date_and_txn_id():
-    """_build_json_payload sorts singles by (txn_date, txn_id)."""
-    from amazon_matcher import (
-        _build_json_payload,
-        MatchResult,
-        MatchCandidate,
-        AmazonShipment,
-        AmazonItem,
-    )
-    from categorizer import CategoryResult
-    from datetime import datetime, date
-    from decimal import Decimal
-
-    def make_single_with_match(txn_id, date_str):
-        item = AmazonItem(
-            order_id=f"111-{txn_id}",
-            ship_date=date.fromisoformat(date_str),
-            asin="B",
-            product_name="W",
-            quantity=1,
-            unit_price=Decimal("50"),
-            unit_price_tax=Decimal("0"),
-            raw_row_index=1,
-        )
-        ship = AmazonShipment(
-            order_id=f"111-{txn_id}",
-            ship_date=date.fromisoformat(date_str),
-            payment_method_raw="V",
-            payment_method_last4="0804",
-            is_split_tender=False,
-            currency="USD",
-            item_subtotal=Decimal("50"),
-            tax=Decimal("0"),
-            shipping=Decimal("0"),
-            discounts=Decimal("0"),
-            total_amount=Decimal("50"),
-            items=[item],
-            shipment_status="Shipped",
-        )
-        txn = {
-            "id": txn_id,
-            "date": date_str,
-            "amount": -50000,
-            "payee_name": "Amazon",
-            "account_id": "acc",
-            "account_name": "Visa",
-        }
-        return (
-            CategoryResult(
-                transaction_id=txn_id,
-                category_id="cat",
-                category_name="G",
-                confidence=0.9,
-                rationale="t",
-                tier="amazon-single",
-            ),
-            MatchCandidate(ynab_txn=txn, shipment=ship, date_delta_days=0),
-        )
-
-    single_3, match_3 = make_single_with_match("txn-3", "2026-03-22")
-    single_1, match_1 = make_single_with_match("txn-1", "2026-03-20")
-    single_2, match_2 = make_single_with_match("txn-2", "2026-03-21")
-
-    match = MatchResult(
-        matched=[match_3, match_1, match_2],
-        unmatched_ynab=[],
-        unmatched_shipments=[],
-        excluded_shipments=[],
-        parse_errors=[],
-    )
-
-    payload = _build_json_payload(
-        match, [], [single_3, single_1, single_2], [], now=datetime(2026, 4, 21, 12, 0, 0)
-    )
-    assert len(payload["proposed_singles"]) == 3
-    assert payload["proposed_singles"][0]["transaction_id"] == "txn-1"
-    assert payload["proposed_singles"][1]["transaction_id"] == "txn-2"
-    assert payload["proposed_singles"][2]["transaction_id"] == "txn-3"
-
-
-def test_render_markdown_single_populated():
-    """_render_markdown renders single with transaction data in markdown."""
-    from amazon_matcher import _render_markdown
-    from pathlib import Path
-    from tempfile import TemporaryDirectory
-
-    payload = {
-        "version": 1,
-        "generated_at": "2026-04-21T12:00:00",
-        "summary": {
-            "proposed_splits": 0,
-            "proposed_singles": 1,
-            "unmatched_ynab": 0,
-            "unmatched_shipments": 0,
-            "excluded_shipments": 0,
-            "parse_errors": 0,
-        },
-        "proposed_splits": [],
-        "proposed_singles": [
-            {
-                "transaction_id": "txn-1",
-                "transaction": {
-                    "id": "txn-1",
-                    "date": "2026-03-22",
-                    "amount": -50000,
-                    "payee_name": "Amazon",
-                    "account_id": "acc-1",
-                    "account_name": "Visa",
-                },
-                "order_id": "111-1234567",
-                "category_id": "cat-1",
-                "category_name": "Groceries",
-                "confidence": 0.95,
-                "rationale": "test item",
-            }
-        ],
-        "unmatched_ynab": [],
-        "unmatched_shipments": [],
-        "excluded_shipments": [],
-        "parse_errors": [],
-    }
-
-    with TemporaryDirectory() as tmp:
-        json_path = Path(tmp) / "test.json"
-        md = _render_markdown(payload, json_path)
-
-        assert "## Proposed single categorizations (1)" in md
-        assert "2026-03-22" in md
-        assert "Visa" in md or "acc-1" in md
-        assert "$50.00" in md
-        assert "111-1234567" in md
-        assert "Groceries" in md
-        assert "0.95" in md
-        assert "test item" in md
 
 
 def test_render_markdown_dollar_formatting():
@@ -2767,82 +2531,6 @@ def test_write_amazon_changeset_logs_warning_on_missing_account_name(caplog):
             match,
             [proposal],
             [],
-            [],
-            account_name_lookup=None,
-            out_dir=Path(tmp),
-            now=datetime(2026, 4, 21, 12, 0, 0),
-        )
-
-    assert any("account_name" in record.message.lower() for record in caplog.records)
-
-
-def test_write_amazon_changeset_warns_on_singles_missing_account_name(caplog):
-    """write_amazon_changeset warns if single_result txn lacks account_name and no lookup."""
-    from amazon_matcher import write_amazon_changeset, MatchResult, MatchCandidate, AmazonShipment, AmazonItem
-    from categorizer import CategoryResult
-    from datetime import datetime, date
-    from decimal import Decimal
-    from pathlib import Path
-    import tempfile
-    import logging
-
-    caplog.set_level(logging.WARNING)
-
-    item = AmazonItem(
-        order_id="111",
-        ship_date=date(2026, 3, 22),
-        asin="B",
-        product_name="W",
-        quantity=1,
-        unit_price=Decimal("50"),
-        unit_price_tax=Decimal("0"),
-        raw_row_index=1,
-    )
-    ship = AmazonShipment(
-        order_id="111",
-        ship_date=date(2026, 3, 22),
-        payment_method_raw="V",
-        payment_method_last4="0804",
-        is_split_tender=False,
-        currency="USD",
-        item_subtotal=Decimal("50"),
-        tax=Decimal("0"),
-        shipping=Decimal("0"),
-        discounts=Decimal("0"),
-        total_amount=Decimal("50"),
-        items=[item],
-        shipment_status="Shipped",
-    )
-    ynab_txn = {
-        "id": "txn-1",
-        "amount": -50000,
-        "date": "2026-03-22",
-        "payee_name": "Amazon",
-        "account_id": "acc-1",
-    }
-    candidate = MatchCandidate(ynab_txn=ynab_txn, shipment=ship, date_delta_days=0)
-    single = CategoryResult(
-        transaction_id="txn-1",
-        category_id="cat-1",
-        category_name="Groceries",
-        confidence=0.9,
-        rationale="test",
-        tier="amazon-single",
-    )
-    match = MatchResult(
-        matched=[candidate],
-        unmatched_ynab=[],
-        unmatched_shipments=[],
-        excluded_shipments=[],
-        parse_errors=[]
-    )
-
-    with tempfile.TemporaryDirectory() as tmp:
-        md, j = write_amazon_changeset(
-            match,
-            [],
-            [single],
-            [],
             account_name_lookup=None,
             out_dir=Path(tmp),
             now=datetime(2026, 4, 21, 12, 0, 0),
@@ -2853,8 +2541,8 @@ def test_write_amazon_changeset_warns_on_singles_missing_account_name(caplog):
 
 def test_write_amazon_changeset_no_warning_when_all_have_account_name(caplog):
     """write_amazon_changeset doesn't warn if all txns have account_name."""
-    from amazon_matcher import write_amazon_changeset, MatchResult, MatchCandidate, AmazonShipment, AmazonItem
-    from categorizer import AmazonSplitProposal, ItemCategoryResult, CategoryResult
+    from amazon_matcher import write_amazon_changeset, MatchResult, AmazonShipment, AmazonItem
+    from categorizer import AmazonSplitProposal, ItemCategoryResult
     from datetime import datetime, date
     from decimal import Decimal
     from pathlib import Path
@@ -2910,7 +2598,7 @@ def test_write_amazon_changeset_no_warning_when_all_have_account_name(caplog):
         shipment=ship,
         subtransactions=[subtxn],
     )
-    single_txn = {
+    unmatched_txn = {
         "id": "txn-2",
         "amount": -50000,
         "date": "2026-03-22",
@@ -2918,38 +2606,13 @@ def test_write_amazon_changeset_no_warning_when_all_have_account_name(caplog):
         "account_id": "acc-2",
         "account_name": "Amazon Debit",
     }
-    single = CategoryResult(
-        transaction_id="txn-2",
-        category_id="cat-1",
-        category_name="Groceries",
-        confidence=0.9,
-        rationale="test",
-        tier="amazon-single",
-    )
-    ship2 = AmazonShipment(
-        order_id="222",
-        ship_date=date(2026, 3, 23),
-        payment_method_raw="D",
-        payment_method_last4="0805",
-        is_split_tender=False,
-        currency="USD",
-        item_subtotal=Decimal("50"),
-        tax=Decimal("0"),
-        shipping=Decimal("0"),
-        discounts=Decimal("0"),
-        total_amount=Decimal("50"),
-        items=[item],
-        shipment_status="Shipped",
-    )
-    candidate = MatchCandidate(ynab_txn=single_txn, shipment=ship2, date_delta_days=0)
-    match = MatchResult(matched=[candidate], unmatched_ynab=[], unmatched_shipments=[], excluded_shipments=[], parse_errors=[])
+    match = MatchResult(matched=[], unmatched_ynab=[], unmatched_shipments=[], excluded_shipments=[], parse_errors=[])
 
     with tempfile.TemporaryDirectory() as tmp:
         md, j = write_amazon_changeset(
             match,
             [proposal],
-            [single],
-            [],
+            [(unmatched_txn, "no matching shipment")],
             account_name_lookup=None,
             out_dir=Path(tmp),
             now=datetime(2026, 4, 21, 12, 0, 0),
@@ -2975,7 +2638,6 @@ def test_write_amazon_changeset_empty_result(tmp_path):
     md_path, json_path = write_amazon_changeset(
         match_result=match_result,
         split_proposals=[],
-        single_results=[],
         unmatched_amazon=[],
         out_dir=tmp_path,
         now=now
@@ -2983,13 +2645,13 @@ def test_write_amazon_changeset_empty_result(tmp_path):
 
     assert md_path.exists()
     assert json_path.exists()
-    assert md_path.read_text().count("## ") == 8
+    assert md_path.read_text().count("## ") == 7
     assert "| 0 |" in md_path.read_text()
 
     import json as json_mod
     data = json.loads(json_path.read_text())
     assert data["summary"]["proposed_splits"] == 0
-    assert data["summary"]["proposed_singles"] == 0
+    assert "proposed_singles" not in data["summary"]
 
 
 def test_write_amazon_changeset_filename_format(tmp_path):
@@ -3003,7 +2665,6 @@ def test_write_amazon_changeset_filename_format(tmp_path):
     md_path, json_path = write_amazon_changeset(
         match_result=match_result,
         split_proposals=[],
-        single_results=[],
         unmatched_amazon=[],
         out_dir=tmp_path,
         now=now
@@ -3106,12 +2767,9 @@ def test_it_changeset_full_pipeline(tmp_path, monkeypatch):
         amazon_matches=match_result,
     )
 
-    single_results = [r for r in results if r.tier == "amazon-single"]
-
     md_path, json_path = write_amazon_changeset(
         match_result=match_result,
         split_proposals=split_proposals,
-        single_results=single_results,
         unmatched_amazon=unmatched_amazon,
         out_dir=tmp_path,
         now=FIXED_NOW,
@@ -3124,17 +2782,19 @@ def test_it_changeset_full_pipeline(tmp_path, monkeypatch):
     assert "# Amazon Changeset — 2026-04-21 12:00:00" in md_content
     assert "## Summary" in md_content
     assert "## Proposed splits" in md_content
-    assert "## Proposed single categorizations" in md_content
     assert "## Unmatched YNAB Amazon transactions" in md_content
     assert "## Unmatched Amazon shipments" in md_content
     assert "## Excluded shipments" in md_content
     assert "## Parse errors" in md_content
     assert "## How to apply" in md_content
+    assert "## Proposed single categorizations" not in md_content
     assert "uv run python amazon_matcher.py --confirm" in md_content
 
     actual = json.loads(json_path.read_text())
     assert actual["version"] == 1
     assert actual["generated_at"] == "2026-04-21T12:00:00"
+    assert "proposed_singles" not in actual
+    assert "proposed_singles" not in actual["summary"]
 
     assert len(actual["proposed_splits"]) >= 1
     first_split = actual["proposed_splits"][0]
@@ -3151,10 +2811,8 @@ def test_it_changeset_full_pipeline(tmp_path, monkeypatch):
     assert actual == expected, (
         f"Changeset output does not match expected fixture.\n"
         f"Expected {len(expected.get('proposed_splits', []))} splits, "
-        f"{len(expected.get('proposed_singles', []))} singles, "
         f"{expected.get('summary', {}).get('unmatched_ynab', '?')} unmatched.\n"
         f"Actual {len(actual.get('proposed_splits', []))} splits, "
-        f"{len(actual.get('proposed_singles', []))} singles, "
         f"{actual.get('summary', {}).get('unmatched_ynab', '?')} unmatched."
     )
 
@@ -3262,44 +2920,6 @@ def test_build_json_payload_excluded_shipments_sorted():
     assert order_ids == ["111-0000001", "111-0000003"]
 
 
-def test_render_markdown_singles_uses_resolve_account_name():
-    """Singles markdown uses _resolve_account_name with lookup fallback."""
-    from amazon_matcher import _render_markdown
-    from datetime import datetime
-    from pathlib import Path
-    payload = {
-        "version": 1,
-        "generated_at": datetime(2026, 4, 21, 12, 0, 0),
-        "summary": {"proposed_splits": 0, "proposed_singles": 1, "unmatched_ynab": 0,
-                    "unmatched_shipments": 0, "excluded_shipments": 0, "parse_errors": 0},
-        "proposed_splits": [],
-        "proposed_singles": [
-            {
-                "transaction_id": "txn-1",
-                "transaction": {
-                    "id": "txn-1",
-                    "account_id": "account-visa-1",
-                    "date": "2024-01-15",
-                    "amount": -10000,
-                },
-                "order_id": "111-001",
-                "category_id": "cat-1",
-                "category_name": "Groceries",
-                "confidence": 0.9,
-                "rationale": "test",
-            }
-        ],
-        "unmatched_ynab": [],
-        "unmatched_shipments": [],
-        "excluded_shipments": [],
-        "parse_errors": [],
-    }
-    account_lookup = {"account-visa-1": "Amazon Visa"}
-    md = _render_markdown(payload, Path("test.json"), account_name_lookup=account_lookup)
-    assert "Amazon Visa" in md
-    assert "account-visa-1" not in md
-
-
 def test_validate_invariants_rejects_nan_in_total_amount():
     """_validate_invariants raises RuntimeError when allocated_amount is NaN."""
     from amazon_matcher import _validate_invariants
@@ -3314,7 +2934,7 @@ def test_validate_invariants_rejects_nan_in_total_amount():
     )
 
     with pytest.raises(RuntimeError, match="NaN|Infinity|Invalid"):
-        _validate_invariants([proposal], [], [])
+        _validate_invariants([proposal], [])
 
 
 def test_validate_invariants_rejects_infinity_in_allocated_amount():
@@ -3331,7 +2951,7 @@ def test_validate_invariants_rejects_infinity_in_allocated_amount():
     )
 
     with pytest.raises(RuntimeError, match="NaN|Infinity|Invalid"):
-        _validate_invariants([proposal], [], [])
+        _validate_invariants([proposal], [])
 
 
 def test_validate_invariants_accepts_zero():
@@ -3347,7 +2967,7 @@ def test_validate_invariants_accepts_zero():
         shipment=_stub_shipment(),
     )
 
-    _validate_invariants([proposal], [], [])
+    _validate_invariants([proposal], [])
 
 
 def test_render_markdown_parse_errors_truncated_at_50(tmp_path):
@@ -3370,7 +2990,6 @@ def test_render_markdown_parse_errors_truncated_at_50(tmp_path):
     md_path, json_path = write_amazon_changeset(
         match_result=match_result,
         split_proposals=[],
-        single_results=[],
         unmatched_amazon=[],
         out_dir=tmp_path,
         now=datetime(2026, 4, 21, 12, 0, 0)
@@ -3403,7 +3022,6 @@ def test_render_markdown_parse_errors_exactly_50_no_truncation(tmp_path):
     md_path, json_path = write_amazon_changeset(
         match_result=match_result,
         split_proposals=[],
-        single_results=[],
         unmatched_amazon=[],
         out_dir=tmp_path,
         now=datetime(2026, 4, 21, 12, 0, 0)
@@ -3435,7 +3053,6 @@ def test_render_markdown_parse_errors_51_shows_footer_with_1_more(tmp_path):
     md_path, json_path = write_amazon_changeset(
         match_result=match_result,
         split_proposals=[],
-        single_results=[],
         unmatched_amazon=[],
         out_dir=tmp_path,
         now=datetime(2026, 4, 21, 12, 0, 0)
@@ -3469,7 +3086,6 @@ def test_write_amazon_changeset_json_contains_all_parse_errors_when_truncated(tm
     md_path, json_path = write_amazon_changeset(
         match_result=match_result,
         split_proposals=[],
-        single_results=[],
         unmatched_amazon=[],
         out_dir=tmp_path,
         now=datetime(2026, 4, 21, 12, 0, 0)
@@ -3569,8 +3185,8 @@ def test_write_amazon_changeset_deterministic_split_order(tmp_path):
 
     match = MatchResult(matched=[], unmatched_ynab=[], unmatched_shipments=[], excluded_shipments=[], parse_errors=[])
 
-    md1, json1 = write_amazon_changeset(match, proposals_order1, [], [], out_dir=tmp_path, now=datetime(2026, 4, 21, 12, 0, 0))
-    md2, json2 = write_amazon_changeset(match, proposals_order2, [], [], out_dir=tmp_path, now=datetime(2026, 4, 21, 12, 0, 1))
+    md1, json1 = write_amazon_changeset(match, proposals_order1, [], out_dir=tmp_path, now=datetime(2026, 4, 21, 12, 0, 0))
+    md2, json2 = write_amazon_changeset(match, proposals_order2, [], out_dir=tmp_path, now=datetime(2026, 4, 21, 12, 0, 1))
 
     json_content1 = json.loads(json1.read_text())
     json_content2 = json.loads(json2.read_text())
@@ -3602,8 +3218,8 @@ def test_write_amazon_changeset_deterministic_unmatched_ynab_order(tmp_path):
 
     match = MatchResult(matched=[], unmatched_ynab=[], unmatched_shipments=[], excluded_shipments=[], parse_errors=[])
 
-    md1, json1 = write_amazon_changeset(match, [], [], unmatched1, out_dir=tmp_path, now=datetime(2026, 4, 21, 12, 0, 0))
-    md2, json2 = write_amazon_changeset(match, [], [], unmatched2, out_dir=tmp_path, now=datetime(2026, 4, 21, 12, 0, 1))
+    md1, json1 = write_amazon_changeset(match, [], unmatched1, out_dir=tmp_path, now=datetime(2026, 4, 21, 12, 0, 0))
+    md2, json2 = write_amazon_changeset(match, [], unmatched2, out_dir=tmp_path, now=datetime(2026, 4, 21, 12, 0, 1))
 
     json_content1 = json.loads(json1.read_text())
     json_content2 = json.loads(json2.read_text())
@@ -3680,7 +3296,6 @@ def test_render_markdown_contains_no_emoji_codepoints(tmp_path):
         match,
         [proposal],
         [],
-        [],
         out_dir=tmp_path,
         now=datetime(2026, 4, 21, 12, 0, 0),
     )
@@ -3747,7 +3362,6 @@ def test_write_amazon_changeset_files_contain_no_emoji_codepoints(tmp_path):
     md_path, json_path = write_amazon_changeset(
         match,
         [proposal],
-        [],
         [],
         out_dir=tmp_path,
         now=datetime(2026, 4, 21, 12, 0, 0),
@@ -3825,8 +3439,8 @@ def test_write_amazon_changeset_deterministic_excluded_order(tmp_path):
     match = MatchResult(matched=[], unmatched_ynab=[], unmatched_shipments=[], excluded_shipments=excluded1, parse_errors=[])
     match2 = MatchResult(matched=[], unmatched_ynab=[], unmatched_shipments=[], excluded_shipments=excluded2, parse_errors=[])
 
-    md1, json1 = write_amazon_changeset(match, [], [], [], out_dir=tmp_path, now=datetime(2026, 4, 21, 12, 0, 0))
-    md2, json2 = write_amazon_changeset(match2, [], [], [], out_dir=tmp_path, now=datetime(2026, 4, 21, 12, 0, 1))
+    md1, json1 = write_amazon_changeset(match, [], [], out_dir=tmp_path, now=datetime(2026, 4, 21, 12, 0, 0))
+    md2, json2 = write_amazon_changeset(match2, [], [], out_dir=tmp_path, now=datetime(2026, 4, 21, 12, 0, 1))
 
     json_content1 = json.loads(json1.read_text())
     json_content2 = json.loads(json2.read_text())
@@ -3985,7 +3599,7 @@ def test_validate_invariants_rejects_nan_in_shipment_total_amount_split():
     subtxn = _make_subtxn_104(allocated_amount=Decimal("10"))
     proposal = _make_split_proposal_104(parent_amount=-10000, subtxns=[subtxn], shipment=bad_ship)
     with pytest.raises(RuntimeError, match="NaN|Infinity|invalid"):
-        _validate_invariants([proposal], [], [])
+        _validate_invariants([proposal], [])
 
 
 def test_validate_invariants_rejects_infinity_in_item_unit_price():
@@ -3997,7 +3611,7 @@ def test_validate_invariants_rejects_infinity_in_item_unit_price():
     subtxn = _make_subtxn_104(allocated_amount=Decimal("10"), item=bad_item)
     proposal = _make_split_proposal_104(parent_amount=-10000, subtxns=[subtxn], shipment=ship)
     with pytest.raises(RuntimeError, match="NaN|Infinity|invalid"):
-        _validate_invariants([proposal], [], [])
+        _validate_invariants([proposal], [])
 
 
 def test_validate_invariants_rejects_nan_in_item_unit_price_tax():
@@ -4009,7 +3623,7 @@ def test_validate_invariants_rejects_nan_in_item_unit_price_tax():
     subtxn = _make_subtxn_104(allocated_amount=Decimal("10"), item=bad_item)
     proposal = _make_split_proposal_104(parent_amount=-10000, subtxns=[subtxn], shipment=ship)
     with pytest.raises(RuntimeError, match="NaN|Infinity|invalid"):
-        _validate_invariants([proposal], [], [])
+        _validate_invariants([proposal], [])
 
 
 def test_validate_invariants_rejects_nan_in_parent_ynab_amount():
@@ -4018,7 +3632,7 @@ def test_validate_invariants_rejects_nan_in_parent_ynab_amount():
     subtxn = _make_subtxn_104(allocated_amount=Decimal("10"))
     proposal = _make_split_proposal_104(parent_amount="NaN", subtxns=[subtxn])
     with pytest.raises(RuntimeError, match="NaN|Infinity|invalid"):
-        _validate_invariants([proposal], [], [])
+        _validate_invariants([proposal], [])
 
 
 def test_validate_invariants_rejects_nan_in_unmatched_shipment_total():
@@ -4032,7 +3646,7 @@ def test_validate_invariants_rejects_nan_in_unmatched_shipment_total():
         excluded_shipments=[], parse_errors=[],
     )
     with pytest.raises(RuntimeError, match="NaN|Infinity|invalid"):
-        _validate_invariants([], [], [], match_result=match_result)
+        _validate_invariants([], [], match_result=match_result)
 
 
 def test_validate_invariants_rejects_nan_in_excluded_shipment_total():
@@ -4047,7 +3661,7 @@ def test_validate_invariants_rejects_nan_in_excluded_shipment_total():
         parse_errors=[],
     )
     with pytest.raises(RuntimeError, match="NaN|Infinity|invalid"):
-        _validate_invariants([], [], [], match_result=match_result)
+        _validate_invariants([], [], match_result=match_result)
 
 
 def test_validate_invariants_accepts_valid_full_payload():
@@ -4065,99 +3679,6 @@ def test_validate_invariants_accepts_valid_full_payload():
         excluded_shipments=[(good_ship, "reason")],
         parse_errors=[],
     )
-    _validate_invariants([proposal], [], [], match_result=match_result)
+    _validate_invariants([proposal], [], match_result=match_result)
 
 
-def test_write_amazon_changeset_deterministic_single_order(tmp_path):
-    """write_amazon_changeset produces identical output with single_results in different order."""
-    from amazon_matcher import (
-        write_amazon_changeset, MatchResult, MatchCandidate,
-        AmazonShipment, AmazonItem,
-    )
-    from categorizer import CategoryResult
-    from datetime import datetime, date
-    import json as _json
-    import re as _re
-
-    def _make_shipment_for_single(order_id, ship_date):
-        return AmazonShipment(
-            order_id=order_id,
-            ship_date=ship_date,
-            payment_method_raw="V",
-            payment_method_last4="1111",
-            is_split_tender=False,
-            currency="USD",
-            item_subtotal=Decimal("15"),
-            tax=Decimal("0"),
-            shipping=Decimal("0"),
-            discounts=Decimal("0"),
-            total_amount=Decimal("15"),
-            items=[AmazonItem(
-                order_id=order_id, ship_date=ship_date,
-                asin="B0", product_name="Solo", quantity=1,
-                unit_price=Decimal("15"), unit_price_tax=Decimal("0"),
-                raw_row_index=1,
-            )],
-            shipment_status="Shipped",
-        )
-
-    txns = [
-        ({"id": "txn-3", "amount": -15000, "date": "2026-03-24",
-          "payee_name": "Amazon", "account_id": "acc-1", "account_name": "Checking"},
-         _make_shipment_for_single("111", date(2026, 3, 24))),
-        ({"id": "txn-1", "amount": -15000, "date": "2026-03-22",
-          "payee_name": "Amazon", "account_id": "acc-1", "account_name": "Checking"},
-         _make_shipment_for_single("222", date(2026, 3, 22))),
-        ({"id": "txn-2", "amount": -15000, "date": "2026-03-23",
-          "payee_name": "Amazon", "account_id": "acc-1", "account_name": "Checking"},
-         _make_shipment_for_single("333", date(2026, 3, 23))),
-    ]
-    candidates = [MatchCandidate(ynab_txn=t, shipment=s, date_delta_days=0) for t, s in txns]
-
-    def make_singles(ids):
-        return [
-            CategoryResult(
-                transaction_id=tid,
-                category_id="cat-1",
-                category_name="Groceries",
-                confidence=0.9,
-                rationale="test",
-                tier="amazon-single",
-            )
-            for tid in ids
-        ]
-
-    singles_order1 = make_singles(["txn-3", "txn-1", "txn-2"])
-    singles_order2 = list(reversed(singles_order1))
-
-    match_a = MatchResult(
-        matched=candidates, unmatched_ynab=[],
-        unmatched_shipments=[], excluded_shipments=[], parse_errors=[],
-    )
-    match_b = MatchResult(
-        matched=list(reversed(candidates)), unmatched_ynab=[],
-        unmatched_shipments=[], excluded_shipments=[], parse_errors=[],
-    )
-
-    md1, json1 = write_amazon_changeset(
-        match_a, [], singles_order1, [],
-        out_dir=tmp_path, now=datetime(2026, 4, 21, 12, 0, 0),
-    )
-    md2, json2 = write_amazon_changeset(
-        match_b, [], singles_order2, [],
-        out_dir=tmp_path, now=datetime(2026, 4, 21, 12, 0, 1),
-    )
-
-    json_content1 = _json.loads(json1.read_text())
-    json_content2 = _json.loads(json2.read_text())
-
-    assert json_content1["proposed_singles"] == json_content2["proposed_singles"]
-    assert [s["transaction_id"] for s in json_content1["proposed_singles"]] == ["txn-1", "txn-2", "txn-3"]
-
-    md_text1 = md1.read_text()
-    md_text2 = md2.read_text()
-    normalized1 = _re.sub(r"2026-04-21 \d{2}:\d{2}:\d{2}", "TIME", md_text1)
-    normalized1 = normalized1.replace(json1.name, "JSON")
-    normalized2 = _re.sub(r"2026-04-21 \d{2}:\d{2}:\d{2}", "TIME", md_text2)
-    normalized2 = normalized2.replace(json2.name, "JSON")
-    assert normalized1 == normalized2
