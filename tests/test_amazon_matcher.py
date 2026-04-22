@@ -3079,3 +3079,65 @@ def test_render_markdown_singles_uses_resolve_account_name():
     md = _render_markdown(payload, Path("test.json"), account_name_lookup=account_lookup)
     assert "Amazon Visa" in md
     assert "account-visa-1" not in md
+
+
+def test_validate_invariants_rejects_nan_in_total_amount():
+    """_validate_invariants raises RuntimeError when allocated_amount is NaN."""
+    from amazon_matcher import _validate_invariants
+    from types import SimpleNamespace
+
+    parent_txn = {"id": "txn-1", "amount": -10000}
+    subtxn = SimpleNamespace(allocated_amount=Decimal("NaN"))
+    proposal = SimpleNamespace(
+        parent_ynab_txn=parent_txn,
+        subtransactions=[subtxn]
+    )
+
+    with pytest.raises(RuntimeError, match="NaN|Infinity"):
+        _validate_invariants([proposal], [], [])
+
+
+def test_validate_invariants_rejects_infinity_in_allocated_amount():
+    """_validate_invariants raises RuntimeError when allocated_amount is Infinity."""
+    from amazon_matcher import _validate_invariants
+    from types import SimpleNamespace
+
+    parent_txn = {"id": "txn-1", "amount": -10000}
+    subtxn = SimpleNamespace(allocated_amount=Decimal("Infinity"))
+    proposal = SimpleNamespace(
+        parent_ynab_txn=parent_txn,
+        subtransactions=[subtxn]
+    )
+
+    with pytest.raises(RuntimeError, match="NaN|Infinity"):
+        _validate_invariants([proposal], [], [])
+
+
+def test_validate_invariants_rejects_nan_in_unmatched_shipment():
+    """_validate_invariants raises RuntimeError for unmatched shipment with NaN total."""
+    from amazon_matcher import _validate_invariants
+
+    unmatched = [
+        (
+            {"id": "txn-1", "account_id": "acct-1"},
+            Decimal("Infinity")
+        )
+    ]
+
+    with pytest.raises(RuntimeError, match="NaN|Infinity"):
+        _validate_invariants([], [], unmatched)
+
+
+def test_validate_invariants_accepts_zero():
+    """_validate_invariants accepts Decimal('0') — not NaN/Inf."""
+    from amazon_matcher import _validate_invariants
+    from types import SimpleNamespace
+
+    parent_txn = {"id": "txn-1", "amount": 0}
+    subtxn = SimpleNamespace(allocated_amount=Decimal("0"))
+    proposal = SimpleNamespace(
+        parent_ynab_txn=parent_txn,
+        subtransactions=[subtxn]
+    )
+
+    _validate_invariants([proposal], [], [])

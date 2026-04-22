@@ -859,6 +859,7 @@ def _validate_invariants(
     Checks:
     1. Each split proposal's allocated total equals parent YNAB amount
     2. No transaction ID appears in multiple buckets
+    3. No NaN or Infinity Decimals in monetary fields
 
     Args:
         split_proposals: list[AmazonSplitProposal]
@@ -869,6 +870,12 @@ def _validate_invariants(
         RuntimeError: If any invariant is violated
     """
     for proposal in split_proposals:
+        for subtxn in proposal.subtransactions:
+            if subtxn.allocated_amount.is_nan() or subtxn.allocated_amount.is_infinite():
+                raise RuntimeError(
+                    f"Invalid Decimal {subtxn.allocated_amount} in allocated_amount "
+                    f"for txn {proposal.parent_ynab_txn['id']}"
+                )
         parent_amt = abs(Decimal(proposal.parent_ynab_txn["amount"])) / Decimal(1000)
         total_allocated = sum(
             s.allocated_amount for s in proposal.subtransactions
@@ -878,6 +885,14 @@ def _validate_invariants(
                 f"Split proposal for txn {proposal.parent_ynab_txn['id']} "
                 f"allocates {total_allocated} but parent is {parent_amt}"
             )
+
+    for txn, total in unmatched_amazon:
+        if isinstance(total, Decimal):
+            if total.is_nan() or total.is_infinite():
+                raise RuntimeError(
+                    f"Invalid Decimal {total} in unmatched shipment total "
+                    f"for txn {txn['id']}"
+                )
 
     all_txn_ids = (
         {p.parent_ynab_txn["id"] for p in split_proposals}
