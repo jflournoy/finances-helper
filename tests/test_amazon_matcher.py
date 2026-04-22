@@ -3833,3 +3833,89 @@ def test_write_amazon_changeset_deterministic_excluded_order(tmp_path):
     normalized2 = re.sub(r"2026-04-21 \d{2}:\d{2}:\d{2}", "TIME", md_text2)
     normalized2 = normalized2.replace(json2.name, "JSON")
     assert normalized1 == normalized2
+
+
+def _make_shipment_105(order_id, ship_date, total_amount=Decimal("10"), status="Shipped", items=None):
+    """Helper for #105 tests — builds AmazonShipment with all required kwargs."""
+    from amazon_matcher import AmazonShipment
+    return AmazonShipment(
+        order_id=order_id,
+        ship_date=ship_date,
+        payment_method_raw="Visa ****1234",
+        payment_method_last4="1234",
+        is_split_tender=False,
+        currency="USD",
+        item_subtotal=total_amount,
+        tax=Decimal("0"),
+        shipping=Decimal("0"),
+        discounts=Decimal("0"),
+        total_amount=total_amount,
+        items=items or [],
+        shipment_status=status,
+    )
+
+
+def test_build_json_payload_unmatched_shipments_sort_none_ship_date():
+    """_build_json_payload does not crash when unmatched_shipments has None ship_date."""
+    from amazon_matcher import _build_json_payload, MatchResult
+    from datetime import date
+    ship_dated = _make_shipment_105("111-A", date(2024, 1, 1))
+    ship_none = _make_shipment_105("111-A", None, total_amount=Decimal("20"))
+    match_a = MatchResult(
+        matched=[], unmatched_ynab=[],
+        unmatched_shipments=[ship_dated, ship_none],
+        excluded_shipments=[], parse_errors=[],
+    )
+    match_b = MatchResult(
+        matched=[], unmatched_ynab=[],
+        unmatched_shipments=[ship_none, ship_dated],
+        excluded_shipments=[], parse_errors=[],
+    )
+    payload_a = _build_json_payload(match_a, [], [], [])
+    payload_b = _build_json_payload(match_b, [], [], [])
+    assert len(payload_a["unmatched_shipments"]) == 2
+    assert payload_a["unmatched_shipments"] == payload_b["unmatched_shipments"]
+
+
+def test_build_json_payload_excluded_shipments_sort_two_none_ship_dates():
+    """_build_json_payload does not crash on two excluded shipments both with None ship_date."""
+    from amazon_matcher import _build_json_payload, MatchResult
+    ship_none_1 = _make_shipment_105("111-A", None, total_amount=Decimal("10"))
+    ship_none_2 = _make_shipment_105("111-B", None, total_amount=Decimal("20"))
+    match_a = MatchResult(
+        matched=[], unmatched_ynab=[], unmatched_shipments=[],
+        excluded_shipments=[(ship_none_1, "missing ship date"), (ship_none_2, "missing ship date")],
+        parse_errors=[],
+    )
+    match_b = MatchResult(
+        matched=[], unmatched_ynab=[], unmatched_shipments=[],
+        excluded_shipments=[(ship_none_2, "missing ship date"), (ship_none_1, "missing ship date")],
+        parse_errors=[],
+    )
+    payload_a = _build_json_payload(match_a, [], [], [])
+    payload_b = _build_json_payload(match_b, [], [], [])
+    assert len(payload_a["excluded_shipments"]) == 2
+    assert payload_a["excluded_shipments"] == payload_b["excluded_shipments"]
+    order_ids = [e["shipment"]["order_id"] for e in payload_a["excluded_shipments"]]
+    assert order_ids == ["111-A", "111-B"]
+
+
+def test_build_json_payload_excluded_shipments_mixed_none_and_dated_same_order():
+    """_build_json_payload handles same-order shipments with mixed None/dated ship_date deterministically."""
+    from amazon_matcher import _build_json_payload, MatchResult
+    from datetime import date
+    ship_dated = _make_shipment_105("111-A", date(2024, 1, 1), total_amount=Decimal("10"))
+    ship_none = _make_shipment_105("111-A", None, total_amount=Decimal("20"))
+    match_a = MatchResult(
+        matched=[], unmatched_ynab=[], unmatched_shipments=[],
+        excluded_shipments=[(ship_dated, "reason X"), (ship_none, "reason X")],
+        parse_errors=[],
+    )
+    match_b = MatchResult(
+        matched=[], unmatched_ynab=[], unmatched_shipments=[],
+        excluded_shipments=[(ship_none, "reason X"), (ship_dated, "reason X")],
+        parse_errors=[],
+    )
+    payload_a = _build_json_payload(match_a, [], [], [])
+    payload_b = _build_json_payload(match_b, [], [], [])
+    assert payload_a["excluded_shipments"] == payload_b["excluded_shipments"]

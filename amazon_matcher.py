@@ -1031,7 +1031,7 @@ def _build_json_payload(
             "reason": reason,
         })
 
-    for shipment in sorted(match_result.unmatched_shipments, key=lambda s: (s.order_id, s.ship_date)):
+    for shipment in sorted(match_result.unmatched_shipments, key=lambda s: (s.order_id, s.ship_date is None, s.ship_date or date.min)):
         payload["unmatched_shipments"].append({
             "order_id": shipment.order_id,
             "ship_date": shipment.ship_date,
@@ -1040,7 +1040,7 @@ def _build_json_payload(
             "item_count": len(shipment.items),
         })
 
-    for shipment, reason in sorted(match_result.excluded_shipments, key=lambda x: (x[0].order_id, x[0].ship_date)):
+    for shipment, reason in sorted(match_result.excluded_shipments, key=lambda x: (x[0].order_id, x[0].ship_date is None, x[0].ship_date or date.min)):
         payload["excluded_shipments"].append({
             "shipment": {
                 "order_id": shipment.order_id,
