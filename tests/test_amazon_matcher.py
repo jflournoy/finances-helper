@@ -3339,3 +3339,132 @@ def test_validate_invariants_accepts_zero():
     )
 
     _validate_invariants([proposal], [], [])
+
+
+def test_render_markdown_parse_errors_truncated_at_50(tmp_path):
+    """_render_markdown truncates parse_errors at 50 with footer in markdown."""
+    from amazon_matcher import write_amazon_changeset, MatchResult, ParseError
+    from datetime import datetime
+
+    parse_errors = [
+        ParseError(row_index=i, reason=f"Error {i}")
+        for i in range(75)
+    ]
+    match_result = MatchResult(
+        matched=[],
+        unmatched_ynab=[],
+        unmatched_shipments=[],
+        excluded_shipments=[],
+        parse_errors=parse_errors
+    )
+
+    md_path, json_path = write_amazon_changeset(
+        match_result=match_result,
+        split_proposals=[],
+        single_results=[],
+        unmatched_amazon=[],
+        out_dir=tmp_path,
+        now=datetime(2026, 4, 21, 12, 0, 0)
+    )
+
+    md = md_path.read_text()
+    error_bullet_count = md.count("- row ")
+    assert error_bullet_count == 50, f"Expected 50 error bullets, got {error_bullet_count}"
+    assert "... and 25 more parse errors" in md
+    assert "See JSON for full list" in md
+
+
+def test_render_markdown_parse_errors_exactly_50_no_truncation(tmp_path):
+    """_render_markdown shows all 50 without footer when exactly 50."""
+    from amazon_matcher import write_amazon_changeset, MatchResult, ParseError
+    from datetime import datetime
+
+    parse_errors = [
+        ParseError(row_index=i, reason=f"Error {i}")
+        for i in range(50)
+    ]
+    match_result = MatchResult(
+        matched=[],
+        unmatched_ynab=[],
+        unmatched_shipments=[],
+        excluded_shipments=[],
+        parse_errors=parse_errors
+    )
+
+    md_path, json_path = write_amazon_changeset(
+        match_result=match_result,
+        split_proposals=[],
+        single_results=[],
+        unmatched_amazon=[],
+        out_dir=tmp_path,
+        now=datetime(2026, 4, 21, 12, 0, 0)
+    )
+
+    md = md_path.read_text()
+    error_bullet_count = md.count("- row ")
+    assert error_bullet_count == 50
+    assert "... and" not in md
+
+
+def test_render_markdown_parse_errors_51_shows_footer_with_1_more(tmp_path):
+    """_render_markdown shows footer with '1 more' when 51 errors."""
+    from amazon_matcher import write_amazon_changeset, MatchResult, ParseError
+    from datetime import datetime
+
+    parse_errors = [
+        ParseError(row_index=i, reason=f"Error {i}")
+        for i in range(51)
+    ]
+    match_result = MatchResult(
+        matched=[],
+        unmatched_ynab=[],
+        unmatched_shipments=[],
+        excluded_shipments=[],
+        parse_errors=parse_errors
+    )
+
+    md_path, json_path = write_amazon_changeset(
+        match_result=match_result,
+        split_proposals=[],
+        single_results=[],
+        unmatched_amazon=[],
+        out_dir=tmp_path,
+        now=datetime(2026, 4, 21, 12, 0, 0)
+    )
+
+    md = md_path.read_text()
+    error_bullet_count = md.count("- row ")
+    assert error_bullet_count == 50
+    assert "... and 1 more parse error" in md
+
+
+def test_write_amazon_changeset_json_contains_all_parse_errors_when_truncated(tmp_path):
+    """write_amazon_changeset JSON contains all parse_errors even when markdown truncates."""
+    from amazon_matcher import write_amazon_changeset, MatchResult, ParseError
+    from datetime import datetime
+    from pathlib import Path
+    import json
+
+    parse_errors = [
+        ParseError(row_index=i, reason=f"Error {i}")
+        for i in range(75)
+    ]
+    match_result = MatchResult(
+        matched=[],
+        unmatched_ynab=[],
+        unmatched_shipments=[],
+        excluded_shipments=[],
+        parse_errors=parse_errors
+    )
+
+    md_path, json_path = write_amazon_changeset(
+        match_result=match_result,
+        split_proposals=[],
+        single_results=[],
+        unmatched_amazon=[],
+        out_dir=tmp_path,
+        now=datetime(2026, 4, 21, 12, 0, 0)
+    )
+
+    data = json.loads(json_path.read_text())
+    assert len(data["parse_errors"]) == 75
