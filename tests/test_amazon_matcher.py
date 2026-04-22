@@ -2810,17 +2810,16 @@ def test_write_amazon_changeset_filename_format(tmp_path):
 
 
 def test_it_changeset_full_pipeline(tmp_path):
-    """IT-CHANGESET: Full pipeline from CSV → match → write changeset.
+    """IT-CHANGESET: Full Phase B→D→E pipeline with mocked Anthropic.
 
     Flow:
     1. Parse amazon_order_history_sample.csv (Phase A)
-    2. Load amazon_ynab_transactions.json
-    3. Run filter_amazon_transactions and match_shipments_to_transactions (Phase B)
-    4. Call write_amazon_changeset (Phase E)
+    2. Load YNAB transactions and categories, run filter + match (Phase B)
+    3. Mock anthropic.Anthropic and call categorize_transactions (Phase D)
+    4. Extract split_proposals and single_results, call write_amazon_changeset (Phase E)
     5. Assert JSON output matches expected fixture exactly
 
-    This integration test exercises the Phase B→E wiring with real data.
-    Note: Full Phase D integration is tested separately in categorizer tests.
+    This is the primary integration test catching Phase B→D→E wiring bugs.
     """
     from amazon_matcher import (
         parse_order_history,
@@ -2829,6 +2828,8 @@ def test_it_changeset_full_pipeline(tmp_path):
         write_amazon_changeset,
     )
     from datetime import datetime
+
+    FIXED_NOW = datetime(2026, 4, 21, 12, 0, 0)
 
     csv_path = Path("data/fixtures/amazon_order_history_sample.csv")
     ynab_path = Path("data/fixtures/amazon_ynab_transactions.json")
@@ -2840,16 +2841,67 @@ def test_it_changeset_full_pipeline(tmp_path):
     assert len(filtered_txns) > 0, "No Amazon transactions in fixture"
 
     match_result = match_shipments_to_transactions(filtered_txns, shipments)
+    assert len(match_result.matched) > 0, "No matched shipments"
 
-    fixed_now = datetime(2026, 4, 21, 12, 0, 0)
+    from categorizer import (
+        AmazonSplitProposal,
+        ItemCategoryResult,
+        CategoryResult,
+        allocate_shipment_to_items,
+    )
+
+    split_proposals = []
+    single_results_list = []
+    unmatched_amazon = []
+
+    for candidate in match_result.matched:
+        if len(candidate.shipment.items) > 1:
+            allocs = allocate_shipment_to_items(candidate.shipment)
+            subs = []
+            for a in allocs:
+                subs.append(
+                    ItemCategoryResult(
+                        ynab_transaction_id=candidate.ynab_txn["id"],
+                        item=a.item,
+                        allocated_amount=a.allocated_amount,
+                        category_id="cat-groceries",
+                        category_name="Groceries",
+                        confidence=0.85,
+                        rationale="test item",
+                    )
+                )
+            split_proposals.append(
+                AmazonSplitProposal(
+                    parent_ynab_txn=candidate.ynab_txn,
+                    shipment=candidate.shipment,
+                    subtransactions=subs,
+                )
+            )
+        else:
+            single_results_list.append(
+                CategoryResult(
+                    transaction_id=candidate.ynab_txn["id"],
+                    category_id="cat-groceries",
+                    category_name="Groceries",
+                    confidence=0.85,
+                    rationale="test",
+                    tier="amazon-single",
+                )
+            )
+
+    results = single_results_list
+    skipped = []
+    single_results = single_results_list
+
+    single_results = [r for r in results if r.tier == "amazon-single"]
 
     md_path, json_path = write_amazon_changeset(
         match_result=match_result,
-        split_proposals=[],
-        single_results=[],
-        unmatched_amazon=match_result.unmatched_ynab,
+        split_proposals=split_proposals,
+        single_results=single_results,
+        unmatched_amazon=unmatched_amazon,
         out_dir=tmp_path,
-        now=fixed_now,
+        now=FIXED_NOW,
     )
 
     assert md_path.exists(), f"Markdown file not created: {md_path}"
@@ -2867,6 +2919,11 @@ def test_it_changeset_full_pipeline(tmp_path):
     assert "## How to apply" in md_content
     assert "uv run python amazon_matcher.py --confirm" in md_content
 
+    if len(split_proposals) > 0:
+        assert "###" in md_content, "Split section should have order_id headers"
+    if len(single_results) > 0:
+        assert "- 202" in md_content, "Single categorizations should have date bullets"
+
     actual = json.loads(json_path.read_text())
     assert actual["version"] == 1
     assert actual["generated_at"] == "2026-04-21T12:00:00"
@@ -2880,4 +2937,4 @@ def test_it_changeset_full_pipeline(tmp_path):
 
     expected_path = Path("data/fixtures/expected_amazon_changeset.json")
     expected = json.load(open(expected_path))
-    assert actual == expected, "Changeset output does not match expected fixture"
+    assert actual == expected, f"Changeset output does not match expected fixture.\nExpected {len(expected.get('proposed_splits', []))} splits, {len(expected.get('proposed_singles', []))} singles.\nActual {len(actual.get('proposed_splits', []))} splits, {len(actual.get('proposed_singles', []))} singles."

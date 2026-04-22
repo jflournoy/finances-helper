@@ -2,19 +2,18 @@
   "version": 1,
   "generated_at": "2026-04-21T12:00:00",
   "summary": {
-    "proposed_splits": 0,
-    "proposed_singles": 0,
-    "unmatched_ynab": 3,
+    "proposed_splits": 3,
+    "proposed_singles": 3,
+    "unmatched_ynab": 0,
     "unmatched_shipments": 0,
     "excluded_shipments": 4,
     "parse_errors": 0
   },
-  "proposed_splits": [],
-  "proposed_singles": [],
-  "unmatched_ynab": [
+  "proposed_splits": [
     {
-      "transaction": {
-        "id": "txn-003",
+      "parent_ynab_transaction_id": "txn-010",
+      "parent_ynab_transaction": {
+        "id": "txn-010",
         "account_id": "account-visa-3",
         "date": "2024-01-17",
         "payee_id": null,
@@ -22,45 +21,307 @@
         "category_id": null,
         "cleared": "uncleared",
         "approved": true,
-        "amount": -14200,
-        "memo": "No matching shipment ($14.20)",
+        "amount": -37710,
+        "memo": "Order 111-0000003 (3-item shipment, $37.71)",
         "account_name": "Account 3"
       },
-      "reason": "no matching shipment in dump"
-    },
-    {
-      "transaction": {
-        "id": "txn-004",
-        "account_id": "account-visa-4",
-        "date": "2024-01-17",
-        "payee_id": null,
-        "payee_name": "AMZN Mktp US",
-        "category_id": null,
-        "cleared": "uncleared",
-        "approved": true,
-        "amount": -17410,
-        "memo": "No matching shipment ($17.41)",
-        "account_name": "Account 4"
+      "shipment": {
+        "order_id": "111-0000003-0000003",
+        "ship_date": "2024-01-18",
+        "payment_method_last4": "2401",
+        "total_amount": "37.71",
+        "item_count": 3
       },
-      "reason": "no matching shipment in dump"
+      "subtransactions": [
+        {
+          "item": {
+            "order_id": "111-0000003-0000003",
+            "ship_date": "2024-01-18",
+            "asin": "B0C3234567",
+            "product_name": "Test Tool",
+            "quantity": 1,
+            "unit_price": "9.99",
+            "unit_price_tax": "0.70",
+            "raw_row_index": 4
+          },
+          "allocated_amount": "11.78",
+          "category_id": "cat-groceries",
+          "category_name": "Groceries",
+          "confidence": 0.85,
+          "rationale": "test item"
+        },
+        {
+          "item": {
+            "order_id": "111-0000003-0000003",
+            "ship_date": "2024-01-18",
+            "asin": "B0C3334567",
+            "product_name": "Test Gadget",
+            "quantity": 1,
+            "unit_price": "12.99",
+            "unit_price_tax": "0.91",
+            "raw_row_index": 5
+          },
+          "allocated_amount": "15.32",
+          "category_id": "cat-groceries",
+          "category_name": "Groceries",
+          "confidence": 0.85,
+          "rationale": "test item"
+        },
+        {
+          "item": {
+            "order_id": "111-0000003-0000003",
+            "ship_date": "2024-01-18",
+            "asin": "B0C3434567",
+            "product_name": "Test Item",
+            "quantity": 1,
+            "unit_price": "8.99",
+            "unit_price_tax": "0.63",
+            "raw_row_index": 6
+          },
+          "allocated_amount": "10.61",
+          "category_id": "cat-groceries",
+          "category_name": "Groceries",
+          "confidence": 0.85,
+          "rationale": "test item"
+        }
+      ]
     },
     {
-      "transaction": {
-        "id": "txn-005",
+      "parent_ynab_transaction_id": "txn-011",
+      "parent_ynab_transaction": {
+        "id": "txn-011",
         "account_id": "account-visa-1",
-        "date": "2024-02-15",
+        "date": "2024-01-24",
         "payee_id": null,
         "payee_name": "Amazon.com",
         "category_id": null,
         "cleared": "uncleared",
         "approved": true,
-        "amount": -54710,
-        "memo": "Date too far from matching shipment ($54.71)",
+        "amount": -82480,
+        "memo": "Order 111-0000010 (5-item shipment, $82.48)",
         "account_name": "Account 1"
       },
-      "reason": "no matching shipment in dump"
+      "shipment": {
+        "order_id": "111-0000010-0000010",
+        "ship_date": "2024-01-25",
+        "payment_method_last4": "8901",
+        "total_amount": "82.48",
+        "item_count": 5
+      },
+      "subtransactions": [
+        {
+          "item": {
+            "order_id": "111-0000010-0000010",
+            "ship_date": "2024-01-25",
+            "asin": "B0C0234567",
+            "product_name": "Test Product",
+            "quantity": 1,
+            "unit_price": "25.00",
+            "unit_price_tax": "1.75",
+            "raw_row_index": 13
+          },
+          "allocated_amount": "28.84",
+          "category_id": "cat-groceries",
+          "category_name": "Groceries",
+          "confidence": 0.85,
+          "rationale": "test item"
+        },
+        {
+          "item": {
+            "order_id": "111-0000010-0000010",
+            "ship_date": "2024-01-25",
+            "asin": "B0C0334567",
+            "product_name": "Test Widget",
+            "quantity": 1,
+            "unit_price": "15.00",
+            "unit_price_tax": "1.05",
+            "raw_row_index": 14
+          },
+          "allocated_amount": "17.31",
+          "category_id": "cat-groceries",
+          "category_name": "Groceries",
+          "confidence": 0.85,
+          "rationale": "test item"
+        },
+        {
+          "item": {
+            "order_id": "111-0000010-0000010",
+            "ship_date": "2024-01-25",
+            "asin": "B0C0434567",
+            "product_name": "Test Gadget",
+            "quantity": 1,
+            "unit_price": "10.00",
+            "unit_price_tax": "0.70",
+            "raw_row_index": 15
+          },
+          "allocated_amount": "11.54",
+          "category_id": "cat-groceries",
+          "category_name": "Groceries",
+          "confidence": 0.85,
+          "rationale": "test item"
+        },
+        {
+          "item": {
+            "order_id": "111-0000010-0000010",
+            "ship_date": "2024-01-25",
+            "asin": "B0C0534567",
+            "product_name": "Test Item",
+            "quantity": 1,
+            "unit_price": "8.99",
+            "unit_price_tax": "0.63",
+            "raw_row_index": 16
+          },
+          "allocated_amount": "10.37",
+          "category_id": "cat-groceries",
+          "category_name": "Groceries",
+          "confidence": 0.85,
+          "rationale": "test item"
+        },
+        {
+          "item": {
+            "order_id": "111-0000010-0000010",
+            "ship_date": "2024-01-25",
+            "asin": "B0C0634567",
+            "product_name": "Test Tool",
+            "quantity": 1,
+            "unit_price": "12.50",
+            "unit_price_tax": "0.88",
+            "raw_row_index": 17
+          },
+          "allocated_amount": "14.42",
+          "category_id": "cat-groceries",
+          "category_name": "Groceries",
+          "confidence": 0.85,
+          "rationale": "test item"
+        }
+      ]
+    },
+    {
+      "parent_ynab_transaction_id": "txn-012",
+      "parent_ynab_transaction": {
+        "id": "txn-012",
+        "account_id": "account-visa-3",
+        "date": "2024-02-07",
+        "payee_id": null,
+        "payee_name": "AMZN Mktp US",
+        "category_id": null,
+        "cleared": "uncleared",
+        "approved": true,
+        "amount": -42800,
+        "memo": "Order 111-0000023 (2-item shipment, $42.80)",
+        "account_name": "Account 3"
+      },
+      "shipment": {
+        "order_id": "111-0000023-0000023",
+        "ship_date": "2024-02-07",
+        "payment_method_last4": "3456",
+        "total_amount": "42.80",
+        "item_count": 2
+      },
+      "subtransactions": [
+        {
+          "item": {
+            "order_id": "111-0000023-0000023",
+            "ship_date": "2024-02-07",
+            "asin": "B0CTEST001",
+            "product_name": "Test Item A",
+            "quantity": 1,
+            "unit_price": "18.00",
+            "unit_price_tax": "1.40",
+            "raw_row_index": 32
+          },
+          "allocated_amount": "19.26",
+          "category_id": "cat-groceries",
+          "category_name": "Groceries",
+          "confidence": 0.85,
+          "rationale": "test item"
+        },
+        {
+          "item": {
+            "order_id": "111-0000023-0000023",
+            "ship_date": "2024-02-07",
+            "asin": "B0CTEST002",
+            "product_name": "Test Item B",
+            "quantity": 1,
+            "unit_price": "22.00",
+            "unit_price_tax": "1.40",
+            "raw_row_index": 33
+          },
+          "allocated_amount": "23.54",
+          "category_id": "cat-groceries",
+          "category_name": "Groceries",
+          "confidence": 0.85,
+          "rationale": "test item"
+        }
+      ]
     }
   ],
+  "proposed_singles": [
+    {
+      "transaction_id": "txn-001",
+      "transaction": {
+        "id": "txn-001",
+        "account_id": "account-visa-1",
+        "date": "2024-01-15",
+        "payee_id": null,
+        "payee_name": "Amazon.com",
+        "category_id": null,
+        "cleared": "uncleared",
+        "approved": true,
+        "amount": -37090,
+        "memo": "Order 111-0000001 ($37.09)",
+        "account_name": "Account 1"
+      },
+      "order_id": "111-0000001-0000001",
+      "category_id": "cat-groceries",
+      "category_name": "Groceries",
+      "confidence": 0.85,
+      "rationale": "test"
+    },
+    {
+      "transaction_id": "txn-002",
+      "transaction": {
+        "id": "txn-002",
+        "account_id": "account-visa-2",
+        "date": "2024-01-16",
+        "payee_id": null,
+        "payee_name": "Amazon.com",
+        "category_id": null,
+        "cleared": "uncleared",
+        "approved": true,
+        "amount": -48120,
+        "memo": "Order 111-0000002 ($48.12)",
+        "account_name": "Account 2"
+      },
+      "order_id": "111-0000002-0000002",
+      "category_id": "cat-groceries",
+      "category_name": "Groceries",
+      "confidence": 0.85,
+      "rationale": "test"
+    },
+    {
+      "transaction_id": "txn-008",
+      "transaction": {
+        "id": "txn-008",
+        "account_id": "account-unknown",
+        "date": "2024-02-04",
+        "payee_id": null,
+        "payee_name": "Amazon.com",
+        "category_id": null,
+        "cleared": "uncleared",
+        "approved": true,
+        "amount": -12830,
+        "memo": "Unknown account",
+        "account_name": "Account n"
+      },
+      "order_id": "111-0000020-0000020",
+      "category_id": "cat-groceries",
+      "category_name": "Groceries",
+      "confidence": 0.85,
+      "rationale": "test"
+    }
+  ],
+  "unmatched_ynab": [],
   "unmatched_shipments": [],
   "excluded_shipments": [
     {
