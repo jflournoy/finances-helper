@@ -2034,9 +2034,9 @@ def test_md_escape_pipe():
 
 
 def test_md_escape_newline():
-    """_md_escape removes newlines."""
+    """_md_escape replaces newlines with space and removes carriage returns."""
     from amazon_matcher import _md_escape
-    assert _md_escape("foo\nbar") == "foobar"
+    assert _md_escape("foo\nbar") == "foo bar"
     assert _md_escape("foo\rbar") == "foobar"
 
 
@@ -2049,7 +2049,7 @@ def test_md_escape_whitespace():
 def test_md_escape_combined():
     """_md_escape handles combined escape cases."""
     from amazon_matcher import _md_escape
-    assert _md_escape("  foo|bar\nbaz  ") == "foo\\|barbaz"
+    assert _md_escape("  foo|bar\nbaz  ") == "foo\\|bar baz"
 
 
 def test_next_free_path_no_collision():
@@ -2938,3 +2938,144 @@ def test_it_changeset_full_pipeline(tmp_path):
     expected_path = Path("data/fixtures/expected_amazon_changeset.json")
     expected = json.load(open(expected_path))
     assert actual == expected, f"Changeset output does not match expected fixture.\nExpected {len(expected.get('proposed_splits', []))} splits, {len(expected.get('proposed_singles', []))} singles.\nActual {len(actual.get('proposed_splits', []))} splits, {len(actual.get('proposed_singles', []))} singles."
+
+
+def test_md_escape_newline_becomes_space():
+    """_md_escape replaces \\n with space (spec: replace \\n with space, not empty string)."""
+    from amazon_matcher import _md_escape
+    assert _md_escape("foo\nbar") == "foo bar"
+    assert _md_escape("a\nb\nc") == "a b c"
+
+
+def test_render_markdown_none_ship_date():
+    """Excluded shipments with ship_date=None render as '?' not literal 'None'."""
+    from amazon_matcher import _render_markdown
+    from datetime import datetime
+    payload = {
+        "version": 1,
+        "generated_at": datetime(2026, 4, 21, 12, 0, 0),
+        "summary": {"proposed_splits": 0, "proposed_singles": 0, "unmatched_ynab": 0,
+                    "unmatched_shipments": 0, "excluded_shipments": 1, "parse_errors": 0},
+        "proposed_splits": [],
+        "proposed_singles": [],
+        "unmatched_ynab": [],
+        "unmatched_shipments": [],
+        "excluded_shipments": [
+            {
+                "shipment": {
+                    "order_id": "111-0000006-0000006",
+                    "ship_date": None,
+                    "payment_method_last4": "1234",
+                    "total_amount": "21.39",
+                    "item_count": 1,
+                },
+                "reason": "missing ship date",
+            }
+        ],
+        "parse_errors": [],
+    }
+    md = _render_markdown(payload, Path("test.json"))
+    assert "111-0000006-0000006 | ? |" in md
+    assert "| None |" not in md
+
+
+def test_build_json_payload_unmatched_shipments_sorted():
+    """unmatched_shipments are sorted by (order_id, ship_date)."""
+    from amazon_matcher import _build_json_payload, MatchResult, AmazonShipment
+    from datetime import date
+    from decimal import Decimal
+    ship1 = AmazonShipment(
+        order_id="111-0000003", ship_date=date(2024, 1, 18), payment_method_raw="Visa ****3333",
+        payment_method_last4="3333", is_split_tender=False, currency="USD",
+        item_subtotal=Decimal("20"), tax=Decimal("1"), shipping=Decimal("0"),
+        discounts=Decimal("0"), total_amount=Decimal("21"), items=[], shipment_status="Shipped",
+    )
+    ship2 = AmazonShipment(
+        order_id="111-0000001", ship_date=date(2024, 1, 16), payment_method_raw="Visa ****1111",
+        payment_method_last4="1111", is_split_tender=False, currency="USD",
+        item_subtotal=Decimal("20"), tax=Decimal("1"), shipping=Decimal("0"),
+        discounts=Decimal("0"), total_amount=Decimal("21"), items=[], shipment_status="Shipped",
+    )
+    ship3 = AmazonShipment(
+        order_id="111-0000002", ship_date=date(2024, 1, 17), payment_method_raw="Visa ****2222",
+        payment_method_last4="2222", is_split_tender=False, currency="USD",
+        item_subtotal=Decimal("20"), tax=Decimal("1"), shipping=Decimal("0"),
+        discounts=Decimal("0"), total_amount=Decimal("21"), items=[], shipment_status="Shipped",
+    )
+    match_result = MatchResult(
+        matched=[],
+        unmatched_ynab=[],
+        unmatched_shipments=[ship1, ship2, ship3],
+        excluded_shipments=[],
+        parse_errors=[],
+    )
+    payload = _build_json_payload(match_result, [], [], [])
+    order_ids = [s["order_id"] for s in payload["unmatched_shipments"]]
+    assert order_ids == ["111-0000001", "111-0000002", "111-0000003"]
+
+
+def test_build_json_payload_excluded_shipments_sorted():
+    """excluded_shipments are sorted by (order_id, ship_date)."""
+    from amazon_matcher import _build_json_payload, MatchResult, AmazonShipment
+    from datetime import date
+    from decimal import Decimal
+    ship1 = AmazonShipment(
+        order_id="111-0000003", ship_date=date(2024, 1, 18), payment_method_raw="Visa ****3333",
+        payment_method_last4="3333", is_split_tender=False, currency="USD",
+        item_subtotal=Decimal("20"), tax=Decimal("1"), shipping=Decimal("0"),
+        discounts=Decimal("0"), total_amount=Decimal("21"), items=[], shipment_status="Shipped",
+    )
+    ship2 = AmazonShipment(
+        order_id="111-0000001", ship_date=date(2024, 1, 16), payment_method_raw="Visa ****1111",
+        payment_method_last4="1111", is_split_tender=False, currency="USD",
+        item_subtotal=Decimal("20"), tax=Decimal("1"), shipping=Decimal("0"),
+        discounts=Decimal("0"), total_amount=Decimal("21"), items=[], shipment_status="Shipped",
+    )
+    match_result = MatchResult(
+        matched=[],
+        unmatched_ynab=[],
+        unmatched_shipments=[],
+        excluded_shipments=[(ship1, "reason Z"), (ship2, "reason A")],
+        parse_errors=[],
+    )
+    payload = _build_json_payload(match_result, [], [], [])
+    order_ids = [s["shipment"]["order_id"] for s in payload["excluded_shipments"]]
+    assert order_ids == ["111-0000001", "111-0000003"]
+
+
+def test_render_markdown_singles_uses_resolve_account_name():
+    """Singles markdown uses _resolve_account_name with lookup fallback."""
+    from amazon_matcher import _render_markdown
+    from datetime import datetime
+    from pathlib import Path
+    payload = {
+        "version": 1,
+        "generated_at": datetime(2026, 4, 21, 12, 0, 0),
+        "summary": {"proposed_splits": 0, "proposed_singles": 1, "unmatched_ynab": 0,
+                    "unmatched_shipments": 0, "excluded_shipments": 0, "parse_errors": 0},
+        "proposed_splits": [],
+        "proposed_singles": [
+            {
+                "transaction_id": "txn-1",
+                "transaction": {
+                    "id": "txn-1",
+                    "account_id": "account-visa-1",
+                    "date": "2024-01-15",
+                    "amount": -10000,
+                },
+                "order_id": "111-001",
+                "category_id": "cat-1",
+                "category_name": "Groceries",
+                "confidence": 0.9,
+                "rationale": "test",
+            }
+        ],
+        "unmatched_ynab": [],
+        "unmatched_shipments": [],
+        "excluded_shipments": [],
+        "parse_errors": [],
+    }
+    account_lookup = {"account-visa-1": "Amazon Visa"}
+    md = _render_markdown(payload, Path("test.json"), account_name_lookup=account_lookup)
+    assert "Amazon Visa" in md
+    assert "account-visa-1" not in md

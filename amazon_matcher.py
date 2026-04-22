@@ -805,7 +805,8 @@ def _md_escape(s: str) -> str:
 
     Replaces:
     - Pipe `|` with `\\|`
-    - Newlines/carriage returns with nothing (strip)
+    - Newlines with space
+    - Carriage returns with nothing (strip)
     - Strips leading/trailing whitespace
 
     Args:
@@ -816,7 +817,7 @@ def _md_escape(s: str) -> str:
     """
     if not s:
         return s
-    s = s.replace("|", "\\|").replace("\n", "").replace("\r", "")
+    s = s.replace("|", "\\|").replace("\n", " ").replace("\r", "")
     return s.strip()
 
 
@@ -1015,7 +1016,7 @@ def _build_json_payload(
             "reason": reason,
         })
 
-    for shipment in match_result.unmatched_shipments:
+    for shipment in sorted(match_result.unmatched_shipments, key=lambda s: (s.order_id, s.ship_date)):
         payload["unmatched_shipments"].append({
             "order_id": shipment.order_id,
             "ship_date": shipment.ship_date,
@@ -1024,7 +1025,7 @@ def _build_json_payload(
             "item_count": len(shipment.items),
         })
 
-    for shipment, reason in match_result.excluded_shipments:
+    for shipment, reason in sorted(match_result.excluded_shipments, key=lambda x: (x[0].order_id, x[0].ship_date)):
         payload["excluded_shipments"].append({
             "shipment": {
                 "order_id": shipment.order_id,
@@ -1111,7 +1112,7 @@ def _render_markdown(
     for single in payload["proposed_singles"]:
         txn = single["transaction"]
         date = txn.get("date", "?")
-        account = txn.get("account_name", txn.get("account_id", "?"))
+        account, _ = _resolve_account_name(txn, account_name_lookup)
         amount = abs(Decimal(str(txn.get("amount", 0)))) / Decimal(1000)
         cat = single["category_name"] or "?"
         conf = single["confidence"]
@@ -1143,7 +1144,7 @@ def _render_markdown(
     md += "These are Amazon shipments in the dump with no matching YNAB charge. Usually means YNAB hasn't synced recently or the transaction is in a closed account.\n\n"
     for ship in payload["unmatched_shipments"]:
         order_id = ship["order_id"]
-        ship_date = ship["ship_date"]
+        ship_date = ship["ship_date"] or "?"
         amount = Decimal(str(ship["total_amount"]))
         last4 = ship["payment_method_last4"] or "?????"
         md += f"- {order_id} | {ship_date} | ${amount:.2f} | last-4: {last4}\n"
@@ -1163,7 +1164,8 @@ def _render_markdown(
         md += f"### {escaped_reason} ({len(ships)})\n"
         for ship in ships:
             amount = Decimal(str(ship["total_amount"]))
-            md += f"- {ship['order_id']} | {ship['ship_date']} | ${amount:.2f}\n"
+            ship_date = ship["ship_date"] or "?"
+            md += f"- {ship['order_id']} | {ship_date} | ${amount:.2f}\n"
         md += "\n"
 
     md += f"## Parse errors ({summary['parse_errors']})\n\n"
@@ -1246,9 +1248,6 @@ def write_amazon_changeset(
         if not proposal.parent_ynab_txn.get("account_name") and not account_name_lookup:
             warn_account_name = True
             break
-    if not warn_account_name:
-        for single in single_results:
-            pass
     if not warn_account_name:
         for txn, _ in unmatched_amazon:
             if not txn.get("account_name") and not account_name_lookup:
