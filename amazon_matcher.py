@@ -1293,3 +1293,75 @@ def write_amazon_changeset(
     md_path.write_text(markdown)
 
     return md_path, json_path
+
+
+def main(argv: list[str] | None = None) -> int:
+    """CLI entry point for Amazon order matching."""
+    import argparse
+    import os
+    from dotenv import load_dotenv
+
+    parser = argparse.ArgumentParser(
+        description="Match Amazon orders to YNAB transactions and propose item-level splits"
+    )
+    validate_group = parser.add_mutually_exclusive_group()
+    validate_group.add_argument("--days", type=int, help="Days back to fetch YNAB transactions")
+    validate_group.add_argument(
+        "--validate-dump", type=Path, metavar="PATH",
+        help="Validate dump file schema (Phase G, not yet implemented)"
+    )
+    parser.add_argument("--dump", type=Path, help="Override auto-detected dump path")
+    parser.add_argument("--out-dir", type=Path, default=Path("data/cache"), help="Changeset output dir")
+
+    args = parser.parse_args(argv)
+
+    if args.validate_dump:
+        print("--validate-dump not yet implemented (Phase G, issue #54)")
+        return 2
+
+    if args.days is None:
+        parser.error("--days is required unless --validate-dump is provided")
+
+    load_dotenv()
+
+    ynab_token = os.getenv("YNAB_API_TOKEN")
+    if not ynab_token:
+        raise ValueError("YNAB_API_TOKEN not set. Add it to .env (see README).")
+
+    anthropic_key = os.getenv("ANTHROPIC_API_KEY")
+    if not anthropic_key:
+        raise ValueError("ANTHROPIC_API_KEY not set. Add it to .env (see README).")
+
+    # Only check config after env vars (fail early on env)
+    config_path = Path("config.json")
+    if not config_path.exists():
+        raise ValueError(
+            "config.json not found. See CLAUDE_project-spec.md for required schema."
+        )
+    config = json.loads(config_path.read_text())
+
+    budget_id = config.get("budget_id")
+    if not budget_id:
+        raise ValueError("budget_id not found in config.json")
+
+    if "amazon" not in config:
+        raise ValueError(
+            "config.json missing 'amazon' section. "
+            "Required keys: account_last4 (dict, may be empty). "
+            "See CLAUDE_project-spec.md."
+        )
+    amazon_cfg = config["amazon"]
+    if "account_last4" not in amazon_cfg:
+        raise ValueError(
+            "config.json amazon section missing 'account_last4'. "
+            "Provide a dict mapping YNAB account IDs to last-4 card digits (may be empty)."
+        )
+    date_window_days = amazon_cfg.get("date_window_days", 3)
+
+    # Pipeline continues in F-2...
+    return 0
+
+
+if __name__ == "__main__":
+    import sys
+    sys.exit(main())

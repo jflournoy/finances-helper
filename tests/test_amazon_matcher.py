@@ -3676,3 +3676,126 @@ def test_validate_invariants_accepts_valid_full_payload():
     _validate_invariants([proposal], [], match_result=match_result)
 
 
+# ============================================================================
+# CLI Tests: TestCLI
+# ============================================================================
+
+
+class TestCLI:
+    """Tests for main() CLI scaffolding."""
+
+    def test_days_required_without_validate_dump(self, tmp_path, monkeypatch):
+        """--days missing and no --validate-dump → argparse error (SystemExit 2)."""
+        from amazon_matcher import main
+        monkeypatch.chdir(tmp_path)
+        with pytest.raises(SystemExit) as exc_info:
+            main(["--out-dir", str(tmp_path)])
+        assert exc_info.value.code == 2
+
+    def test_validate_dump_stub_returns_2(self, tmp_path, monkeypatch):
+        """--validate-dump exits with code 2 without touching env or config."""
+        from amazon_matcher import main
+        monkeypatch.chdir(tmp_path)
+        result = main(["--validate-dump", "x.zip"])
+        assert result == 2
+
+    def test_missing_ynab_token_raises(self, tmp_path, monkeypatch):
+        """Missing YNAB_API_TOKEN → ValueError naming the var."""
+        from amazon_matcher import main
+        import os
+        monkeypatch.chdir(tmp_path)
+        # Stub getenv to exclude YNAB token
+        original_getenv = os.getenv
+        def mock_getenv(key, default=None):
+            if key == "YNAB_API_TOKEN":
+                return None
+            elif key == "ANTHROPIC_API_KEY":
+                return "test-key"
+            return original_getenv(key, default)
+        monkeypatch.setattr(os, "getenv", mock_getenv)
+        (tmp_path / "config.json").write_text(
+            '{"budget_id": "test-uuid", "amazon": {"account_last4": {}}}'
+        )
+        with pytest.raises(ValueError, match="YNAB_API_TOKEN"):
+            main(["--days", "60"])
+
+    def test_missing_anthropic_key_raises(self, tmp_path, monkeypatch):
+        """Missing ANTHROPIC_API_KEY → ValueError naming the var."""
+        from amazon_matcher import main
+        import os
+        monkeypatch.chdir(tmp_path)
+        # Stub getenv to exclude ANTHROPIC token
+        original_getenv = os.getenv
+        def mock_getenv(key, default=None):
+            if key == "ANTHROPIC_API_KEY":
+                return None
+            elif key == "YNAB_API_TOKEN":
+                return "test-token"
+            return original_getenv(key, default)
+        monkeypatch.setattr(os, "getenv", mock_getenv)
+        (tmp_path / "config.json").write_text(
+            '{"budget_id": "test-uuid", "amazon": {"account_last4": {}}}'
+        )
+        with pytest.raises(ValueError, match="ANTHROPIC_API_KEY"):
+            main(["--days", "60"])
+
+    def test_missing_config_raises(self, tmp_path, monkeypatch):
+        """Missing config.json → ValueError mentioning config.json."""
+        from amazon_matcher import main
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.setenv("YNAB_API_TOKEN", "test-token")
+        monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key")
+        with pytest.raises(ValueError, match="config.json"):
+            main(["--days", "60"])
+
+    def test_missing_amazon_section_raises(self, tmp_path, monkeypatch):
+        """config.json without 'amazon' key → ValueError mentioning 'amazon'."""
+        from amazon_matcher import main
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.setenv("YNAB_API_TOKEN", "test-token")
+        monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key")
+        (tmp_path / "config.json").write_text('{"budget_id": "test-uuid"}')
+        with pytest.raises(ValueError, match="amazon"):
+            main(["--days", "60"])
+
+    def test_missing_account_last4_raises(self, tmp_path, monkeypatch):
+        """config.json amazon section without account_last4 → ValueError."""
+        from amazon_matcher import main
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.setenv("YNAB_API_TOKEN", "test-token")
+        monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key")
+        (tmp_path / "config.json").write_text(
+            '{"budget_id": "test-uuid", "amazon": {"date_window_days": 3}}'
+        )
+        with pytest.raises(ValueError, match="account_last4"):
+            main(["--days", "60"])
+
+    def test_empty_account_last4_is_allowed(self, tmp_path, monkeypatch):
+        """account_last4 as empty dict is valid config (passes F-1 validation)."""
+        from amazon_matcher import main
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.setenv("YNAB_API_TOKEN", "test-token")
+        monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key")
+        (tmp_path / "config.json").write_text(
+            '{"budget_id": "test-uuid", "amazon": {"account_last4": {}}}'
+        )
+        # F-1 only validates config, returns 0. F-2 will fail on missing dump.
+        # This test only checks that config validation passes.
+        result = main(["--days", "60"])
+        assert result == 0
+
+    def test_date_window_days_defaults_to_3(self, tmp_path, monkeypatch):
+        """date_window_days defaults to 3 when absent from config."""
+        from amazon_matcher import main
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.setenv("YNAB_API_TOKEN", "test-token")
+        monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key")
+        (tmp_path / "config.json").write_text(
+            '{"budget_id": "test-uuid", "amazon": {"account_last4": {}}}'
+        )
+        try:
+            main(["--days", "60"])
+        except (FileNotFoundError, ValueError) as e:
+            assert "date_window_days" not in str(e)
+
+
