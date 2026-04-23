@@ -2320,9 +2320,7 @@ def test_render_markdown_dollar_formatting():
         "generated_at": "2026-04-21T12:00:00",
         "summary": {
             "proposed_splits": 1,
-            "proposed_singles": 0,
             "unmatched_ynab": 0,
-            "unmatched_shipments": 1,
             "unmatched_shipments": 1,
             "excluded_shipments": 1,
             "parse_errors": 0,
@@ -2357,7 +2355,6 @@ def test_render_markdown_dollar_formatting():
                 ],
             }
         ],
-        "proposed_singles": [],
         "unmatched_ynab": [],
         "unmatched_shipments": [
             {
@@ -2403,7 +2400,6 @@ def test_render_markdown_escapes_user_strings():
         "generated_at": "2026-04-21T12:00:00",
         "summary": {
             "proposed_splits": 1,
-            "proposed_singles": 0,
             "unmatched_ynab": 1,
             "unmatched_shipments": 0,
             "excluded_shipments": 0,
@@ -2438,7 +2434,6 @@ def test_render_markdown_escapes_user_strings():
                 ],
             }
         ],
-        "proposed_singles": [],
         "unmatched_ynab": [
             {
                 "transaction": {
@@ -2831,10 +2826,9 @@ def test_render_markdown_none_ship_date():
     payload = {
         "version": 1,
         "generated_at": datetime(2026, 4, 21, 12, 0, 0),
-        "summary": {"proposed_splits": 0, "proposed_singles": 0, "unmatched_ynab": 0,
+        "summary": {"proposed_splits": 0, "unmatched_ynab": 0,
                     "unmatched_shipments": 0, "excluded_shipments": 1, "parse_errors": 0},
         "proposed_splits": [],
-        "proposed_singles": [],
         "unmatched_ynab": [],
         "unmatched_shipments": [],
         "excluded_shipments": [
