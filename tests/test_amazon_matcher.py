@@ -3771,7 +3771,7 @@ class TestCLI:
             main(["--days", "60"])
 
     def test_empty_account_last4_is_allowed(self, tmp_path, monkeypatch):
-        """account_last4 as empty dict is valid config (passes F-1 validation)."""
+        """account_last4 as empty dict is valid config (passes validation)."""
         from amazon_matcher import main
         monkeypatch.chdir(tmp_path)
         monkeypatch.setenv("YNAB_API_TOKEN", "test-token")
@@ -3779,10 +3779,9 @@ class TestCLI:
         (tmp_path / "config.json").write_text(
             '{"budget_id": "test-uuid", "amazon": {"account_last4": {}}}'
         )
-        # F-1 only validates config, returns 0. F-2 will fail on missing dump.
-        # This test only checks that config validation passes.
-        result = main(["--days", "60"])
-        assert result == 0
+        # Config validation passes, but dump is missing, so FileNotFoundError is expected
+        with pytest.raises(FileNotFoundError, match="No Amazon dump"):
+            main(["--days", "60"])
 
     def test_date_window_days_defaults_to_3(self, tmp_path, monkeypatch):
         """date_window_days defaults to 3 when absent from config."""
@@ -3797,5 +3796,77 @@ class TestCLI:
             main(["--days", "60"])
         except (FileNotFoundError, ValueError) as e:
             assert "date_window_days" not in str(e)
+
+    def test_it_cli_full_pipeline(self, tmp_path, monkeypatch, capsys):
+        """IT-CLI: Full pipeline with mocked YNAB and Anthropic."""
+        import sys
+        from zipfile import ZipFile
+        from datetime import datetime, timedelta
+        import categorizer as _categorizer_mod
+        import ynab_client as _ynab_mod
+        from amazon_matcher import main
+
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.setenv("YNAB_API_TOKEN", "test-token")
+        monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key")
+
+        (tmp_path / "config.json").write_text(json.dumps({
+            "budget_id": "budget-uuid-test",
+            "amazon": {"account_last4": {"acct-1": "0804"}, "date_window_days": 3}
+        }))
+
+        imports_dir = tmp_path / "data" / "imports"
+        imports_dir.mkdir(parents=True)
+        fixtures_dir = Path(__file__).parent.parent / "data" / "fixtures"
+        csv_content = (fixtures_dir / "amazon_order_history_sample.csv").read_text()
+        dump_path = imports_dir / "amazon-order-history-2026-04-13.zip"
+        with ZipFile(dump_path, "w") as zf:
+            zf.writestr("Your Amazon Orders/Order History.csv", csv_content)
+
+        (tmp_path / "data" / "cache").mkdir(parents=True)
+
+        ynab_txns = json.loads((fixtures_dir / "amazon_ynab_transactions.json").read_text())
+        categories_data = json.loads((fixtures_dir / "ynab_categories.json").read_text())
+        categories = categories_data["data"]["category_groups"]
+        accounts = [{"id": "acct-1", "name": "Amazon Visa 0804"}]
+
+        get_transactions_calls = []
+        def mock_get_transactions(self, budget_id, since_date=None):
+            get_transactions_calls.append(since_date)
+            return ynab_txns, None
+        def mock_get_categories(self, budget_id):
+            return categories
+        def mock_get_accounts(self, budget_id):
+            return accounts
+
+        monkeypatch.setattr(_ynab_mod.YNABClient, "get_transactions", mock_get_transactions)
+        monkeypatch.setattr(_ynab_mod.YNABClient, "get_categories", mock_get_categories)
+        monkeypatch.setattr(_ynab_mod.YNABClient, "get_accounts", mock_get_accounts)
+
+        monkeypatch.setattr(_categorizer_mod.anthropic, "Anthropic", _ITChangesetAnthropicMock)
+
+        out_dir = tmp_path / "out"
+        out_dir.mkdir()
+
+        result = main(["--days", "60", "--out-dir", str(out_dir)])
+        assert result == 0
+
+        changeset_files = list(out_dir.glob("amazon-changeset-*.json"))
+        assert len(changeset_files) == 1
+        md_files = list(out_dir.glob("amazon-changeset-*.md"))
+        assert len(md_files) == 1
+
+        changeset = json.loads(changeset_files[0].read_text())
+        assert changeset["version"] == 1
+        assert "proposed_splits" in changeset
+
+        captured = capsys.readouterr()
+        assert "Amazon categorization run complete" in captured.out
+        assert "YNAB txns:" in captured.out
+        assert "Shipments:" in captured.out
+        assert "Changeset:" in captured.out
+
+        expected_since = (datetime.now() - timedelta(days=60)).strftime("%Y-%m-%d")
+        assert expected_since in get_transactions_calls
 
 

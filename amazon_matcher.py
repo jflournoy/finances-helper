@@ -1295,6 +1295,60 @@ def write_amazon_changeset(
     return md_path, json_path
 
 
+def _print_summary(
+    *,
+    dump_path: Path,
+    since_date: str,
+    args_days: int,
+    filtered: list,
+    shipments: list,
+    parse_errors_list: list,
+    K: int,
+    confidence_threshold: float,
+    match_result,
+    split_proposals: list,
+    unmatched_amazon: list,
+    md_path: Path,
+    json_path: Path,
+) -> None:
+    """Print human-readable run summary."""
+    n_matched = len(match_result.matched)
+    n_unmatched_shipments = len(match_result.unmatched_shipments)
+    n_unmatched_ynab = len(unmatched_amazon)
+    n_excluded = len(match_result.excluded_shipments)
+    n_multi = sum(1 for sp in split_proposals if len(sp.subtransactions) > 1)
+    n_single = sum(1 for sp in split_proposals if len(sp.subtransactions) == 1)
+
+    print()
+    print("Amazon categorization run complete.")
+    print()
+    print(f"Dump:           {dump_path}")
+    print(
+        f"YNAB txns:      {len(filtered)} Amazon transactions "
+        f"in last {args_days} days (since {since_date})"
+    )
+    print(
+        f"Shipments:      {len(shipments)} in dump "
+        f"({len(parse_errors_list)} parse errors, {n_excluded} excluded)"
+    )
+    print()
+    print(
+        f"K:              {K} categories (last 18mo); "
+        f"confidence threshold: {confidence_threshold:.4f}"
+    )
+    print(f"Matches:        {n_matched} shipments → YNAB")
+    print(f"Splits:         {n_multi} multi-item, {n_single} single-item proposed")
+    print(
+        f"Unmatched:      {n_unmatched_ynab} YNAB txns; "
+        f"{n_unmatched_shipments} shipments (see changeset)"
+    )
+    print()
+    print(f"Changeset:      {md_path}")
+    print(f"                {json_path}")
+    print()
+    print("Review the markdown file before running confirm.")
+
+
 def main(argv: list[str] | None = None) -> int:
     """CLI entry point for Amazon order matching."""
     import argparse
@@ -1358,7 +1412,113 @@ def main(argv: list[str] | None = None) -> int:
         )
     date_window_days = amazon_cfg.get("date_window_days", 3)
 
-    # Pipeline continues in F-2...
+    from ynab_client import YNABClient
+    from categorizer import (
+        count_categories_from_transactions, count_categories,
+        compute_confidence_threshold, filter_categories_by_usage,
+        load_payee_cache, build_cache_from_transactions, save_payee_cache,
+        record_categorization, categorize_transactions,
+    )
+
+    if args.dump:
+        dump_path = args.dump
+    else:
+        try:
+            dump_path = find_latest_dump()
+        except FileNotFoundError:
+            raise FileNotFoundError(
+                "No Amazon dump found in data/imports/. "
+                "Expected: amazon-order-history-YYYY-MM-DD.zip"
+            )
+    print(f"Using dump: {dump_path}")
+
+    csv_text = extract_order_history_csv(dump_path)
+    shipments, parse_errors_list = parse_order_history(csv_text)
+    print(f"Parsed {len(shipments)} shipments ({len(parse_errors_list)} parse errors)")
+
+    client = YNABClient(token=ynab_token)
+    since_date = (datetime.now() - timedelta(days=args.days)).strftime("%Y-%m-%d")
+    txns, _ = client.get_transactions(budget_id, since_date=since_date)
+
+    filtered = filter_amazon_transactions(txns)
+    print(f"Found {len(filtered)} uncategorized Amazon transactions since {since_date}")
+
+    categories = client.get_categories(budget_id)
+    accounts = client.get_accounts(budget_id)
+    account_name_lookup = {a["id"]: a["name"] for a in accounts}
+
+    k_since = (datetime.now() - timedelta(days=548)).strftime("%Y-%m-%d")
+    k_txns, _ = client.get_transactions(budget_id, since_date=k_since)
+    K = count_categories_from_transactions(k_txns)
+    if K < 2:
+        K = count_categories(categories)
+    confidence_threshold = compute_confidence_threshold(K)
+    recent_categories = filter_categories_by_usage(categories, k_txns)
+
+    match_result = match_shipments_to_transactions(
+        filtered, shipments,
+        parse_errors=parse_errors_list,
+        date_window_days=date_window_days,
+    )
+
+    cache = load_payee_cache()
+    if not cache:
+        print("Cache empty — bootstrapping from YNAB history...")
+        all_txns, _ = client.get_transactions(budget_id)
+        cache = build_cache_from_transactions(all_txns)
+        if sum(1 for k in cache if k != "_version") > 0:
+            save_payee_cache(cache)
+    elif cache.get("_migrated_from_v1"):
+        print("Cache migrated from v1 — rebuilding...")
+        all_txns, _ = client.get_transactions(budget_id)
+        cache = build_cache_from_transactions(all_txns)
+        save_payee_cache(cache)
+
+    results, skipped, unmatched_amazon, split_proposals = categorize_transactions(
+        filtered, cache, recent_categories, anthropic_key,
+        K=K, confidence_threshold=confidence_threshold,
+        amazon_matches=match_result,
+    )
+
+    md_path, json_path = write_amazon_changeset(
+        match_result, split_proposals, unmatched_amazon,
+        account_name_lookup=account_name_lookup,
+        out_dir=args.out_dir,
+    )
+
+    for result in results:
+        if result.tier == "claude":
+            txn = next((t for t in filtered if t["id"] == result.transaction_id), None)
+            if txn:
+                import_names = [
+                    txn[f] for f in ("import_payee_name", "import_payee_name_original")
+                    if txn.get(f)
+                ]
+                record_categorization(
+                    cache, txn["payee_name"],
+                    result.category_id, result.category_name,
+                    source="claude",
+                    prior_strength=result.prior_strength or 1,
+                    import_names=import_names or None,
+                )
+    save_payee_cache(cache)
+
+    _print_summary(
+        dump_path=dump_path,
+        since_date=since_date,
+        args_days=args.days,
+        filtered=filtered,
+        shipments=shipments,
+        parse_errors_list=parse_errors_list,
+        K=K,
+        confidence_threshold=confidence_threshold,
+        match_result=match_result,
+        split_proposals=split_proposals,
+        unmatched_amazon=unmatched_amazon,
+        md_path=md_path,
+        json_path=json_path,
+    )
+
     return 0
 
 
