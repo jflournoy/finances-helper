@@ -154,5 +154,19 @@
     "amount": -42800,
     "memo": "Order 111-0000023 (2-item shipment, $42.80)",
     "account_name": "Account 3"
+  },
+  {
+    "id": "txn-grocery-001",
+    "account_id": "account-visa-1",
+    "date": "2024-02-08",
+    "payee_id": null,
+    "payee_name": "Whole Foods Market",
+    "category_id": "dddddddd-0000-0000-0000-000000000003",
+    "category_name": "Groceries",
+    "cleared": "cleared",
+    "approved": true,
+    "amount": -52340,
+    "memo": "Weekly groceries",
+    "account_name": "Account 1"
   }
 ]
