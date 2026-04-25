@@ -1295,6 +1295,19 @@ def write_amazon_changeset(
     return md_path, json_path
 
 
+SUMMARY_LABEL_WIDTH = 16
+
+
+def _fmt_summary_row(label: str, value: str) -> str:
+    if len(label) > SUMMARY_LABEL_WIDTH:
+        raise ValueError(
+            f"Summary label {label!r} ({len(label)} chars) exceeds "
+            f"SUMMARY_LABEL_WIDTH={SUMMARY_LABEL_WIDTH}. "
+            f"Shorten the label or bump the constant."
+        )
+    return f"{label:<{SUMMARY_LABEL_WIDTH}}{value}"
+
+
 def _print_summary(
     *,
     dump_path: Path,
@@ -1322,29 +1335,32 @@ def _print_summary(
     print()
     print("Amazon categorization run complete.")
     print()
-    print(f"Dump:           {dump_path}")
-    print(
-        f"YNAB txns:      {len(filtered)} Amazon transactions "
-        f"in last {args_days} days (since {since_date})"
-    )
-    print(
-        f"Shipments:      {len(shipments)} in dump "
-        f"({len(parse_errors_list)} parse errors, {n_excluded} excluded)"
-    )
+    print(_fmt_summary_row("Dump:", str(dump_path)))
+    print(_fmt_summary_row(
+        "YNAB txns:",
+        f"{len(filtered)} Amazon transactions in last {args_days} days (since {since_date})",
+    ))
+    print(_fmt_summary_row(
+        "Shipments:",
+        f"{len(shipments)} in dump ({len(parse_errors_list)} parse errors, {n_excluded} excluded)",
+    ))
     print()
-    print(
-        f"K:              {K} categories (last 18mo); "
-        f"confidence threshold: {confidence_threshold:.4f}"
-    )
-    print(f"Matches:        {n_matched} shipments → YNAB")
-    print(f"Splits:         {n_multi} multi-item, {n_single} single-item proposed")
-    print(
-        f"Unmatched:      {n_unmatched_ynab} YNAB txns; "
-        f"{n_unmatched_shipments} shipments (see changeset)"
-    )
+    print(_fmt_summary_row(
+        "K:",
+        f"{K} categories (last 18mo); confidence threshold: {confidence_threshold:.4f}",
+    ))
+    print(_fmt_summary_row("Matches:", f"{n_matched} shipments → YNAB"))
+    print(_fmt_summary_row(
+        "Splits:",
+        f"{n_multi} multi-item, {n_single} single-item proposed",
+    ))
+    print(_fmt_summary_row(
+        "Unmatched:",
+        f"{n_unmatched_ynab} YNAB txns; {n_unmatched_shipments} shipments (see changeset)",
+    ))
     print()
-    print(f"Changeset:      {md_path}")
-    print(f"                {json_path}")
+    print(_fmt_summary_row("Changeset:", str(md_path)))
+    print(_fmt_summary_row("", str(json_path)))
     print()
     print("Review the markdown file before running confirm.")
 

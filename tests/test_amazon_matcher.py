@@ -3918,4 +3918,15 @@ class TestCLI:
         assert "amazon-changeset-20260413-153022.json" in out
         assert "Review the markdown file" in out
 
+    def test_fmt_summary_row_rejects_oversized_label(self):
+        """Labels longer than SUMMARY_LABEL_WIDTH raise ValueError with actionable message."""
+        from amazon_matcher import _fmt_summary_row, SUMMARY_LABEL_WIDTH
+        too_long = "X" * (SUMMARY_LABEL_WIDTH + 1)
+        with pytest.raises(ValueError) as exc_info:
+            _fmt_summary_row(too_long, "value")
+        msg = str(exc_info.value)
+        assert too_long in msg
+        assert str(SUMMARY_LABEL_WIDTH) in msg
+        assert "Shorten" in msg or "bump" in msg
+
 
