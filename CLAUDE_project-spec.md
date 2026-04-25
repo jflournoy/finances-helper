@@ -82,6 +82,42 @@ Typical Amazon purchases should map to categories like:
 - Pet supplies → [your category name]
 - Health / personal care → [your category name]
 
+## `config.json` Schema
+
+The `config.json` file is gitignored — each user creates their own.
+
+### Base fields (required by all tools)
+
+```json
+{
+  "budget_id": "your-ynab-budget-uuid"
+}
+```
+
+### `amazon` section (required for `amazon_matcher.py`)
+
+```json
+{
+  "budget_id": "your-budget-uuid",
+  "amazon": {
+    "account_last4": {
+      "ynab-account-uuid-1": "0804",
+      "ynab-account-uuid-2": "3719"
+    },
+    "date_window_days": 3
+  }
+}
+```
+
+| Key | Required | Default | Purpose |
+|---|---|---|---|
+| `amazon.account_last4` | Yes (may be empty `{}`) | — | Maps YNAB account IDs to last 4 digits of the card. **Currently informational only** — the matcher does not consume this for matching. Reserved for future disambiguation logic. |
+| `amazon.date_window_days` | No | `3` | Days of slack between Amazon ship date and YNAB transaction date for matching. |
+
+`payee_patterns` was considered but is not implemented — `is_amazon_payee()` uses hardcoded patterns. This is a future enhancement.
+
+Absent `amazon` section → `amazon_matcher.py` raises `ValueError`. Other tools (`categorizer.py`) ignore the section.
+
 ## Categorization Strategy (Token Efficient)
 Categorization runs three tiers before touching the Claude API:
 1. **History lookup** — payees seen before are resolved from a local cache of your transaction history. Free.

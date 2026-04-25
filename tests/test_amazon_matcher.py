@@ -3869,4 +3869,53 @@ class TestCLI:
         expected_since = (datetime.now() - timedelta(days=60)).strftime("%Y-%m-%d")
         assert expected_since in get_transactions_calls
 
+    def test_print_summary_format(self, capsys):
+        """_print_summary output contains all required metric lines."""
+        from amazon_matcher import _print_summary
+        from unittest.mock import MagicMock
+        from pathlib import Path
+
+        match_result = MagicMock()
+        match_result.matched = [MagicMock()] * 5
+        match_result.excluded_shipments = [MagicMock()] * 2
+        match_result.unmatched_shipments = [MagicMock()] * 3
+
+        multi = MagicMock()
+        multi.subtransactions = [MagicMock(), MagicMock()]
+        single = MagicMock()
+        single.subtransactions = [MagicMock()]
+
+        _print_summary(
+            dump_path=Path("data/imports/amazon-order-history-2026-04-13.zip"),
+            since_date="2026-02-13",
+            args_days=60,
+            filtered=[MagicMock()] * 10,
+            shipments=[MagicMock()] * 15,
+            parse_errors_list=[MagicMock()],
+            K=312,
+            confidence_threshold=0.0096,
+            match_result=match_result,
+            split_proposals=[multi, single],
+            unmatched_amazon=[MagicMock()] * 4,
+            md_path=Path("data/cache/amazon-changeset-20260413-153022.md"),
+            json_path=Path("data/cache/amazon-changeset-20260413-153022.json"),
+        )
+
+        out = capsys.readouterr().out
+        assert "Amazon categorization run complete" in out
+        assert "amazon-order-history-2026-04-13.zip" in out
+        assert "10 Amazon transactions" in out
+        assert "since 2026-02-13" in out
+        assert "15 in dump" in out
+        assert "1 parse errors" in out
+        assert "2 excluded" in out
+        assert "K:              312" in out
+        assert "0.0096" in out
+        assert "Matches:        5" in out
+        assert "1 multi-item, 1 single-item" in out
+        assert "4 YNAB txns; 3 shipments" in out
+        assert "amazon-changeset-20260413-153022.md" in out
+        assert "amazon-changeset-20260413-153022.json" in out
+        assert "Review the markdown file" in out
+
 
