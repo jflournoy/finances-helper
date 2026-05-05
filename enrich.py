@@ -256,6 +256,8 @@ def main(argv=None):
 
     # Amazon dump (conditional on Amazon payees present)
     match_result = None
+    dump_path = None
+    shipments = []
     if any(is_amazon_payee(t.get("payee_name")) for t in writable):
         try:
             dump_path = args.dump or find_latest_dump()
@@ -272,6 +274,12 @@ def main(argv=None):
             date_window_days=config.get("amazon", {}).get("date_window_days", 3),
         )
 
+        # Warn if dump is stale
+        warning = _dump_freshness_warning(shipments, since_date, args.days)
+        if warning:
+            print(f"Warning: {warning}")
+            logger.warning(warning)
+
     # Categorize (engine handles partition internally)
     flat_results, skipped, unmatched_amazon, split_proposals = categorize_transactions(
         writable, cache, recent_categories, anthropic_key,
@@ -283,8 +291,22 @@ def main(argv=None):
     update_cache_from_claude_results(cache, writable, flat_results)
     save_payee_cache(cache)
 
-    # TODO: write unified changeset in issue #117
-    # TODO: print summary in issue #118
+    # Write unified changeset
+    md_path, json_path = write_unified_changeset(
+        flat_results=flat_results,
+        skipped=skipped,
+        unmatched_amazon=unmatched_amazon,
+        split_proposals=split_proposals,
+        budget_id=budget_id,
+        since_date=since_date,
+        days_back=args.days,
+        K=K,
+        confidence_threshold=confidence_threshold,
+        dump_path=dump_path,
+        out_dir=args.out_dir,
+    )
+
+    logger.info(f"Changeset written to {md_path} and {json_path}")
 
     return 0
 
