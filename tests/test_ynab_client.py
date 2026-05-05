@@ -8,6 +8,7 @@ from unittest.mock import patch, Mock
 from ynab_client import (
     dollars_to_milliunits,
     milliunits_to_dollars,
+    filter_uncategorized_writable,
     YNABClient,
     YNABAPIError,
     YNABNotFoundError,
@@ -405,3 +406,63 @@ def test_get_transactions_delta_sync_param(client):
     call_kwargs = mock_session_get.call_args
     params = call_kwargs[1].get("params", {})
     assert params.get("last_knowledge_of_server") == 300
+
+
+class TestFilterUncategorizedWritable:
+    """Test filter_uncategorized_writable for writability constraints."""
+
+    def test_excludes_categorized(self):
+        """Transaction with category_id set is excluded."""
+        txn = {"id": "t1", "category_id": "cat-123", "cleared": "cleared", "deleted": False}
+        result = filter_uncategorized_writable([txn])
+        assert result == []
+
+    def test_excludes_reconciled(self):
+        """Transaction with cleared == 'reconciled' is excluded."""
+        txn = {"id": "t1", "category_id": None, "cleared": "reconciled", "deleted": False}
+        result = filter_uncategorized_writable([txn])
+        assert result == []
+
+    def test_excludes_deleted(self):
+        """Transaction with deleted == True is excluded."""
+        txn = {"id": "t1", "category_id": None, "cleared": "cleared", "deleted": True}
+        result = filter_uncategorized_writable([txn])
+        assert result == []
+
+    def test_includes_uncategorized_cleared(self):
+        """Uncategorized, cleared, not deleted is included."""
+        txn = {"id": "t1", "category_id": None, "cleared": "cleared", "deleted": False}
+        result = filter_uncategorized_writable([txn])
+        assert result == [txn]
+
+    def test_includes_uncategorized_uncleared(self):
+        """Uncategorized, uncleared, not deleted is included."""
+        txn = {"id": "t1", "category_id": None, "cleared": "uncleared"}
+        result = filter_uncategorized_writable([txn])
+        assert result == [txn]
+
+    def test_empty_input(self):
+        """Empty list returns empty list."""
+        result = filter_uncategorized_writable([])
+        assert result == []
+
+    def test_mixed_states(self):
+        """Multiple txns with mixed states filters correctly."""
+        txns = [
+            {"id": "t1", "category_id": None, "cleared": "cleared", "deleted": False},  # include
+            {"id": "t2", "category_id": "cat-123", "cleared": "cleared", "deleted": False},  # exclude (categorized)
+            {"id": "t3", "category_id": None, "cleared": "reconciled", "deleted": False},  # exclude (reconciled)
+            {"id": "t4", "category_id": None, "cleared": "cleared", "deleted": True},  # exclude (deleted)
+            {"id": "t5", "category_id": None, "cleared": "uncleared"},  # include
+        ]
+        result = filter_uncategorized_writable(txns)
+        assert len(result) == 2
+        assert result[0]["id"] == "t1"
+        assert result[1]["id"] == "t5"
+
+    def test_handles_missing_keys(self):
+        """Does not raise on missing keys, uses .get()."""
+        txn = {"id": "t1"}  # missing category_id, cleared, deleted
+        result = filter_uncategorized_writable([txn])
+        # Should treat missing keys as: category_id=None, cleared!=reconciled, deleted!=True
+        assert result == [txn]

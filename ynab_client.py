@@ -43,6 +43,22 @@ def milliunits_to_dollars(milliunits: int) -> float:
     return milliunits / 1000.0
 
 
+def filter_uncategorized_writable(ynab_txns: list[dict]) -> list[dict]:
+    """Return uncategorized transactions the YNAB API allows us to write to.
+
+    Excludes:
+    - category_id is set (already categorized)
+    - cleared == "reconciled" (locked, API rejects edits)
+    - deleted is True
+    """
+    return [
+        t for t in ynab_txns
+        if t.get("category_id") is None
+        and t.get("cleared") != "reconciled"
+        and t.get("deleted") is not True
+    ]
+
+
 class YNABClient:
     """YNAB API client with authentication and request handling."""
 
