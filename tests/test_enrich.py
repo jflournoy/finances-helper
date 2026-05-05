@@ -380,3 +380,97 @@ class TestDumpFreshnessWarning:
 
         result = _dump_freshness_warning(shipments, "2026-03-28", 30)
         assert result is None
+
+
+class TestITEnrich:
+    """Integration tests for enrich.py — full call chain with fixtures."""
+
+    def test_it_enrich_basic_flow(self, tmp_path, monkeypatch):
+        """IT-ENRICH: Basic integration test with mocked YNAB."""
+        from enrich import main
+
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.setenv("YNAB_API_TOKEN", "token123")
+        monkeypatch.setenv("ANTHROPIC_API_KEY", "key123")
+
+        tmp_path.joinpath("config.json").write_text(json.dumps({"budget_id": "b123"}))
+
+        # Create transaction fixtures (non-Amazon only to avoid dump requirement)
+        txn1 = {
+            "id": "t1",
+            "payee_name": "Whole Foods",
+            "amount_dollars": "50.00",
+            "date": "2026-03-30",
+            "category_id": None,
+            "cleared": "cleared",
+            "deleted": False,
+            "account_id": "acc1",
+        }
+
+        txn2 = {
+            "id": "t2",
+            "payee_name": "Grocery Store",
+            "amount_dollars": "30.00",
+            "date": "2026-03-30",
+            "category_id": None,
+            "cleared": "cleared",
+            "deleted": False,
+            "account_id": "acc1",
+        }
+
+        txn_reconciled = {
+            "id": "t3",
+            "payee_name": "Other Store",
+            "amount_dollars": "20.00",
+            "date": "2026-03-25",
+            "category_id": None,
+            "cleared": "reconciled",
+            "deleted": False,
+        }
+
+        # Mock YNAB client
+        mock_client = Mock()
+        mock_client.get_transactions.return_value = (
+            [txn1, txn2, txn_reconciled],
+            0,
+        )
+        mock_client.get_categories.return_value = []
+        mock_client.get_accounts.return_value = [{"id": "acc1", "name": "Checking"}]
+
+        # Mock categorizer results
+        mock_result1 = Mock(
+            transaction_id="t1",
+            category_id="cat1",
+            category_name="Groceries",
+            tier="claude",
+            confidence=0.95,
+            rationale="Whole Foods",
+            prior_strength=1,
+        )
+
+        mock_result2 = Mock(
+            transaction_id="t2",
+            category_id="cat1",
+            category_name="Groceries",
+            tier="history",
+            confidence=0.99,
+            rationale="From cache",
+            prior_strength=1,
+        )
+
+        with patch("enrich.YNABClient", return_value=mock_client):
+            with patch("enrich.load_payee_cache", return_value={}):
+                with patch("enrich.build_cache_from_transactions", return_value={}):
+                    with patch("enrich.categorize_transactions", return_value=(
+                        [mock_result1, mock_result2],  # flat_results
+                        [txn_reconciled],  # skipped
+                        [],  # unmatched_amazon
+                        [],  # split_proposals
+                    )):
+                        result = main(["--days", "30"])
+
+        assert result == 0
+        assert (tmp_path / "data/cache").exists()
+        # Check that changeset files were created
+        changesets = list((tmp_path / "data/cache").glob("enrich-changeset-*.json"))
+        assert len(changesets) > 0, "No changeset files created"
