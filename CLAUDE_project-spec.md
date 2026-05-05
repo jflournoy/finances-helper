@@ -118,6 +118,48 @@ The `config.json` file is gitignored — each user creates their own.
 
 Absent `amazon` section → `amazon_matcher.py` raises `ValueError`. Other tools (`categorizer.py`) ignore the section.
 
+## Canonical Entry Point: `enrich.py`
+
+**For routine use, run `enrich.py`.**
+
+```
+uv run python enrich.py --days 30
+```
+
+This is the unified workflow that handles both Amazon and non-Amazon uncategorized transactions in a single pass:
+
+1. **Fetches** uncategorized transactions from the last N days (one YNAB API call)
+2. **Filters** by writability: uncategorized + cleared/not-reconciled + not deleted
+3. **Partitions** into Amazon vs non-Amazon payees
+4. **For Amazon txns:**
+   - Loads the latest Amazon Order History dump from `data/imports/`
+   - Matches shipments to YNAB transactions by date + amount (within a configurable window)
+   - Runs item-level categorization via Claude, producing split proposals
+5. **For non-Amazon txns:**
+   - Runs flat (whole-transaction) categorization via Claude
+6. **Writes** a unified changeset (markdown + JSON) to `data/cache/enrich-changeset-*.{md,json}`
+7. **Prints** a summary of all proposed changes
+
+The unified approach:
+- Cuts YNAB API calls in half (one fetch instead of two per CLI)
+- Batches all novel payees into a single Claude call for better amortization
+- Produces one clear changeset for review
+
+### Writability Filter
+A transaction is included if ALL of:
+- No category assigned yet (`category_id = null`)
+- Not reconciled (`cleared != "reconciled"`)
+- Not deleted (`deleted = false`)
+
+### Exit Codes
+- `0`: Success (even if some txns were unmatched — unmatched is expected)
+- `1`: Config or environment error (missing token, missing config, malformed JSON)
+- `2`: Missing Amazon dump when Amazon txns are present
+
+### Known Limitations
+- `categorizer.py` when run standalone has a latent bug: it does NOT apply the full writability filter. Use `enrich.py` for correct behavior.
+- Reconciled/deleted transactions are silently skipped — they should be, but the API doesn't guarantee they won't reappear in a later run. This is a YNAB API contract issue, not a bug in our code.
+
 ## Categorization Strategy (Token Efficient)
 Categorization runs three tiers before touching the Claude API:
 1. **History lookup** — payees seen before are resolved from a local cache of your transaction history. Free.
@@ -126,24 +168,28 @@ Categorization runs three tiers before touching the Claude API:
 
 The payee lookup lives in `data/cache/payee_lookup.json` and is rebuilt after every confirmed categorization run. Over time, Claude is called less and less frequently as the lookup matures.
 
+## Diagnostic and Specialized CLIs
 
+These tools remain available for single-purpose workflows or diagnostics, but **are not the recommended entry point** — use `enrich.py` instead.
 
-### Enrich Amazon Transactions
+### Amazon Matcher (Diagnostic)
 ```
-uv run python amazon_matcher.py --input data/imports/amazon_orders.csv
+uv run python amazon_matcher.py --days 30
 ```
 - Matches Amazon order history to YNAB transactions by date + amount
-- Uses Claude to assign each matched order to a YNAB category
-- Writes item description to transaction memo field
-- Requires your review before writing anything back to YNAB
+- Produces item-level split proposals for matched shipments
+- Writes a separate changeset in `data/cache/amazon-changeset-*.{md,json}`
+- **Limitation:** Does not categorize non-Amazon txns; for a complete workflow, use `enrich.py`
 
-### Categorize Uncategorized Transactions
+### Categorizer (Diagnostic)
 ```
 uv run python categorizer.py --days 30
 ```
-- Fetches uncategorized transactions from the last N days
-- Uses Claude with your full category list as context to suggest categories
-- Presents suggestions for review before writing back
+- Categorizes uncategorized txns using Claude
+- Produces flat (non-split) category proposals
+- Writes a changeset in `data/cache/categorizer-changeset-*.{md,json}`
+- **Limitation:** Does not handle Amazon item-level enrichment; for full enrichment, use `enrich.py`
+- **Known bug:** Does not apply the full writability filter (use `enrich.py` for correct behavior)
 
 ### Spending Insights
 ```
