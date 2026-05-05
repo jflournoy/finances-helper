@@ -99,6 +99,59 @@ def write_unified_changeset(
     timestamp = now.strftime("%Y%m%d-%H%M%S")
     base_path = out_dir / f"enrich-changeset-{timestamp}"
 
+    # Serialize flat results (non-Amazon proposals) — sorted by date then id
+    proposals = []
+    for result in sorted(flat_results, key=lambda r: (getattr(r, 'date', '9999-12-31'), r.transaction_id)):
+        proposals.append({
+            "transaction_id": result.transaction_id,
+            "category_id": result.category_id,
+            "category_name": result.category_name,
+            "tier": result.tier,
+            "confidence": result.confidence,
+            "rationale": result.rationale,
+            "prior_strength": result.prior_strength,
+        })
+
+    # Serialize skipped transactions
+    skipped_transfers = [
+        {
+            "id": t.get("id"),
+            "payee_name": t.get("payee_name"),
+            "amount_dollars": t.get("amount_dollars"),
+            "date": t.get("date"),
+        }
+        for t in skipped
+    ]
+
+    # Serialize unmatched Amazon (txn, reason) tuples — sorted by reason then date then id
+    unmatched_ynab = []
+    for txn, reason in sorted(unmatched_amazon, key=lambda x: (x[1], x[0].get('date', '9999-12-31'), x[0].get('id', ''))):
+        unmatched_ynab.append({
+            "transaction_id": txn.get("id"),
+            "payee_name": txn.get("payee_name"),
+            "amount_dollars": txn.get("amount_dollars"),
+            "date": txn.get("date"),
+            "reason": reason,
+        })
+
+    # Serialize split proposals — sorted by parent txn date then id
+    splits = []
+    for proposal in sorted(split_proposals, key=lambda p: (getattr(p, 'date', '9999-12-31'), getattr(p, 'transaction_id', ''))):
+        splits.append({
+            "transaction_id": getattr(proposal, 'transaction_id', None),
+            "parent_txn_date": getattr(proposal, 'date', None),
+            "order_id": getattr(proposal, 'order_id', None),
+            "ship_date": str(getattr(proposal, 'ship_date', None)) if getattr(proposal, 'ship_date', None) else None,
+            "items": [
+                {
+                    "description": item.get("description") if isinstance(item, dict) else getattr(item, 'description', None),
+                    "category_id": item.get("category_id") if isinstance(item, dict) else getattr(item, 'category_id', None),
+                    "category_name": item.get("category_name") if isinstance(item, dict) else getattr(item, 'category_name', None),
+                }
+                for item in (getattr(proposal, 'items', []) or [])
+            ],
+        })
+
     # Build JSON payload
     payload = {
         "version": 1,
@@ -113,15 +166,15 @@ def write_unified_changeset(
             "confidence_threshold": confidence_threshold,
         },
         "amazon": {
-            "splits": [],
-            "unmatched_ynab": [],
+            "splits": splits,
+            "unmatched_ynab": unmatched_ynab,
             "unmatched_shipments": [],
             "excluded_shipments": [],
             "parse_errors": [],
         },
         "non_amazon": {
-            "proposals": [],
-            "skipped_transfers": [],
+            "proposals": proposals,
+            "skipped_transfers": skipped_transfers,
         },
     }
 

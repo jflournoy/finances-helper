@@ -260,6 +260,187 @@ class TestWriteUnifiedChangeset:
             assert label in markdown, f"Missing label: {label}"
 
 
+    def test_write_unified_changeset_serializes_flat_results(self, tmp_path):
+        """flat_results CategoryResult objects are serialized into non_amazon.proposals."""
+        from enrich import write_unified_changeset
+        from datetime import datetime
+        from categorizer import CategoryResult
+
+        out_dir = tmp_path / "changesets"
+        now = datetime(2026, 4, 27, 14, 30, 0)
+
+        result1 = CategoryResult(
+            transaction_id="t1",
+            category_id="cat1",
+            category_name="Groceries",
+            tier="claude",
+            confidence=0.95,
+            rationale="Whole Foods store",
+            prior_strength=1,
+        )
+        result2 = CategoryResult(
+            transaction_id="t2",
+            category_id="cat2",
+            category_name="Utilities",
+            tier="history",
+            confidence=0.99,
+            rationale="From cache",
+            prior_strength=2,
+        )
+
+        md_path, json_path = write_unified_changeset(
+            flat_results=[result1, result2],
+            skipped=[],
+            unmatched_amazon=[],
+            split_proposals=[],
+            budget_id="b123",
+            since_date="2026-03-28",
+            days_back=30,
+            K=312,
+            confidence_threshold=0.0096,
+            dump_path=None,
+            out_dir=out_dir,
+            now=now,
+        )
+
+        payload = json.loads(json_path.read_text())
+        proposals = payload["non_amazon"]["proposals"]
+        assert len(proposals) == 2
+        assert proposals[0]["transaction_id"] == "t1"
+        assert proposals[0]["category_id"] == "cat1"
+        assert proposals[0]["category_name"] == "Groceries"
+        assert proposals[0]["tier"] == "claude"
+        assert proposals[0]["confidence"] == 0.95
+        assert proposals[1]["transaction_id"] == "t2"
+        assert proposals[1]["tier"] == "history"
+
+    def test_write_unified_changeset_serializes_skipped(self, tmp_path):
+        """skipped transactions are serialized into non_amazon.skipped_transfers."""
+        from enrich import write_unified_changeset
+        from datetime import datetime
+
+        out_dir = tmp_path / "changesets"
+        now = datetime(2026, 4, 27, 14, 30, 0)
+
+        skipped_txn = {
+            "id": "t_skip",
+            "payee_name": "Transfer : Savings",
+            "amount_dollars": "100.00",
+            "date": "2026-03-30",
+        }
+
+        md_path, json_path = write_unified_changeset(
+            flat_results=[],
+            skipped=[skipped_txn],
+            unmatched_amazon=[],
+            split_proposals=[],
+            budget_id="b123",
+            since_date="2026-03-28",
+            days_back=30,
+            K=312,
+            confidence_threshold=0.0096,
+            dump_path=None,
+            out_dir=out_dir,
+            now=now,
+        )
+
+        payload = json.loads(json_path.read_text())
+        skipped_list = payload["non_amazon"]["skipped_transfers"]
+        assert len(skipped_list) == 1
+        assert skipped_list[0]["id"] == "t_skip"
+        assert skipped_list[0]["payee_name"] == "Transfer : Savings"
+
+    def test_write_unified_changeset_serializes_unmatched_amazon(self, tmp_path):
+        """unmatched_amazon tuples are serialized into amazon.unmatched_ynab."""
+        from enrich import write_unified_changeset
+        from datetime import datetime
+
+        out_dir = tmp_path / "changesets"
+        now = datetime(2026, 4, 27, 14, 30, 0)
+
+        unmatched = [
+            (
+                {"id": "t_unmatched", "payee_name": "Amazon.com", "date": "2026-03-01"},
+                "date_out_of_window"
+            ),
+        ]
+
+        md_path, json_path = write_unified_changeset(
+            flat_results=[],
+            skipped=[],
+            unmatched_amazon=unmatched,
+            split_proposals=[],
+            budget_id="b123",
+            since_date="2026-03-28",
+            days_back=30,
+            K=312,
+            confidence_threshold=0.0096,
+            dump_path=None,
+            out_dir=out_dir,
+            now=now,
+        )
+
+        payload = json.loads(json_path.read_text())
+        unmatched_list = payload["amazon"]["unmatched_ynab"]
+        assert len(unmatched_list) == 1
+        assert unmatched_list[0]["transaction_id"] == "t_unmatched"
+        assert unmatched_list[0]["reason"] == "date_out_of_window"
+
+    def test_write_unified_changeset_deterministic(self, tmp_path):
+        """Same inputs produce byte-for-byte identical JSON output."""
+        from enrich import write_unified_changeset
+        from datetime import datetime
+        from categorizer import CategoryResult
+
+        result = CategoryResult(
+            transaction_id="t1",
+            category_id="cat1",
+            category_name="Groceries",
+            tier="claude",
+            confidence=0.95,
+            rationale="Store",
+            prior_strength=1,
+        )
+
+        now = datetime(2026, 4, 27, 14, 30, 0)
+        out_dir1 = tmp_path / "changesets1"
+        out_dir2 = tmp_path / "changesets2"
+
+        md1, json1 = write_unified_changeset(
+            flat_results=[result],
+            skipped=[],
+            unmatched_amazon=[],
+            split_proposals=[],
+            budget_id="b123",
+            since_date="2026-03-28",
+            days_back=30,
+            K=312,
+            confidence_threshold=0.0096,
+            dump_path=None,
+            out_dir=out_dir1,
+            now=now,
+        )
+
+        md2, json2 = write_unified_changeset(
+            flat_results=[result],
+            skipped=[],
+            unmatched_amazon=[],
+            split_proposals=[],
+            budget_id="b123",
+            since_date="2026-03-28",
+            days_back=30,
+            K=312,
+            confidence_threshold=0.0096,
+            dump_path=None,
+            out_dir=out_dir2,
+            now=now,
+        )
+
+        json1_content = json1.read_bytes()
+        json2_content = json2.read_bytes()
+        assert json1_content == json2_content, "JSON outputs differ on identical inputs"
+
+
 class TestDumpFreshnessWarning:
     """Test _dump_freshness_warning function."""
 
@@ -437,8 +618,10 @@ class TestITEnrich:
         mock_client.get_categories.return_value = []
         mock_client.get_accounts.return_value = [{"id": "acc1", "name": "Checking"}]
 
-        # Mock categorizer results
-        mock_result1 = Mock(
+        # Categorizer results (real CategoryResult objects)
+        from categorizer import CategoryResult
+
+        mock_result1 = CategoryResult(
             transaction_id="t1",
             category_id="cat1",
             category_name="Groceries",
@@ -448,7 +631,7 @@ class TestITEnrich:
             prior_strength=1,
         )
 
-        mock_result2 = Mock(
+        mock_result2 = CategoryResult(
             transaction_id="t2",
             category_id="cat1",
             category_name="Groceries",
