@@ -8,6 +8,7 @@ from pathlib import Path
 from datetime import datetime, timedelta
 from dotenv import load_dotenv
 import os
+from decimal import Decimal
 
 from ynab_client import YNABClient, filter_uncategorized_writable
 from categorizer import (
@@ -17,10 +18,158 @@ from categorizer import (
 )
 from amazon_matcher import (
     is_amazon_payee, find_latest_dump, extract_order_history_csv, parse_order_history,
-    match_shipments_to_transactions,
+    match_shipments_to_transactions, _json_default, _md_escape, _next_free_path,
 )
 
 logger = logging.getLogger(__name__)
+
+
+def _dump_freshness_warning(shipments, since_date_str: str, days_back: int, *, log=logger) -> str | None:
+    """Check if Amazon dump is stale relative to working window.
+
+    Args:
+        shipments: List of AmazonShipment objects.
+        since_date_str: ISO 8601 string (YYYY-MM-DD) for window start.
+        days_back: Number of days in working window.
+        log: Logger instance (for testing).
+
+    Returns:
+        Warning message if dump is stale, None if fresh.
+    """
+    from datetime import date
+
+    if not shipments:
+        return "Amazon dump contains 0 shipments — every Amazon txn will be unmatched."
+
+    latest_ship = max((s.ship_date for s in shipments if s.ship_date), default=None)
+    if latest_ship is None:
+        return "Amazon dump contains no parseable ship dates."
+
+    since_date = date.fromisoformat(since_date_str)
+    if latest_ship < since_date:
+        return (
+            f"Amazon dump's latest ship date {latest_ship} is before --days={days_back} "
+            f"window start {since_date}. Most/all Amazon txns will end up unmatched. "
+            f"Re-export an Amazon dump."
+        )
+
+    return None
+
+
+def write_unified_changeset(
+    flat_results,
+    skipped,
+    unmatched_amazon,
+    split_proposals,
+    *,
+    budget_id: str,
+    since_date: str,
+    days_back: int,
+    K: int,
+    confidence_threshold: float,
+    dump_path: Path | None,
+    out_dir: Path = Path("data/cache"),
+    now: datetime | None = None,
+) -> tuple[Path, Path]:
+    """Write unified enrich changeset to paired markdown + JSON artifacts.
+
+    Args:
+        flat_results: List of CategoryResult for non-Amazon txns.
+        skipped: List of skipped transactions.
+        unmatched_amazon: List of (txn, reason) tuples for unmatched Amazon txns.
+        split_proposals: List of AmazonSplitProposal objects.
+        budget_id: YNAB budget ID for metadata.
+        since_date: ISO 8601 string (YYYY-MM-DD) for window start.
+        days_back: Number of days in working window.
+        K: Number of categories used for threshold computation.
+        confidence_threshold: Confidence threshold used.
+        dump_path: Path to Amazon dump (may be None if no Amazon txns).
+        out_dir: Directory for output files (created if missing).
+        now: Injected datetime for testing.
+
+    Returns:
+        (markdown_path, json_path)
+    """
+    if now is None:
+        now = datetime.now()
+
+    out_dir = Path(out_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    timestamp = now.strftime("%Y%m%d-%H%M%S")
+    base_path = out_dir / f"enrich-changeset-{timestamp}"
+
+    # Build JSON payload
+    payload = {
+        "version": 1,
+        "kind": "enrich-changeset",
+        "metadata": {
+            "timestamp": now.isoformat(),
+            "days_back": days_back,
+            "since_date": since_date,
+            "budget_id": budget_id,
+            "dump_path": str(dump_path) if dump_path else None,
+            "K": K,
+            "confidence_threshold": confidence_threshold,
+        },
+        "amazon": {
+            "splits": [],
+            "unmatched_ynab": [],
+            "unmatched_shipments": [],
+            "excluded_shipments": [],
+            "parse_errors": [],
+        },
+        "non_amazon": {
+            "proposals": [],
+            "skipped_transfers": [],
+        },
+    }
+
+    # File paths (collision-safe)
+    json_path = _next_free_path(base_path, ".json")
+    md_path = json_path.with_suffix(".md")
+
+    # Write JSON
+    json_content = json.dumps(payload, default=_json_default, indent=2)
+    json_path.write_text(json_content)
+
+    # Write Markdown (basic for now)
+    markdown_lines = [
+        "# Enrich Changeset",
+        "",
+        f"## Dump",
+        f"Path: {dump_path or '(none)'}",
+        "",
+        f"## Days back",
+        f"{days_back} (since {since_date})",
+        "",
+        f"## K",
+        f"{K} categories | threshold: {confidence_threshold}",
+        "",
+        f"## Writable txns",
+        f"{len(flat_results) + len(split_proposals)} total",
+        "",
+        f"## Amazon splits",
+        f"{len(split_proposals)} item-level splits",
+        "",
+        f"## Non-Amazon",
+        f"{len(flat_results)} categorized",
+        "",
+        f"## Skipped",
+        f"{len(skipped)} transfers/reconciled",
+        "",
+        f"## Unmatched Amazon txns",
+        f"{len(unmatched_amazon)} YNAB",
+        "",
+        f"## Changeset",
+        f"- {md_path.name}",
+        f"- {json_path.name}",
+    ]
+
+    markdown = "\n".join(markdown_lines)
+    md_path.write_text(markdown)
+
+    return md_path, json_path
 
 
 def main(argv=None):
