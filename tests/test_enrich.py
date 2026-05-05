@@ -563,6 +563,94 @@ class TestDumpFreshnessWarning:
         assert result is None
 
 
+class TestPrintUnifiedSummary:
+    """Test _print_unified_summary function."""
+
+    def test_print_unified_summary_labels(self, capsys):
+        """Summary output contains all required labels."""
+        from enrich import _print_unified_summary
+
+        _print_unified_summary(
+            dump_path=Path("data/imports/amazon-order-history.zip"),
+            since_date="2026-03-28",
+            days_back=30,
+            K=312,
+            confidence_threshold=0.0096,
+            writable_count=10,
+            amazon_splits_count=2,
+            non_amazon_count=5,
+            skipped_count=2,
+            unmatched_amazon_count=1,
+            md_path=Path("data/cache/enrich-changeset-20260427-143000.md"),
+            json_path=Path("data/cache/enrich-changeset-20260427-143000.json"),
+        )
+
+        captured = capsys.readouterr()
+        required_labels = [
+            "Dump:",
+            "Days back:",
+            "K:",
+            "Threshold:",
+            "Writable:",
+            "Amazon splits:",
+            "Non-Amazon:",
+            "Skipped:",
+            "Unmatched Amazon txns:",
+            "Changeset:",
+        ]
+        for label in required_labels:
+            assert label in captured.out, f"Missing label: {label}"
+
+    def test_print_unified_summary_counts(self, capsys):
+        """Summary output includes correct counts."""
+        from enrich import _print_unified_summary
+
+        _print_unified_summary(
+            dump_path=Path("data/imports/amazon-order-history.zip"),
+            since_date="2026-03-28",
+            days_back=30,
+            K=312,
+            confidence_threshold=0.0096,
+            writable_count=10,
+            amazon_splits_count=2,
+            non_amazon_count=5,
+            skipped_count=2,
+            unmatched_amazon_count=1,
+            md_path=Path("data/cache/enrich-changeset-20260427-143000.md"),
+            json_path=Path("data/cache/enrich-changeset-20260427-143000.json"),
+        )
+
+        captured = capsys.readouterr()
+        assert "10" in captured.out
+        assert "2" in captured.out
+        assert "5" in captured.out
+
+    def test_print_unified_summary_no_emojis(self, capsys):
+        """Summary output contains no emoji characters."""
+        from enrich import _print_unified_summary
+
+        _print_unified_summary(
+            dump_path=Path("data/imports/amazon-order-history.zip"),
+            since_date="2026-03-28",
+            days_back=30,
+            K=312,
+            confidence_threshold=0.0096,
+            writable_count=10,
+            amazon_splits_count=2,
+            non_amazon_count=5,
+            skipped_count=2,
+            unmatched_amazon_count=1,
+            md_path=Path("data/cache/enrich-changeset-20260427-143000.md"),
+            json_path=Path("data/cache/enrich-changeset-20260427-143000.json"),
+        )
+
+        captured = capsys.readouterr()
+        # Check for common emoji patterns (simplified check)
+        assert "🚀" not in captured.out
+        assert "✅" not in captured.out
+        assert "❌" not in captured.out
+
+
 class TestITEnrich:
     """Integration tests for enrich.py — full call chain with fixtures."""
 

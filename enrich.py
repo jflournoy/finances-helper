@@ -24,6 +24,40 @@ from amazon_matcher import (
 logger = logging.getLogger(__name__)
 
 
+def _print_unified_summary(
+    dump_path: Path | None,
+    since_date: str,
+    days_back: int,
+    K: int,
+    confidence_threshold: float,
+    writable_count: int,
+    amazon_splits_count: int,
+    non_amazon_count: int,
+    skipped_count: int,
+    unmatched_amazon_count: int,
+    md_path: Path,
+    json_path: Path,
+) -> None:
+    """Print unified summary to stdout."""
+    print("\n" + "=" * 60)
+    print("Enrich Changeset Summary")
+    print("=" * 60)
+    print(f"Dump: {dump_path or '(none)'}")
+    print(f"Days back: {days_back} (since {since_date})")
+    print(f"K: {K} categories | Threshold: {confidence_threshold:.4f}")
+    print()
+    print(f"Writable: {writable_count} transactions")
+    print(f"  Amazon splits: {amazon_splits_count}")
+    print(f"  Non-Amazon: {non_amazon_count}")
+    print(f"  Skipped: {skipped_count}")
+    print(f"  Unmatched Amazon txns: {unmatched_amazon_count}")
+    print()
+    print(f"Changeset:")
+    print(f"  - {md_path.name}")
+    print(f"  - {json_path.name}")
+    print("=" * 60 + "\n")
+
+
 def _dump_freshness_warning(shipments, since_date_str: str, days_back: int, *, log=logger) -> str | None:
     """Check if Amazon dump is stale relative to working window.
 
@@ -360,6 +394,22 @@ def main(argv=None):
     )
 
     logger.info(f"Changeset written to {md_path} and {json_path}")
+
+    # Print summary
+    _print_unified_summary(
+        dump_path=dump_path,
+        since_date=since_date,
+        days_back=args.days,
+        K=K,
+        confidence_threshold=confidence_threshold,
+        writable_count=len(writable),
+        amazon_splits_count=len(split_proposals),
+        non_amazon_count=len(flat_results),
+        skipped_count=len(skipped),
+        unmatched_amazon_count=len(unmatched_amazon),
+        md_path=md_path,
+        json_path=json_path,
+    )
 
     return 0
 
