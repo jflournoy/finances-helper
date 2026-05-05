@@ -654,9 +654,10 @@ class TestPrintUnifiedSummary:
 class TestITEnrich:
     """Integration tests for enrich.py — full call chain with fixtures."""
 
-    def test_it_enrich_basic_flow(self, tmp_path, monkeypatch):
-        """IT-ENRICH: Basic integration test with mocked YNAB."""
+    def test_it_enrich_call_counts_warm_cache(self, tmp_path, monkeypatch):
+        """IT-ENRICH: Verify YNAB call counts with warm cache (2 get_transactions calls)."""
         from enrich import main
+        from categorizer import CategoryResult
 
         monkeypatch.chdir(tmp_path)
         monkeypatch.setenv("YNAB_API_TOKEN", "token123")
@@ -664,7 +665,75 @@ class TestITEnrich:
 
         tmp_path.joinpath("config.json").write_text(json.dumps({"budget_id": "b123"}))
 
-        # Create transaction fixtures (non-Amazon only to avoid dump requirement)
+        # Writable and reconciled txns (3 total)
+        txn1 = {
+            "id": "t1",
+            "payee_name": "Whole Foods",
+            "amount_dollars": "50.00",
+            "date": "2026-03-30",
+            "category_id": None,
+            "cleared": "cleared",
+            "deleted": False,
+            "account_id": "acc1",
+        }
+        txn_reconciled = {
+            "id": "t_rec",
+            "payee_name": "Other Store",
+            "amount_dollars": "20.00",
+            "date": "2026-03-25",
+            "category_id": None,
+            "cleared": "reconciled",
+            "deleted": False,
+        }
+
+        # Mock YNAB client — returns same txns for all calls
+        mock_client = Mock()
+        mock_client.get_transactions.return_value = ([txn1, txn_reconciled], 0)
+        mock_client.get_categories.return_value = [{"id": "cat1", "name": "Groceries"}]
+        mock_client.get_accounts.return_value = [{"id": "acc1", "name": "Checking"}]
+
+        result1 = CategoryResult(
+            transaction_id="t1",
+            category_id="cat1",
+            category_name="Groceries",
+            tier="claude",
+            confidence=0.95,
+            rationale="Store",
+            prior_strength=1,
+        )
+
+        with patch("enrich.YNABClient", return_value=mock_client):
+            with patch("enrich.load_payee_cache", return_value={"_version": 2}):
+                with patch("enrich.categorize_transactions", return_value=(
+                    [result1],  # flat_results
+                    [txn_reconciled],  # skipped
+                    [],  # unmatched_amazon
+                    [],  # split_proposals
+                )):
+                    result = main(["--days", "30"])
+
+        assert result == 0
+        # Assert YNAB call counts: get_transactions (2 = window + k), get_categories (1), get_accounts (1)
+        assert mock_client.get_transactions.call_count == 2, \
+            f"Expected 2 get_transactions calls (warm cache), got {mock_client.get_transactions.call_count}"
+        assert mock_client.get_categories.call_count == 1
+        assert mock_client.get_accounts.call_count == 1
+
+        # Assert changeset was created
+        changesets = list((tmp_path / "data/cache").glob("enrich-changeset-*.json"))
+        assert len(changesets) > 0, "No changeset files created"
+
+    def test_it_enrich_call_counts_cold_cache(self, tmp_path, monkeypatch):
+        """IT-ENRICH: Verify YNAB call counts with cold cache (3 get_transactions calls)."""
+        from enrich import main
+        from categorizer import CategoryResult
+
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.setenv("YNAB_API_TOKEN", "token123")
+        monkeypatch.setenv("ANTHROPIC_API_KEY", "key123")
+
+        tmp_path.joinpath("config.json").write_text(json.dumps({"budget_id": "b123"}))
+
         txn1 = {
             "id": "t1",
             "payee_name": "Whole Foods",
@@ -676,72 +745,35 @@ class TestITEnrich:
             "account_id": "acc1",
         }
 
-        txn2 = {
-            "id": "t2",
-            "payee_name": "Grocery Store",
-            "amount_dollars": "30.00",
-            "date": "2026-03-30",
-            "category_id": None,
-            "cleared": "cleared",
-            "deleted": False,
-            "account_id": "acc1",
-        }
-
-        txn_reconciled = {
-            "id": "t3",
-            "payee_name": "Other Store",
-            "amount_dollars": "20.00",
-            "date": "2026-03-25",
-            "category_id": None,
-            "cleared": "reconciled",
-            "deleted": False,
-        }
-
-        # Mock YNAB client
         mock_client = Mock()
-        mock_client.get_transactions.return_value = (
-            [txn1, txn2, txn_reconciled],
-            0,
-        )
-        mock_client.get_categories.return_value = []
+        mock_client.get_transactions.return_value = ([txn1], 0)
+        mock_client.get_categories.return_value = [{"id": "cat1", "name": "Groceries"}]
         mock_client.get_accounts.return_value = [{"id": "acc1", "name": "Checking"}]
 
-        # Categorizer results (real CategoryResult objects)
-        from categorizer import CategoryResult
-
-        mock_result1 = CategoryResult(
+        result1 = CategoryResult(
             transaction_id="t1",
             category_id="cat1",
             category_name="Groceries",
             tier="claude",
             confidence=0.95,
-            rationale="Whole Foods",
-            prior_strength=1,
-        )
-
-        mock_result2 = CategoryResult(
-            transaction_id="t2",
-            category_id="cat1",
-            category_name="Groceries",
-            tier="history",
-            confidence=0.99,
-            rationale="From cache",
+            rationale="Store",
             prior_strength=1,
         )
 
         with patch("enrich.YNABClient", return_value=mock_client):
-            with patch("enrich.load_payee_cache", return_value={}):
+            with patch("enrich.load_payee_cache", return_value=None):  # Cold cache
                 with patch("enrich.build_cache_from_transactions", return_value={}):
                     with patch("enrich.categorize_transactions", return_value=(
-                        [mock_result1, mock_result2],  # flat_results
-                        [txn_reconciled],  # skipped
+                        [result1],  # flat_results
+                        [],  # skipped
                         [],  # unmatched_amazon
                         [],  # split_proposals
                     )):
                         result = main(["--days", "30"])
 
         assert result == 0
-        assert (tmp_path / "data/cache").exists()
-        # Check that changeset files were created
-        changesets = list((tmp_path / "data/cache").glob("enrich-changeset-*.json"))
-        assert len(changesets) > 0, "No changeset files created"
+        # Assert YNAB call counts: 3 = window + k + bootstrap
+        assert mock_client.get_transactions.call_count == 3, \
+            f"Expected 3 get_transactions calls (cold cache), got {mock_client.get_transactions.call_count}"
+        assert mock_client.get_categories.call_count == 1
+        assert mock_client.get_accounts.call_count == 1
