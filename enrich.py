@@ -15,7 +15,10 @@ from categorizer import (
     count_categories_from_transactions, count_categories, compute_confidence_threshold,
     filter_categories_by_usage, categorize_transactions, update_cache_from_claude_results,
 )
-from amazon_matcher import is_amazon_payee
+from amazon_matcher import (
+    is_amazon_payee, find_latest_dump, extract_order_history_csv, parse_order_history,
+    match_shipments_to_transactions,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -105,8 +108,20 @@ def main(argv=None):
     # Amazon dump (conditional on Amazon payees present)
     match_result = None
     if any(is_amazon_payee(t.get("payee_name")) for t in writable):
-        # TODO: implement dump loading in issue #116
-        pass
+        try:
+            dump_path = args.dump or find_latest_dump()
+        except FileNotFoundError:
+            print("Error: No Amazon dump found and Amazon txns present. Use --dump or place dump in data/imports/")
+            return 2
+
+        csv_text = extract_order_history_csv(dump_path)
+        shipments, parse_errors_list = parse_order_history(csv_text)
+        amazon_writable = [t for t in writable if is_amazon_payee(t.get("payee_name"))]
+        match_result = match_shipments_to_transactions(
+            amazon_writable, shipments,
+            parse_errors=parse_errors_list,
+            date_window_days=config.get("amazon", {}).get("date_window_days", 3),
+        )
 
     # Categorize (engine handles partition internally)
     flat_results, skipped, unmatched_amazon, split_proposals = categorize_transactions(
