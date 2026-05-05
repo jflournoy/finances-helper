@@ -24,6 +24,7 @@ from categorizer import (
     count_categories,
     compute_confidence,
     record_categorization,
+    update_cache_from_claude_results,
     _dominant_category,
     _resolve_alias,
     normalize_import_payee,
@@ -2566,3 +2567,222 @@ def test_categorize_transactions_unmatched_ynab_tuple_unpacking():
     assert len(unmatched_amazon) == 1
     assert unmatched_amazon[0][0] == amazon_txn
     assert "no matching shipment" in unmatched_amazon[0][1]
+
+
+class TestUpdateCacheFromClaudeResults:
+    """Test update_cache_from_claude_results extraction logic."""
+
+    def test_claude_tier_calls_record_categorization(self):
+        """CategoryResult with tier='claude' triggers cache update."""
+        cache = {}
+        source_txns = [{"id": "t1", "payee_name": "Amazon Store", "import_payee_name": None}]
+        results = [
+            CategoryResult(
+                transaction_id="t1",
+                category_id="cat-123",
+                category_name="Shopping",
+                tier="claude",
+                confidence=0.95,
+                rationale="test",
+                prior_strength=2,
+            )
+        ]
+
+        update_cache_from_claude_results(cache, source_txns, results)
+
+        # Cache should have been updated (payee name is normalized to lowercase)
+        assert "amazon store" in cache
+        assert cache["amazon store"]["categories"]["cat-123"]["name"] == "Shopping"
+        assert cache["amazon store"]["total"] == 2
+
+    def test_history_tier_not_called(self):
+        """CategoryResult with tier='history' does not trigger cache update."""
+        cache = {}
+        source_txns = [{"id": "t1", "payee_name": "Store A"}]
+        results = [
+            CategoryResult(
+                transaction_id="t1",
+                category_id="cat-123",
+                category_name="Shopping",
+                tier="history",
+                confidence=1.0,
+                rationale="",
+                prior_strength=None,
+            )
+        ]
+
+        update_cache_from_claude_results(cache, source_txns, results)
+
+        # Cache should not be updated
+        assert cache == {}
+
+    def test_fuzzy_tier_not_called(self):
+        """CategoryResult with tier='fuzzy' does not trigger cache update."""
+        cache = {}
+        source_txns = [{"id": "t1", "payee_name": "Store B"}]
+        results = [
+            CategoryResult(
+                transaction_id="t1",
+                category_id="cat-456",
+                category_name="Groceries",
+                tier="fuzzy",
+                confidence=0.85,
+                rationale="",
+                prior_strength=None,
+            )
+        ]
+
+        update_cache_from_claude_results(cache, source_txns, results)
+
+        assert cache == {}
+
+    def test_item_category_result_not_processed(self):
+        """ItemCategoryResult objects are not processed."""
+        from amazon_matcher import AmazonItem
+        from decimal import Decimal
+        from datetime import date
+
+        cache = {}
+        source_txns = [{"id": "t1", "payee_name": "Amazon"}]
+
+        # ItemCategoryResult doesn't have a tier attribute
+        item = AmazonItem(
+            order_id="ord-123",
+            ship_date=date(2026, 1, 1),
+            asin="B123",
+            product_name="Widget",
+            quantity=1,
+            unit_price=Decimal("10.00"),
+            unit_price_tax=Decimal("0.00"),
+            raw_row_index=1,
+        )
+        item_result = ItemCategoryResult(
+            ynab_transaction_id="t1",
+            item=item,
+            allocated_amount=Decimal("10.00"),
+            category_id="cat-789",
+            category_name="Purchases",
+            confidence=0.9,
+            rationale="test",
+        )
+
+        results = [item_result]
+
+        update_cache_from_claude_results(cache, source_txns, results)
+
+        # Cache should not be updated (ItemCategoryResult is not CategoryResult)
+        assert cache == {}
+
+    def test_prior_strength_default(self):
+        """When prior_strength is None, defaults to 1."""
+        cache = {}
+        source_txns = [{"id": "t1", "payee_name": "Store C"}]
+        results = [
+            CategoryResult(
+                transaction_id="t1",
+                category_id="cat-999",
+                category_name="Other",
+                tier="claude",
+                confidence=0.9,
+                rationale="test",
+                prior_strength=None,  # Will default to 1
+            )
+        ]
+
+        with patch("categorizer.record_categorization") as mock_record:
+            update_cache_from_claude_results(cache, source_txns, results)
+            # Check that prior_strength=1 was passed
+            call_kwargs = mock_record.call_args[1]
+            assert call_kwargs["prior_strength"] == 1
+
+    def test_import_names_both_present(self):
+        """Both import_payee_name and import_payee_name_original collected."""
+        cache = {}
+        source_txns = [
+            {
+                "id": "t1",
+                "payee_name": "Store D",
+                "import_payee_name": "STORE D LLC",
+                "import_payee_name_original": "store d llc",
+            }
+        ]
+        results = [
+            CategoryResult(
+                transaction_id="t1",
+                category_id="cat-111",
+                category_name="Retail",
+                tier="claude",
+                confidence=0.92,
+                rationale="test",
+                prior_strength=1,
+            )
+        ]
+
+        with patch("categorizer.record_categorization") as mock_record:
+            update_cache_from_claude_results(cache, source_txns, results)
+            call_kwargs = mock_record.call_args[1]
+            # Should have both import names in list
+            assert len(call_kwargs["import_names"]) == 2
+
+    def test_no_import_names(self):
+        """No import names passed → import_names=None."""
+        cache = {}
+        source_txns = [{"id": "t1", "payee_name": "Store E"}]
+        results = [
+            CategoryResult(
+                transaction_id="t1",
+                category_id="cat-222",
+                category_name="Restaurant",
+                tier="claude",
+                confidence=0.88,
+                rationale="test",
+                prior_strength=1,
+            )
+        ]
+
+        with patch("categorizer.record_categorization") as mock_record:
+            update_cache_from_claude_results(cache, source_txns, results)
+            call_kwargs = mock_record.call_args[1]
+            assert call_kwargs["import_names"] is None
+
+    def test_txn_not_found_skipped(self):
+        """If transaction_id not in source_txns, skip silently."""
+        cache = {}
+        source_txns = [{"id": "t999", "payee_name": "Other"}]
+        results = [
+            CategoryResult(
+                transaction_id="t1",  # This doesn't exist in source_txns
+                category_id="cat-333",
+                category_name="Travel",
+                tier="claude",
+                confidence=0.85,
+                rationale="test",
+                prior_strength=1,
+            )
+        ]
+
+        with patch("categorizer.record_categorization") as mock_record:
+            update_cache_from_claude_results(cache, source_txns, results)
+            # Should not be called
+            mock_record.assert_not_called()
+
+    def test_mixed_results(self):
+        """Multiple results with mixed tiers processes only claude tier."""
+        cache = {}
+        source_txns = [
+            {"id": "t1", "payee_name": "Store F"},
+            {"id": "t2", "payee_name": "Store G"},
+            {"id": "t3", "payee_name": "Store H"},
+        ]
+        results = [
+            CategoryResult(transaction_id="t1", category_id="c1", category_name="Cat1", tier="history", confidence=1.0, rationale="", prior_strength=None),
+            CategoryResult(transaction_id="t2", category_id="c2", category_name="Cat2", tier="claude", confidence=0.9, rationale="test", prior_strength=1),
+            CategoryResult(transaction_id="t3", category_id="c3", category_name="Cat3", tier="fuzzy", confidence=0.8, rationale="", prior_strength=None),
+        ]
+
+        with patch("categorizer.record_categorization") as mock_record:
+            update_cache_from_claude_results(cache, source_txns, results)
+            # Should be called exactly once (only for t2)
+            assert mock_record.call_count == 1
+            call_kwargs = mock_record.call_args[1]
+            assert call_kwargs["source"] == "claude"

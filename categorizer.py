@@ -332,6 +332,43 @@ def record_categorization(
             cache[norm_import] = {"alias_of": normalized}
 
 
+def update_cache_from_claude_results(cache: dict, source_txns: list[dict], flat_results: list) -> None:
+    """Update payee cache from Claude-tier categorization results.
+
+    Only processes CategoryResult objects with tier='claude'. Other result types and tiers are silently skipped.
+    ItemCategoryResult objects (Amazon item-level) are not processed — they don't provide payee-level signal.
+
+    Args:
+        cache: Payee frequency cache (modified in place).
+        source_txns: List of transaction dicts (must have 'id' and 'payee_name' fields).
+        flat_results: List of CategoryResult / ItemCategoryResult objects from the categorization engine.
+    """
+    by_id = {t["id"]: t for t in source_txns}
+
+    for result in flat_results:
+        # Skip non-CategoryResult types (ItemCategoryResult, etc.)
+        if not hasattr(result, "tier") or result.tier != "claude":
+            continue
+
+        txn = by_id.get(result.transaction_id)
+        if not txn:
+            continue
+
+        # Collect import names
+        import_names = [
+            txn[f] for f in ("import_payee_name", "import_payee_name_original")
+            if txn.get(f)
+        ]
+
+        record_categorization(
+            cache, txn["payee_name"],
+            result.category_id, result.category_name,
+            source="claude",
+            prior_strength=result.prior_strength or 1,
+            import_names=import_names or None,
+        )
+
+
 def _resolve_alias(cache: dict, key: str) -> str:
     """Resolve an alias to its primary key (max 1 hop).
 
