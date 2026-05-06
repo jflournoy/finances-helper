@@ -423,8 +423,7 @@ def main(argv=None):
     # YNAB fetches (counted order)
     txns_window, _ = client.get_transactions(budget_id, since_date=since_date)  # call #1
     categories = client.get_categories(budget_id)  # call #2
-    accounts = client.get_accounts(budget_id)  # call #3
-    k_txns, _ = client.get_transactions(budget_id, since_date=k_since)  # call #4
+    k_txns, _ = client.get_transactions(budget_id, since_date=k_since)  # call #3
 
     # Confidence threshold + recent categories
     K = count_categories_from_transactions(k_txns) or count_categories(categories)
