@@ -1280,10 +1280,19 @@ class TestITEnrich:
         non_amazon = changeset.get("non_amazon", {}).get("proposals", [])
         assert len(non_amazon) >= 1, f"Assertion #11: non_amazon has proposals (got {len(non_amazon)})"
 
-        all_output_txn_ids = {t.get("id") for t in non_amazon if isinstance(t, dict)}
+        # Assertion #13: No txn id appears in both buckets (set intersection empty)
+        amazon_splits = changeset.get("amazon", {}).get("splits", [])
+        non_amazon_ids = {t.get("transaction_id") for t in non_amazon if isinstance(t, dict)}
+        split_ids = {s.get("transaction_id") for s in amazon_splits if isinstance(s, dict)}
+        overlap = non_amazon_ids & split_ids
+        assert len(overlap) == 0, f"Assertion #13: no overlap between splits and proposals (found {overlap})"
+
+        # Assertion #14: Reconciled, deleted, already-categorized appear in NO output bucket
+        skipped_transfers = changeset.get("non_amazon", {}).get("skipped_transfers", [])
+        all_output_ids = non_amazon_ids | split_ids | {t.get("id") for t in skipped_transfers if isinstance(t, dict)}
         excluded_ids = {"reconciled", "deleted", "categorized"}
         for excl_id in excluded_ids:
-            assert excl_id not in all_output_txn_ids, f"Assertion #14: {excl_id} excluded from non_amazon"
+            assert excl_id not in all_output_ids, f"Assertion #14: {excl_id} excluded from all buckets"
 
         captured = capsys.readouterr()
         assert "Amazon splits:" in captured.out, "Assertion #15: splits label"
