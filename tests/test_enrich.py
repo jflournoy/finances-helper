@@ -406,6 +406,76 @@ class TestWriteUnifiedChangeset:
         assert skipped_list[0]["id"] == "t_skip"
         assert skipped_list[0]["payee_name"] == "Transfer : Savings"
 
+    def test_write_unified_changeset_sort_by_date(self, tmp_path):
+        """Proposals are sorted by date then transaction_id."""
+        from enrich import write_unified_changeset
+        from datetime import datetime
+        from categorizer import CategoryResult
+
+        out_dir = tmp_path / "changesets"
+        now = datetime(2026, 4, 27, 14, 30, 0)
+
+        results = [
+            CategoryResult(
+                transaction_id="t3",
+                category_id="cat1",
+                category_name="Cat1",
+                tier="claude",
+                confidence=0.95,
+                rationale="Store",
+                prior_strength=1,
+            ),
+            CategoryResult(
+                transaction_id="t1",
+                category_id="cat1",
+                category_name="Cat1",
+                tier="claude",
+                confidence=0.95,
+                rationale="Store",
+                prior_strength=1,
+            ),
+            CategoryResult(
+                transaction_id="t2",
+                category_id="cat1",
+                category_name="Cat1",
+                tier="claude",
+                confidence=0.95,
+                rationale="Store",
+                prior_strength=1,
+            ),
+        ]
+
+        source_txns = [
+            {"id": "t1", "payee_name": "Store1", "amount_dollars": "10.00", "date": "2026-03-15"},
+            {"id": "t2", "payee_name": "Store2", "amount_dollars": "20.00", "date": "2026-03-20"},
+            {"id": "t3", "payee_name": "Store3", "amount_dollars": "30.00", "date": "2026-03-10"},
+        ]
+
+        md_path, json_path = write_unified_changeset(
+            flat_results=results,
+            skipped=[],
+            unmatched_amazon=[],
+            split_proposals=[],
+            source_txns=source_txns,
+            budget_id="b123",
+            since_date="2026-03-01",
+            days_back=30,
+            K=312,
+            confidence_threshold=0.0096,
+            dump_path=None,
+            out_dir=out_dir,
+            now=now,
+        )
+
+        payload = json.loads(json_path.read_text())
+        proposals = payload["non_amazon"]["proposals"]
+        assert proposals[0]["transaction_id"] == "t3"
+        assert proposals[0]["date"] == "2026-03-10"
+        assert proposals[1]["transaction_id"] == "t1"
+        assert proposals[1]["date"] == "2026-03-15"
+        assert proposals[2]["transaction_id"] == "t2"
+        assert proposals[2]["date"] == "2026-03-20"
+
     def test_write_unified_changeset_serializes_match_result(self, tmp_path):
         """match_result shipments and parse_errors are serialized into amazon sections."""
         from enrich import write_unified_changeset

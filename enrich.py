@@ -173,6 +173,7 @@ def write_unified_changeset(
     ]
 
     # Serialize unmatched Amazon (txn, reason) tuples — sorted by reason then date then id
+    # unmatched_amazon is list of (txn: dict, reason: str) tuples, so x[0] is the txn dict
     unmatched_ynab = []
     for txn, reason in sorted(unmatched_amazon, key=lambda x: (x[1], x[0].get('date', '9999-12-31'), x[0].get('id', ''))):
         unmatched_ynab.append({
@@ -185,19 +186,21 @@ def write_unified_changeset(
 
     # Serialize split proposals — sorted by parent txn date then id
     splits = []
-    for proposal in sorted(split_proposals, key=lambda p: (getattr(p, 'date', '9999-12-31'), getattr(p, 'transaction_id', ''))):
+    for proposal in sorted(split_proposals, key=lambda p: (getattr(p.parent_ynab_txn, 'date', '9999-12-31') if hasattr(p, 'parent_ynab_txn') else '9999-12-31', getattr(p.parent_ynab_txn, 'id', '') if hasattr(p, 'parent_ynab_txn') else '')):
+        parent_date = getattr(proposal.parent_ynab_txn, 'date', None) if hasattr(proposal, 'parent_ynab_txn') else None
+        parent_id = getattr(proposal.parent_ynab_txn, 'id', None) if hasattr(proposal, 'parent_ynab_txn') else None
         splits.append({
-            "transaction_id": getattr(proposal, 'transaction_id', None),
-            "parent_txn_date": getattr(proposal, 'date', None),
-            "order_id": getattr(proposal, 'order_id', None),
-            "ship_date": str(getattr(proposal, 'ship_date', None)) if getattr(proposal, 'ship_date', None) else None,
+            "transaction_id": parent_id,
+            "parent_txn_date": parent_date,
+            "order_id": getattr(proposal.shipment, 'order_id', None) if hasattr(proposal, 'shipment') else None,
+            "ship_date": str(getattr(proposal.shipment, 'ship_date', None)) if hasattr(proposal, 'shipment') and getattr(proposal.shipment, 'ship_date', None) else None,
             "items": [
                 {
-                    "description": item.get("description") if isinstance(item, dict) else getattr(item, 'description', None),
-                    "category_id": item.get("category_id") if isinstance(item, dict) else getattr(item, 'category_id', None),
-                    "category_name": item.get("category_name") if isinstance(item, dict) else getattr(item, 'category_name', None),
+                    "description": getattr(item, 'description', None),
+                    "category_id": getattr(item, 'category_id', None),
+                    "category_name": getattr(item, 'category_name', None),
                 }
-                for item in (getattr(proposal, 'items', []) or [])
+                for item in (getattr(proposal, 'subtransactions', []) or [])
             ],
         })
 
