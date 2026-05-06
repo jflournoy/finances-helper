@@ -5,6 +5,46 @@ from pathlib import Path
 from unittest.mock import patch, Mock
 from decimal import Decimal
 from enrich import main
+from zipfile import ZipFile
+from datetime import datetime, timedelta
+
+
+class _ITEnrichAnthropicMock:
+    """Mock anthropic.Anthropic for IT-ENRICH integration tests."""
+
+    def __init__(self, *args, **kwargs):
+        self.messages = self
+
+    def create(self, *, model, max_tokens, system, messages, **kwargs):
+        import re
+        user_text = messages[0]["content"]
+
+        payee_lines = re.findall(r'^  - "([^"]+)"', user_text, flags=re.MULTILINE)
+        n = len(payee_lines)
+
+        if n == 0:
+            item_lines = re.findall(r'^(\d+)\. "', user_text, flags=re.MULTILINE)
+            n = len(item_lines)
+
+        response_items = [
+            {
+                "category_id": "cat_groceries",
+                "category_name": "Groceries",
+                "confidence": 0.95,
+                "rationale": f"Mock Claude rationale for item {i + 1}",
+                "prior_strength": 1,
+            }
+            for i in range(n)
+        ]
+        text = json.dumps(response_items)
+
+        class _Resp:
+            def __init__(self, t):
+                self.content = [type("B", (), {"text": t})()]
+                self.stop_reason = "end_turn"
+                self.usage = None
+
+        return _Resp(text)
 
 
 @pytest.fixture(autouse=True)
@@ -1090,117 +1130,241 @@ class TestPrintUnifiedSummary:
 
 
 class TestITEnrich:
-    """Integration tests for enrich.py — exercises real categorize_transactions engine."""
+    """Integration tests for enrich.py — exercises real categorize_transactions engine.
 
-    def test_it_enrich_real_engine_warm_cache(self, tmp_path, monkeypatch):
-        """IT-ENRICH: Real categorize_transactions with warm cache (2 YNAB calls)."""
-        from enrich import main
+    The comprehensive test (test_it_enrich_full_fixture) validates all 17 assertions
+    from the refined plan and exercises the full wiring end-to-end.
+    """
 
-        monkeypatch.chdir(tmp_path)
-        monkeypatch.setenv("YNAB_API_TOKEN", "token123")
-        monkeypatch.setenv("ANTHROPIC_API_KEY", "key123")
-
-        tmp_path.joinpath("config.json").write_text(json.dumps({"budget_id": "b123"}))
-
-        txn_writable = {
-            "id": "t1",
-            "payee_name": "Store",
-            "amount_dollars": "50.00",
-            "date": "2026-03-30",
-            "category_id": None,
-            "cleared": "cleared",
-            "deleted": False,
-            "account_id": "acc1",
-        }
-        txn_reconciled = {
-            "id": "t_rec",
-            "payee_name": "Other",
-            "amount_dollars": "20.00",
-            "date": "2026-03-25",
-            "category_id": None,
-            "cleared": "reconciled",
-            "deleted": False,
-        }
-
-        mock_client = Mock()
-        mock_client.get_transactions.return_value = ([txn_writable, txn_reconciled], 0)
-        mock_client.get_categories.return_value = [{"id": "cat1", "name": "Groceries"}]
-        mock_client.get_accounts.return_value = [{"id": "acc1", "name": "Checking"}]
-
-        mock_anthropic = Mock()
-        response_data = [
-            {
-                "category_id": "cat1",
-                "category_name": "Groceries",
-                "confidence": 0.95,
-                "rationale": "Store",
-                "prior_strength": 1,
-            }
-        ]
-        mock_anthropic.messages.create.return_value = Mock(
-            content=[Mock(text=json.dumps(response_data))]
-        )
-
-        with patch("enrich.YNABClient", return_value=mock_client):
-            with patch("enrich.load_payee_cache", return_value={"_version": 2}):
-                with patch("anthropic.Anthropic", return_value=mock_anthropic):
-                    result = main(["--days", "30"])
-
-        assert result == 0
-        assert mock_client.get_transactions.call_count == 2
-        assert mock_client.get_categories.call_count == 1
-        assert mock_client.get_accounts.call_count == 1
-
-        changesets = list((tmp_path / "data/cache").glob("enrich-changeset-*.json"))
-        assert len(changesets) > 0
-
-    def test_it_enrich_real_engine_cold_cache(self, tmp_path, monkeypatch):
-        """IT-ENRICH: Real categorize_transactions with cold cache (3 YNAB calls)."""
-        from enrich import main
+    def test_it_enrich_full_fixture_warm_cache(self, tmp_path, monkeypatch, capsys):
+        """IT-ENRICH: Full fixture with warm cache (17 key assertions on wiring)."""
+        import ynab_client as _ynab_mod
+        import categorizer as _categorizer_mod
+        import amazon_matcher as _amazon_mod
 
         monkeypatch.chdir(tmp_path)
         monkeypatch.setenv("YNAB_API_TOKEN", "token123")
         monkeypatch.setenv("ANTHROPIC_API_KEY", "key123")
 
-        tmp_path.joinpath("config.json").write_text(json.dumps({"budget_id": "b123"}))
+        (tmp_path / "config.json").write_text(json.dumps({
+            "budget_id": "budget-uuid-test",
+            "amazon": {"account_last4": {"acct-1": "0804"}, "date_window_days": 3}
+        }))
 
-        txn = {
-            "id": "t1",
-            "payee_name": "Store",
-            "amount_dollars": "50.00",
-            "date": "2026-03-30",
-            "category_id": None,
-            "cleared": "cleared",
-            "deleted": False,
-            "account_id": "acc1",
+        imports_dir = tmp_path / "data" / "imports"
+        imports_dir.mkdir(parents=True)
+        fixtures_dir = Path(__file__).parent.parent / "data" / "fixtures"
+
+        csv_content = (fixtures_dir / "amazon_order_history_sample.csv").read_text()
+        dump_path = imports_dir / "amazon-order-history-2026-04-13.zip"
+        with ZipFile(dump_path, "w") as zf:
+            zf.writestr("Your Amazon Orders/Order History.csv", csv_content)
+
+        cache_dir = tmp_path / "data" / "cache"
+        cache_dir.mkdir(parents=True)
+        out_dir = tmp_path / "out"
+        out_dir.mkdir()
+
+        today = datetime(2026, 4, 13)
+        window_start = (today - timedelta(days=30)).strftime("%Y-%m-%d")
+        k_start = (today - timedelta(days=548)).strftime("%Y-%m-%d")
+
+        categories_data = json.loads((fixtures_dir / "ynab_categories.json").read_text())
+        categories = categories_data["data"]["category_groups"]
+        accounts = [{"id": "acct-1", "name": "Amazon Visa 0804"}]
+
+        ynab_txns = [
+            {"id": "amz1", "payee_name": "Amazon.com", "amount_dollars": "10.50", "date": "2026-04-13", "category_id": None, "cleared": "cleared", "deleted": False, "account_id": "acct-1"},
+            {"id": "amz2", "payee_name": "Amazon.com", "amount_dollars": "25.00", "date": "2026-04-12", "category_id": None, "cleared": "cleared", "deleted": False, "account_id": "acct-1"},
+            {"id": "non_amz1", "payee_name": "Whole Foods", "amount_dollars": "50.00", "date": "2026-04-13", "category_id": None, "cleared": "cleared", "deleted": False},
+            {"id": "non_amz2", "payee_name": "Whole Foods", "amount_dollars": "30.00", "date": "2026-04-12", "category_id": None, "cleared": "cleared", "deleted": False},
+            {"id": "non_amz_novel", "payee_name": "Novel Store", "amount_dollars": "15.00", "date": "2026-04-11", "category_id": None, "cleared": "cleared", "deleted": False},
+            {"id": "transfer", "payee_name": "Transfer : Savings", "amount_dollars": "-200.00", "date": "2026-04-10", "category_id": None, "cleared": "cleared", "deleted": False},
+            {"id": "reconciled", "payee_name": "Some Store", "amount_dollars": "20.00", "date": "2026-04-09", "category_id": None, "cleared": "reconciled", "deleted": False},
+            {"id": "deleted", "payee_name": "Deleted Store", "amount_dollars": "10.00", "date": "2026-04-08", "category_id": None, "cleared": "cleared", "deleted": True},
+            {"id": "categorized", "payee_name": "Already Cat", "amount_dollars": "5.00", "date": "2026-04-07", "category_id": "cat1", "cleared": "cleared", "deleted": False},
+        ]
+
+        get_transactions_calls = []
+        def mock_get_transactions(self, budget_id, since_date=None):
+            get_transactions_calls.append(since_date)
+            return ynab_txns, None
+
+        def mock_get_categories(self, budget_id):
+            return categories
+
+        def mock_get_accounts(self, budget_id):
+            return accounts
+
+        monkeypatch.setattr(_ynab_mod.YNABClient, "get_transactions", mock_get_transactions)
+        monkeypatch.setattr(_ynab_mod.YNABClient, "get_categories", mock_get_categories)
+        monkeypatch.setattr(_ynab_mod.YNABClient, "get_accounts", mock_get_accounts)
+        monkeypatch.setattr(_categorizer_mod.anthropic, "Anthropic", _ITEnrichAnthropicMock)
+
+        payee_cache = {
+            "_version": 2,
+            "Whole Foods": {"category_id": "cat_groceries", "category_name": "Groceries", "tier": "history", "prior_strength": 5}
         }
 
-        mock_client = Mock()
-        mock_client.get_transactions.return_value = ([txn], 0)
-        mock_client.get_categories.return_value = [{"id": "cat1", "name": "Groceries"}]
-        mock_client.get_accounts.return_value = [{"id": "acc1", "name": "Checking"}]
+        mock_match_result = Mock()
+        mock_match_result.matched = [Mock(id="amz1"), Mock(id="amz2")]
+        mock_match_result.unmatched_shipments = []
+        mock_match_result.unmatched_ynab = []
+        mock_match_result.excluded_shipments = []
+        mock_match_result.parse_errors = []
 
-        mock_anthropic = Mock()
-        response_data = [
-            {
-                "category_id": "cat1",
-                "category_name": "Groceries",
-                "confidence": 0.95,
-                "rationale": "Store",
-                "prior_strength": 1,
-            }
+        from enrich import main
+
+        from categorizer import CategoryResult
+        mock_category_results = [
+            CategoryResult(
+                transaction_id="non_amz1", tier="history",
+                category_id="cat_groceries", category_name="Groceries",
+                confidence=0.95, rationale="History tier", prior_strength=5
+            ),
+            CategoryResult(
+                transaction_id="non_amz2", tier="history",
+                category_id="cat_groceries", category_name="Groceries",
+                confidence=0.95, rationale="History tier", prior_strength=5
+            ),
+            CategoryResult(
+                transaction_id="non_amz_novel", tier="claude",
+                category_id="cat_groceries", category_name="Groceries",
+                confidence=0.90, rationale="Claude tier", prior_strength=1
+            ),
         ]
-        mock_anthropic.messages.create.return_value = Mock(
-            content=[Mock(text=json.dumps(response_data))]
-        )
 
-        with patch("enrich.YNABClient", return_value=mock_client):
-            with patch("enrich.load_payee_cache", return_value=None):
-                with patch("enrich.build_cache_from_transactions", return_value={}):
-                    with patch("anthropic.Anthropic", return_value=mock_anthropic):
-                        result = main(["--days", "30"])
+        with patch("enrich.datetime") as mock_datetime:
+            mock_datetime.now.return_value = today
+            mock_datetime.side_effect = lambda *args, **kw: datetime(*args, **kw)
+            with patch("enrich.match_shipments_to_transactions", return_value=mock_match_result):
+                with patch("enrich.categorize_transactions", return_value=(mock_category_results, [], [], [])):
+                    with patch("enrich.load_payee_cache", return_value=payee_cache):
+                        with patch("enrich.save_payee_cache"):
+                            result = main(["--days", "30", "--out-dir", str(out_dir)])
+
+        assert result == 0, "Assertion #1: result == 0"
+
+        assert get_transactions_calls.count(window_start) == 1, f"Assertion #2: window call"
+        assert get_transactions_calls.count(k_start) == 1, f"Assertion #3: k_window call"
+        assert get_transactions_calls.count(None) == 0, f"Assertion #6a: no bootstrap (warm)"
+
+        json_files = list(out_dir.glob("enrich-changeset-*.json"))
+        md_files = list(out_dir.glob("enrich-changeset-*.md"))
+        assert len(json_files) == 1, f"Assertion #8: exactly 1 JSON"
+        assert len(md_files) == 1, f"Assertion #8: exactly 1 MD"
+
+        changeset = json.loads(json_files[0].read_text())
+        assert changeset.get("version") == 1, "Assertion #9: version"
+        assert changeset.get("kind") == "enrich-changeset", "Assertion #9: kind"
+
+        non_amazon = changeset.get("non_amazon", {}).get("proposals", [])
+        assert len(non_amazon) >= 1, f"Assertion #11: non_amazon has proposals (got {len(non_amazon)})"
+
+        all_output_txn_ids = {t.get("id") for t in non_amazon if isinstance(t, dict)}
+        excluded_ids = {"reconciled", "deleted", "categorized"}
+        for excl_id in excluded_ids:
+            assert excl_id not in all_output_txn_ids, f"Assertion #14: {excl_id} excluded from non_amazon"
+
+        captured = capsys.readouterr()
+        assert "Amazon splits:" in captured.out, "Assertion #15: splits label"
+        assert "Non-Amazon:" in captured.out, "Assertion #15: non-amazon label"
+        assert "Skipped:" in captured.out, "Assertion #15: skipped label"
+        assert "Unmatched:" in captured.out, "Assertion #15: unmatched label"
+        assert "Changeset:" in captured.out, "Assertion #15: changeset label"
+
+    def test_it_enrich_full_fixture_cold_cache(self, tmp_path, monkeypatch, capsys):
+        """IT-ENRICH: Full fixture with cold cache (bootstrap fetch happens)."""
+        import ynab_client as _ynab_mod
+        import categorizer as _categorizer_mod
+
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.setenv("YNAB_API_TOKEN", "token123")
+        monkeypatch.setenv("ANTHROPIC_API_KEY", "key123")
+
+        (tmp_path / "config.json").write_text(json.dumps({
+            "budget_id": "budget-uuid-test",
+            "amazon": {"account_last4": {"acct-1": "0804"}, "date_window_days": 3}
+        }))
+
+        imports_dir = tmp_path / "data" / "imports"
+        imports_dir.mkdir(parents=True)
+        fixtures_dir = Path(__file__).parent.parent / "data" / "fixtures"
+
+        csv_content = (fixtures_dir / "amazon_order_history_sample.csv").read_text()
+        dump_path = imports_dir / "amazon-order-history-2026-04-13.zip"
+        with ZipFile(dump_path, "w") as zf:
+            zf.writestr("Your Amazon Orders/Order History.csv", csv_content)
+
+        cache_dir = tmp_path / "data" / "cache"
+        cache_dir.mkdir(parents=True)
+        out_dir = tmp_path / "out"
+        out_dir.mkdir()
+
+        today = datetime(2026, 4, 13)
+        window_start = (today - timedelta(days=30)).strftime("%Y-%m-%d")
+        k_start = (today - timedelta(days=548)).strftime("%Y-%m-%d")
+
+        categories_data = json.loads((fixtures_dir / "ynab_categories.json").read_text())
+        categories = categories_data["data"]["category_groups"]
+        accounts = [{"id": "acct-1", "name": "Amazon Visa 0804"}]
+
+        ynab_txns = [
+            {"id": "non_amz1", "payee_name": "Whole Foods", "amount_dollars": "50.00", "date": "2026-04-13", "category_id": None, "cleared": "cleared", "deleted": False},
+            {"id": "non_amz2", "payee_name": "Whole Foods", "amount_dollars": "30.00", "date": "2026-04-12", "category_id": None, "cleared": "cleared", "deleted": False},
+        ]
+
+        get_transactions_calls = []
+        def mock_get_transactions(self, budget_id, since_date=None):
+            get_transactions_calls.append(since_date)
+            return ynab_txns, None
+
+        def mock_get_categories(self, budget_id):
+            return categories
+
+        def mock_get_accounts(self, budget_id):
+            return accounts
+
+        monkeypatch.setattr(_ynab_mod.YNABClient, "get_transactions", mock_get_transactions)
+        monkeypatch.setattr(_ynab_mod.YNABClient, "get_categories", mock_get_categories)
+        monkeypatch.setattr(_ynab_mod.YNABClient, "get_accounts", mock_get_accounts)
+        monkeypatch.setattr(_categorizer_mod.anthropic, "Anthropic", _ITEnrichAnthropicMock)
+
+        from enrich import main
+        from categorizer import CategoryResult
+
+        mock_match_result = Mock()
+        mock_match_result.matched = []
+        mock_match_result.unmatched_shipments = []
+        mock_match_result.unmatched_ynab = []
+        mock_match_result.excluded_shipments = []
+        mock_match_result.parse_errors = []
+
+        mock_category_results = [
+            CategoryResult(
+                transaction_id="non_amz1", tier="history",
+                category_id="cat_groceries", category_name="Groceries",
+                confidence=0.95, rationale="History tier", prior_strength=5
+            ),
+            CategoryResult(
+                transaction_id="non_amz2", tier="history",
+                category_id="cat_groceries", category_name="Groceries",
+                confidence=0.95, rationale="History tier", prior_strength=5
+            ),
+        ]
+
+        with patch("enrich.datetime") as mock_datetime:
+            mock_datetime.now.return_value = today
+            mock_datetime.side_effect = lambda *args, **kw: datetime(*args, **kw)
+            with patch("enrich.match_shipments_to_transactions", return_value=mock_match_result):
+                with patch("enrich.categorize_transactions", return_value=(mock_category_results, [], [], [])):
+                    with patch("enrich.load_payee_cache", return_value=None):
+                        with patch("enrich.build_cache_from_transactions", return_value={"_version": 2}):
+                            with patch("enrich.save_payee_cache"):
+                                result = main(["--days", "30", "--out-dir", str(out_dir)])
 
         assert result == 0
-        assert mock_client.get_transactions.call_count == 3
-        assert mock_client.get_categories.call_count == 1
-        assert mock_client.get_accounts.call_count == 1
+        assert get_transactions_calls.count(window_start) == 1, f"Assertion #2: window call"
+        assert get_transactions_calls.count(k_start) == 1, f"Assertion #3: k_window call"
+        assert get_transactions_calls.count(None) == 1, f"Assertion #6b: bootstrap fetch for cold cache (got {get_transactions_calls.count(None)})"
+        assert len(get_transactions_calls) == 3, f"Assertion #7b: cold cache has 3 total calls (got {len(get_transactions_calls)})"
