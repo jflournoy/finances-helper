@@ -641,6 +641,86 @@ class TestWriteUnifiedChangeset:
         assert "50.00" in markdown
         assert "Groceries" in markdown
 
+    def test_write_unified_changeset_markdown_amazon_splits_table(self, tmp_path):
+        """Markdown output includes per-shipment Amazon splits table."""
+        from enrich import write_unified_changeset
+        from datetime import datetime
+        from categorizer import AmazonSplitProposal
+
+        out_dir = tmp_path / "changesets"
+        now = datetime(2026, 4, 27, 14, 30, 0)
+
+        class MockShipment:
+            def __init__(self, order_id, ship_date):
+                self.order_id = order_id
+                self.ship_date = ship_date
+
+        class MockTxn:
+            def __init__(self, txn_id, date):
+                self.id = txn_id
+                self.date = date
+
+        split1 = AmazonSplitProposal(
+            parent_ynab_txn=MockTxn("t1", "2026-03-25"),
+            shipment=MockShipment("111-0000001-0000001", datetime(2026, 3, 25).date()),
+            subtransactions=[],
+        )
+        split2 = AmazonSplitProposal(
+            parent_ynab_txn=MockTxn("t2", "2026-03-20"),
+            shipment=MockShipment("111-0000002-0000002", datetime(2026, 3, 20).date()),
+            subtransactions=[],
+        )
+
+        md_path, _ = write_unified_changeset(
+            flat_results=[],
+            skipped=[],
+            unmatched_amazon=[],
+            split_proposals=[split1, split2],
+            source_txns=[],
+            budget_id="b123",
+            since_date="2026-03-18",
+            days_back=30,
+            K=312,
+            confidence_threshold=0.0096,
+            dump_path=None,
+            out_dir=out_dir,
+            now=now,
+        )
+
+        markdown = md_path.read_text()
+        assert "## Amazon splits" in markdown
+        assert "2" in markdown  # 2 splits mentioned
+        assert "Order ID" in markdown or "order_id" in markdown  # Table header or JSON field
+        assert "111-0000001-0000001" in markdown
+        assert "111-0000002-0000002" in markdown
+
+    def test_write_unified_changeset_markdown_no_amazon_splits(self, tmp_path):
+        """Markdown output omits Amazon section when no splits."""
+        from enrich import write_unified_changeset
+        from datetime import datetime
+
+        out_dir = tmp_path / "changesets"
+        now = datetime(2026, 4, 27, 14, 30, 0)
+
+        md_path, _ = write_unified_changeset(
+            flat_results=[],
+            skipped=[],
+            unmatched_amazon=[],
+            split_proposals=[],
+            source_txns=[],
+            budget_id="b123",
+            since_date="2026-03-28",
+            days_back=30,
+            K=312,
+            confidence_threshold=0.0096,
+            dump_path=None,
+            out_dir=out_dir,
+            now=now,
+        )
+
+        markdown = md_path.read_text()
+        assert "## Amazon splits" not in markdown
+
     def test_write_unified_changeset_deterministic(self, tmp_path):
         """Same inputs produce byte-for-byte identical JSON output."""
         from enrich import write_unified_changeset

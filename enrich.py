@@ -292,10 +292,19 @@ def write_unified_changeset(
 
     if split_proposals:
         markdown_lines.extend([
-            f"## Amazon splits",
-            f"{len(split_proposals)} item-level splits",
-            "",
+            f"## Amazon splits ({len(split_proposals)} proposed)",
+            "| Date | Order ID | Ship Date | Items | Categories |",
+            "|------|----------|-----------|-------|------------|",
         ])
+        for proposal in sorted(split_proposals, key=lambda p: (getattr(p.parent_ynab_txn, 'date', '9999-12-31') if hasattr(p, 'parent_ynab_txn') else '9999-12-31', getattr(p.parent_ynab_txn, 'id', '') if hasattr(p, 'parent_ynab_txn') else '')):
+            parent_date = getattr(proposal.parent_ynab_txn, 'date', '') if hasattr(proposal, 'parent_ynab_txn') else ''
+            order_id = getattr(proposal.shipment, 'order_id', '') if hasattr(proposal, 'shipment') else ''
+            ship_date = str(getattr(proposal.shipment, 'ship_date', '')) if hasattr(proposal, 'shipment') and getattr(proposal.shipment, 'ship_date', None) else ''
+            items = getattr(proposal.shipment, 'items', []) if hasattr(proposal, 'shipment') else []
+            item_count = len(items) if items else 0
+            categories = ', '.join(_md_escape(getattr(item, 'category_name', '')) for item in items if hasattr(item, 'category_name')) if items else ''
+            markdown_lines.append(f"| {parent_date} | {order_id} | {ship_date} | {item_count} | {categories} |")
+        markdown_lines.append("")
 
     if proposals:
         markdown_lines.extend([
