@@ -225,7 +225,18 @@ def write_unified_changeset(
             }
             for s in sorted(match_result.excluded_shipments, key=lambda s: (getattr(s, 'order_id', ''), getattr(s, 'ship_date', '')))
         ]
-        parse_errors = match_result.parse_errors
+        def _serialize_parse_error(e):
+            if isinstance(e, dict):
+                return e
+            return {
+                "row_index": getattr(e, 'row_index', None),
+                "reason": getattr(e, 'reason', None),
+            }
+
+        parse_errors = [
+            _serialize_parse_error(e)
+            for e in sorted(match_result.parse_errors, key=lambda e: getattr(e, 'row_index', e.get('line', 0) if isinstance(e, dict) else 0))
+        ]
 
     # Build JSON payload
     payload = {

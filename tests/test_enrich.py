@@ -705,6 +705,73 @@ class TestWriteUnifiedChangeset:
         md2_content = md2.read_bytes()
         assert md1_content == md2_content, "Markdown outputs differ on identical inputs"
 
+    def test_write_unified_changeset_parse_errors_deterministic(self, tmp_path):
+        """parse_errors are sorted deterministically."""
+        from enrich import write_unified_changeset
+        from datetime import datetime
+        from amazon_matcher import MatchResult, ParseError
+        import json
+
+        source_txns = []
+        now = datetime(2026, 4, 27, 14, 30, 0)
+
+        parse_errors = [
+            ParseError(row_index=3, reason="Bad CSV"),
+            ParseError(row_index=1, reason="Missing field"),
+            ParseError(row_index=2, reason="Invalid date"),
+        ]
+
+        match_result = MatchResult(
+            matched=[],
+            unmatched_ynab=[],
+            unmatched_shipments=[],
+            excluded_shipments=[],
+            parse_errors=parse_errors,
+        )
+
+        out_dir1 = tmp_path / "changesets1"
+        out_dir2 = tmp_path / "changesets2"
+
+        md1, json1 = write_unified_changeset(
+            flat_results=[],
+            skipped=[],
+            unmatched_amazon=[],
+            split_proposals=[],
+            source_txns=source_txns,
+            budget_id="b123",
+            since_date="2026-03-28",
+            days_back=30,
+            K=312,
+            confidence_threshold=0.0096,
+            dump_path=None,
+            match_result=match_result,
+            out_dir=out_dir1,
+            now=now,
+        )
+
+        md2, json2 = write_unified_changeset(
+            flat_results=[],
+            skipped=[],
+            unmatched_amazon=[],
+            split_proposals=[],
+            source_txns=source_txns,
+            budget_id="b123",
+            since_date="2026-03-28",
+            days_back=30,
+            K=312,
+            confidence_threshold=0.0096,
+            dump_path=None,
+            match_result=match_result,
+            out_dir=out_dir2,
+            now=now,
+        )
+
+        json1_content = json.loads(json1.read_text())
+        json2_content = json.loads(json2.read_text())
+
+        assert json1_content["amazon"]["parse_errors"] == json2_content["amazon"]["parse_errors"], \
+            "parse_errors not deterministic: order changed between runs"
+
 
 class TestDumpFreshnessWarning:
     """Test _dump_freshness_warning function."""
