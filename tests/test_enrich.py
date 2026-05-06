@@ -224,19 +224,48 @@ class TestWriteUnifiedChangeset:
         assert "enrich-changeset-20260427-143005.md" in str(md_path)
 
     def test_summary_labels_present(self, tmp_path):
-        """Markdown output contains all required summary labels."""
+        """Markdown output contains all required summary labels when there's content."""
         from enrich import write_unified_changeset
         from datetime import datetime
+        from categorizer import CategoryResult
 
         out_dir = tmp_path / "changesets"
         now = datetime(2026, 4, 27, 14, 30, 0)
 
+        result = CategoryResult(
+            transaction_id="t1",
+            category_id="cat1",
+            category_name="Groceries",
+            tier="claude",
+            confidence=0.95,
+            rationale="Store",
+            prior_strength=1,
+        )
+
+        source_txns = [
+            {"id": "t1", "payee_name": "Store", "amount_dollars": "50.00", "date": "2026-03-30"}
+        ]
+
+        skipped_txn = {
+            "id": "t_skip",
+            "payee_name": "Transfer : Savings",
+            "amount_dollars": "100.00",
+            "date": "2026-03-30",
+        }
+
+        unmatched = [
+            (
+                {"id": "t_unmatched", "payee_name": "Amazon.com", "date": "2026-03-01"},
+                "date_out_of_window"
+            ),
+        ]
+
         md_path, json_path = write_unified_changeset(
-            flat_results=[],
-            skipped=[],
-            unmatched_amazon=[],
+            flat_results=[result],
+            skipped=[skipped_txn],
+            unmatched_amazon=unmatched,
             split_proposals=[],
-            source_txns=[],
+            source_txns=source_txns,
             budget_id="b123",
             since_date="2026-03-28",
             days_back=30,
@@ -253,7 +282,6 @@ class TestWriteUnifiedChangeset:
             "## Days back",
             "## K",
             "## Writable txns",
-            "## Amazon splits",
             "## Non-Amazon",
             "## Skipped",
             "## Unmatched Amazon txns",
@@ -569,6 +597,50 @@ class TestWriteUnifiedChangeset:
         assert unmatched_list[0]["transaction_id"] == "t_unmatched"
         assert unmatched_list[0]["reason"] == "date_out_of_window"
 
+    def test_write_unified_changeset_markdown_per_txn_tables(self, tmp_path):
+        """Markdown output includes per-txn tables with payee names and amounts."""
+        from enrich import write_unified_changeset
+        from datetime import datetime
+        from categorizer import CategoryResult
+
+        out_dir = tmp_path / "changesets"
+        now = datetime(2026, 4, 27, 14, 30, 0)
+
+        result = CategoryResult(
+            transaction_id="t1",
+            category_id="cat1",
+            category_name="Groceries",
+            tier="claude",
+            confidence=0.95,
+            rationale="Store",
+            prior_strength=1,
+        )
+
+        source_txns = [
+            {"id": "t1", "payee_name": "Whole Foods", "amount_dollars": "50.00", "date": "2026-03-30"}
+        ]
+
+        md_path, json_path = write_unified_changeset(
+            flat_results=[result],
+            skipped=[],
+            unmatched_amazon=[],
+            split_proposals=[],
+            source_txns=source_txns,
+            budget_id="b123",
+            since_date="2026-03-28",
+            days_back=30,
+            K=312,
+            confidence_threshold=0.0096,
+            dump_path=None,
+            out_dir=out_dir,
+            now=now,
+        )
+
+        markdown = md_path.read_text()
+        assert "Whole Foods" in markdown
+        assert "50.00" in markdown
+        assert "Groceries" in markdown
+
     def test_write_unified_changeset_deterministic(self, tmp_path):
         """Same inputs produce byte-for-byte identical JSON output."""
         from enrich import write_unified_changeset
@@ -628,6 +700,10 @@ class TestWriteUnifiedChangeset:
         json1_content = json1.read_bytes()
         json2_content = json2.read_bytes()
         assert json1_content == json2_content, "JSON outputs differ on identical inputs"
+
+        md1_content = md1.read_bytes()
+        md2_content = md2.read_bytes()
+        assert md1_content == md2_content, "Markdown outputs differ on identical inputs"
 
 
 class TestDumpFreshnessWarning:

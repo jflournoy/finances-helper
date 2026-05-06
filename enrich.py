@@ -261,7 +261,7 @@ def write_unified_changeset(
     json_content = json.dumps(payload, default=_json_default, indent=2)
     json_path.write_text(json_content)
 
-    # Write Markdown (basic for now)
+    # Write Markdown with per-txn tables
     markdown_lines = [
         "# Enrich Changeset",
         "",
@@ -277,22 +277,66 @@ def write_unified_changeset(
         f"## Writable txns",
         f"{len(flat_results) + len(split_proposals)} total",
         "",
-        f"## Amazon splits",
-        f"{len(split_proposals)} item-level splits",
-        "",
-        f"## Non-Amazon",
-        f"{len(flat_results)} categorized",
-        "",
-        f"## Skipped",
-        f"{len(skipped)} transfers/reconciled",
-        "",
-        f"## Unmatched Amazon txns",
-        f"{len(unmatched_amazon)} YNAB",
-        "",
-        f"## Changeset",
+    ]
+
+    if split_proposals:
+        markdown_lines.extend([
+            f"## Amazon splits",
+            f"{len(split_proposals)} item-level splits",
+            "",
+        ])
+
+    if proposals:
+        markdown_lines.extend([
+            "## Non-Amazon",
+            "| Date | Payee | Amount | → Category | Tier | Confidence |",
+            "|------|-------|--------|-----------|------|------------|",
+        ])
+        for p in proposals:
+            date_str = p.get("date", "")
+            payee_str = _md_escape(p.get("payee_name", ""))
+            amount_str = p.get("amount_dollars", "")
+            cat_str = _md_escape(p.get("category_name", ""))
+            tier_str = p.get("tier", "")
+            conf_str = f"{p.get('confidence', 0):.2f}"
+            markdown_lines.append(f"| {date_str} | {payee_str} | {amount_str} | {cat_str} | {tier_str} | {conf_str} |")
+        markdown_lines.append("")
+
+    if skipped_transfers:
+        markdown_lines.extend([
+            "## Skipped",
+        ])
+        for t in skipped_transfers:
+            payee = _md_escape(t.get("payee_name", ""))
+            amount = t.get("amount_dollars", "")
+            date = t.get("date", "")
+            markdown_lines.append(f"- {date} {payee} {amount}")
+        markdown_lines.append("")
+
+    if unmatched_ynab:
+        markdown_lines.extend([
+            "## Unmatched Amazon txns",
+        ])
+        by_reason = {}
+        for u in unmatched_ynab:
+            reason = u.get("reason", "unknown")
+            if reason not in by_reason:
+                by_reason[reason] = []
+            by_reason[reason].append(u)
+        for reason in sorted(by_reason.keys()):
+            markdown_lines.append(f"### {reason}")
+            for u in by_reason[reason]:
+                payee = _md_escape(u.get("payee_name", ""))
+                amount = u.get("amount_dollars", "")
+                date = u.get("date", "")
+                markdown_lines.append(f"- {date} {payee} {amount}")
+            markdown_lines.append("")
+
+    markdown_lines.extend([
+        "## Changeset",
         f"- {md_path.name}",
         f"- {json_path.name}",
-    ]
+    ])
 
     markdown = "\n".join(markdown_lines)
     md_path.write_text(markdown)
