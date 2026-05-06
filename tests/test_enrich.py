@@ -86,6 +86,28 @@ class TestEnrichMain:
         captured = capsys.readouterr()
         assert "No uncategorized writable transactions found" in captured.out
 
+    def test_no_writable_txns_with_cold_cache(self, tmp_path, monkeypatch):
+        """No writable txns with cold cache triggers bootstrap fetch."""
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.setenv("YNAB_API_TOKEN", "token123")
+        monkeypatch.setenv("ANTHROPIC_API_KEY", "key123")
+        tmp_path.joinpath("config.json").write_text(json.dumps({"budget_id": "b123"}))
+
+        mock_client = Mock()
+        mock_client.get_transactions.return_value = ([], 0)
+        mock_client.get_categories.return_value = []
+        mock_client.get_accounts.return_value = []
+
+        with patch("enrich.YNABClient", return_value=mock_client):
+            with patch("enrich.load_payee_cache", return_value=None):
+                with patch("enrich.build_cache_from_transactions", return_value={}):
+                    with patch("enrich.save_payee_cache"):
+                        result = main(["--days", "30"])
+
+        assert result == 0
+        # Bootstrap fetch should happen even with no writable txns
+        assert mock_client.get_transactions.call_count == 3, f"Expected 3 calls (window, k_window, bootstrap), got {mock_client.get_transactions.call_count}"
+
     def test_ynab_call_count_warm_cache(self, tmp_path, monkeypatch):
         """YNAB get_transactions called exactly twice for warm cache."""
         monkeypatch.chdir(tmp_path)

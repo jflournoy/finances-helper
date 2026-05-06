@@ -431,6 +431,13 @@ def main(argv=None):
     confidence_threshold = compute_confidence_threshold(K)
     recent_categories = filter_categories_by_usage(categories, k_txns)
 
+    # Cache load (and bootstrap if needed) — BEFORE early return
+    cache = load_payee_cache()
+    if not cache or cache.get("_migrated_from_v1"):
+        all_txns, _ = client.get_transactions(budget_id)  # bootstrap-only fetch (call #5)
+        cache = build_cache_from_transactions(all_txns)
+        save_payee_cache(cache)
+
     # Filter writable uncategorized
     writable = filter_uncategorized_writable(txns_window)
 
@@ -438,13 +445,6 @@ def main(argv=None):
     if not writable:
         print("No uncategorized writable transactions found.")
         return 0
-
-    # Cache load (and bootstrap if needed)
-    cache = load_payee_cache()
-    if not cache or cache.get("_migrated_from_v1"):
-        all_txns, _ = client.get_transactions(budget_id)  # bootstrap-only fetch (call #5)
-        cache = build_cache_from_transactions(all_txns)
-        save_payee_cache(cache)
 
     # Amazon dump (conditional on Amazon payees present)
     match_result = None
