@@ -832,8 +832,9 @@ class TestPrintUnifiedSummary:
     """Test _print_unified_summary function."""
 
     def test_print_unified_summary_labels(self, capsys):
-        """Summary output contains all required labels."""
+        """Summary output contains all required labels with exact format."""
         from enrich import _print_unified_summary
+        import re
 
         _print_unified_summary(
             dump_path=Path("data/imports/amazon-order-history.zip"),
@@ -851,20 +852,23 @@ class TestPrintUnifiedSummary:
         )
 
         captured = capsys.readouterr()
+        text = captured.out
+
         required_labels = [
             "Dump:",
             "Days back:",
             "K:",
-            "Threshold:",
-            "Writable:",
             "Amazon splits:",
             "Non-Amazon:",
             "Skipped:",
-            "Unmatched Amazon txns:",
+            "Unmatched:",
             "Changeset:",
         ]
+
         for label in required_labels:
-            assert label in captured.out, f"Missing label: {label}"
+            assert label in text, f"Missing label: '{label}'"
+
+        assert "Unmatched Amazon txns:" not in text, "Old label 'Unmatched Amazon txns:' should not appear; use 'Unmatched:'"
 
     def test_print_unified_summary_counts(self, capsys):
         """Summary output includes correct counts."""

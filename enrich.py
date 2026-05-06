@@ -50,7 +50,7 @@ def _print_unified_summary(
     print(f"  Amazon splits: {amazon_splits_count}")
     print(f"  Non-Amazon: {non_amazon_count}")
     print(f"  Skipped: {skipped_count}")
-    print(f"  Unmatched Amazon txns: {unmatched_amazon_count}")
+    print(f"  Unmatched: {unmatched_amazon_count}")
     print()
     print(f"Changeset:")
     print(f"  - {md_path.name}")
