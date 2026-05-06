@@ -96,6 +96,7 @@ def write_unified_changeset(
     unmatched_amazon,
     split_proposals,
     *,
+    source_txns: list[dict],
     budget_id: str,
     since_date: str,
     days_back: int,
@@ -112,6 +113,7 @@ def write_unified_changeset(
         skipped: List of skipped transactions.
         unmatched_amazon: List of (txn, reason) tuples for unmatched Amazon txns.
         split_proposals: List of AmazonSplitProposal objects.
+        source_txns: List of source YNAB transactions (dict) to join proposal metadata.
         budget_id: YNAB budget ID for metadata.
         since_date: ISO 8601 string (YYYY-MM-DD) for window start.
         days_back: Number of days in working window.
@@ -123,6 +125,9 @@ def write_unified_changeset(
 
     Returns:
         (markdown_path, json_path)
+
+    Raises:
+        ValueError: If a proposal references a transaction_id not in source_txns.
     """
     if now is None:
         now = datetime.now()
@@ -133,11 +138,20 @@ def write_unified_changeset(
     timestamp = now.strftime("%Y%m%d-%H%M%S")
     base_path = out_dir / f"enrich-changeset-{timestamp}"
 
+    # Build lookup for source txns by id
+    txn_by_id = {t["id"]: t for t in source_txns}
+
     # Serialize flat results (non-Amazon proposals) — sorted by date then id
     proposals = []
-    for result in sorted(flat_results, key=lambda r: (getattr(r, 'date', '9999-12-31'), r.transaction_id)):
+    for result in sorted(flat_results, key=lambda r: (txn_by_id.get(r.transaction_id, {}).get("date", "9999-12-31"), r.transaction_id)):
+        txn = txn_by_id.get(result.transaction_id)
+        if txn is None:
+            raise ValueError(f"Proposal references unknown transaction_id: {result.transaction_id}")
         proposals.append({
             "transaction_id": result.transaction_id,
+            "payee_name": txn.get("payee_name"),
+            "amount_dollars": txn.get("amount_dollars"),
+            "date": txn.get("date"),
             "category_id": result.category_id,
             "category_name": result.category_name,
             "tier": result.tier,
@@ -384,6 +398,7 @@ def main(argv=None):
         skipped=skipped,
         unmatched_amazon=unmatched_amazon,
         split_proposals=split_proposals,
+        source_txns=writable,
         budget_id=budget_id,
         since_date=since_date,
         days_back=args.days,

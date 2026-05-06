@@ -173,6 +173,7 @@ class TestWriteUnifiedChangeset:
             skipped=[],
             unmatched_amazon=[],
             split_proposals=[],
+            source_txns=[],
             budget_id="b123",
             since_date="2026-03-28",
             days_back=30,
@@ -208,6 +209,7 @@ class TestWriteUnifiedChangeset:
             skipped=[],
             unmatched_amazon=[],
             split_proposals=[],
+            source_txns=[],
             budget_id="b123",
             since_date="2026-03-28",
             days_back=30,
@@ -234,6 +236,7 @@ class TestWriteUnifiedChangeset:
             skipped=[],
             unmatched_amazon=[],
             split_proposals=[],
+            source_txns=[],
             budget_id="b123",
             since_date="2026-03-28",
             days_back=30,
@@ -288,11 +291,17 @@ class TestWriteUnifiedChangeset:
             prior_strength=2,
         )
 
+        source_txns = [
+            {"id": "t1", "payee_name": "Whole Foods", "amount_dollars": "50.00", "date": "2026-03-30"},
+            {"id": "t2", "payee_name": "Electric Co", "amount_dollars": "120.00", "date": "2026-03-31"},
+        ]
+
         md_path, json_path = write_unified_changeset(
             flat_results=[result1, result2],
             skipped=[],
             unmatched_amazon=[],
             split_proposals=[],
+            source_txns=source_txns,
             budget_id="b123",
             since_date="2026-03-28",
             days_back=30,
@@ -307,12 +316,58 @@ class TestWriteUnifiedChangeset:
         proposals = payload["non_amazon"]["proposals"]
         assert len(proposals) == 2
         assert proposals[0]["transaction_id"] == "t1"
+        assert proposals[0]["payee_name"] == "Whole Foods"
+        assert proposals[0]["amount_dollars"] == "50.00"
+        assert proposals[0]["date"] == "2026-03-30"
         assert proposals[0]["category_id"] == "cat1"
         assert proposals[0]["category_name"] == "Groceries"
         assert proposals[0]["tier"] == "claude"
         assert proposals[0]["confidence"] == 0.95
         assert proposals[1]["transaction_id"] == "t2"
+        assert proposals[1]["payee_name"] == "Electric Co"
+        assert proposals[1]["amount_dollars"] == "120.00"
+        assert proposals[1]["date"] == "2026-03-31"
         assert proposals[1]["tier"] == "history"
+
+    def test_write_unified_changeset_raises_on_missing_txn(self, tmp_path):
+        """Missing source txn for a proposal raises loudly."""
+        from enrich import write_unified_changeset
+        from datetime import datetime
+        from categorizer import CategoryResult
+
+        out_dir = tmp_path / "changesets"
+        now = datetime(2026, 4, 27, 14, 30, 0)
+
+        result1 = CategoryResult(
+            transaction_id="t_missing",
+            category_id="cat1",
+            category_name="Groceries",
+            tier="claude",
+            confidence=0.95,
+            rationale="Store",
+            prior_strength=1,
+        )
+
+        source_txns = [
+            {"id": "t1", "payee_name": "Store", "amount_dollars": "50.00", "date": "2026-03-30"},
+        ]
+
+        with pytest.raises(ValueError, match="t_missing"):
+            write_unified_changeset(
+                flat_results=[result1],
+                skipped=[],
+                unmatched_amazon=[],
+                split_proposals=[],
+                source_txns=source_txns,
+                budget_id="b123",
+                since_date="2026-03-28",
+                days_back=30,
+                K=312,
+                confidence_threshold=0.0096,
+                dump_path=None,
+                out_dir=out_dir,
+                now=now,
+            )
 
     def test_write_unified_changeset_serializes_skipped(self, tmp_path):
         """skipped transactions are serialized into non_amazon.skipped_transfers."""
@@ -334,6 +389,7 @@ class TestWriteUnifiedChangeset:
             skipped=[skipped_txn],
             unmatched_amazon=[],
             split_proposals=[],
+            source_txns=[],
             budget_id="b123",
             since_date="2026-03-28",
             days_back=30,
@@ -370,6 +426,7 @@ class TestWriteUnifiedChangeset:
             skipped=[],
             unmatched_amazon=unmatched,
             split_proposals=[],
+            source_txns=[],
             budget_id="b123",
             since_date="2026-03-28",
             days_back=30,
@@ -402,6 +459,10 @@ class TestWriteUnifiedChangeset:
             prior_strength=1,
         )
 
+        source_txns = [
+            {"id": "t1", "payee_name": "Store", "amount_dollars": "50.00", "date": "2026-03-30"}
+        ]
+
         now = datetime(2026, 4, 27, 14, 30, 0)
         out_dir1 = tmp_path / "changesets1"
         out_dir2 = tmp_path / "changesets2"
@@ -411,6 +472,7 @@ class TestWriteUnifiedChangeset:
             skipped=[],
             unmatched_amazon=[],
             split_proposals=[],
+            source_txns=source_txns,
             budget_id="b123",
             since_date="2026-03-28",
             days_back=30,
@@ -426,6 +488,7 @@ class TestWriteUnifiedChangeset:
             skipped=[],
             unmatched_amazon=[],
             split_proposals=[],
+            source_txns=source_txns,
             budget_id="b123",
             since_date="2026-03-28",
             days_back=30,
