@@ -104,6 +104,7 @@ def write_unified_changeset(
     confidence_threshold: float,
     dump_path: Path | None,
     out_dir: Path = Path("data/cache"),
+    match_result=None,
     now: datetime | None = None,
 ) -> tuple[Path, Path]:
     """Write unified enrich changeset to paired markdown + JSON artifacts.
@@ -200,6 +201,29 @@ def write_unified_changeset(
             ],
         })
 
+    # Serialize match_result if provided
+    unmatched_shipments = []
+    excluded_shipments = []
+    parse_errors = []
+    if match_result:
+        unmatched_shipments = [
+            {
+                "order_id": getattr(s, 'order_id', None),
+                "ship_date": str(getattr(s, 'ship_date', None)) if getattr(s, 'ship_date', None) else None,
+                "total_amount": float(getattr(s, 'total_amount', 0)) if getattr(s, 'total_amount', None) else None,
+            }
+            for s in sorted(match_result.unmatched_shipments, key=lambda s: (getattr(s, 'order_id', ''), getattr(s, 'ship_date', '')))
+        ]
+        excluded_shipments = [
+            {
+                "order_id": getattr(s, 'order_id', None),
+                "ship_date": str(getattr(s, 'ship_date', None)) if getattr(s, 'ship_date', None) else None,
+                "total_amount": float(getattr(s, 'total_amount', 0)) if getattr(s, 'total_amount', None) else None,
+            }
+            for s in sorted(match_result.excluded_shipments, key=lambda s: (getattr(s, 'order_id', ''), getattr(s, 'ship_date', '')))
+        ]
+        parse_errors = match_result.parse_errors
+
     # Build JSON payload
     payload = {
         "version": 1,
@@ -216,9 +240,9 @@ def write_unified_changeset(
         "amazon": {
             "splits": splits,
             "unmatched_ynab": unmatched_ynab,
-            "unmatched_shipments": [],
-            "excluded_shipments": [],
-            "parse_errors": [],
+            "unmatched_shipments": unmatched_shipments,
+            "excluded_shipments": excluded_shipments,
+            "parse_errors": parse_errors,
         },
         "non_amazon": {
             "proposals": proposals,
@@ -405,6 +429,7 @@ def main(argv=None):
         K=K,
         confidence_threshold=confidence_threshold,
         dump_path=dump_path,
+        match_result=match_result,
         out_dir=args.out_dir,
     )
 

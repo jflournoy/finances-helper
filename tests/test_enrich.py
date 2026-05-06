@@ -406,6 +406,62 @@ class TestWriteUnifiedChangeset:
         assert skipped_list[0]["id"] == "t_skip"
         assert skipped_list[0]["payee_name"] == "Transfer : Savings"
 
+    def test_write_unified_changeset_serializes_match_result(self, tmp_path):
+        """match_result shipments and parse_errors are serialized into amazon sections."""
+        from enrich import write_unified_changeset
+        from datetime import datetime
+        from amazon_matcher import AmazonShipment, MatchResult
+
+        out_dir = tmp_path / "changesets"
+        now = datetime(2026, 4, 27, 14, 30, 0)
+
+        shipment = AmazonShipment(
+            order_id="111-0000001-0000001",
+            ship_date=datetime(2026, 3, 25).date(),
+            payment_method_raw="Visa - XXXX",
+            payment_method_last4="0804",
+            is_split_tender=False,
+            currency="USD",
+            item_subtotal=Decimal("50.00"),
+            tax=Decimal("2.50"),
+            shipping=Decimal("0"),
+            discounts=Decimal("0"),
+            total_amount=Decimal("52.50"),
+            items=[],
+            shipment_status="Shipped",
+        )
+
+        match_result = MatchResult(
+            matched=[],
+            unmatched_ynab=[],
+            unmatched_shipments=[shipment],
+            excluded_shipments=[],
+            parse_errors=[{"line": 5, "error": "Invalid date"}],
+        )
+
+        md_path, json_path = write_unified_changeset(
+            flat_results=[],
+            skipped=[],
+            unmatched_amazon=[],
+            split_proposals=[],
+            source_txns=[],
+            budget_id="b123",
+            since_date="2026-03-28",
+            days_back=30,
+            K=312,
+            confidence_threshold=0.0096,
+            dump_path=None,
+            out_dir=out_dir,
+            match_result=match_result,
+            now=now,
+        )
+
+        payload = json.loads(json_path.read_text())
+        assert len(payload["amazon"]["unmatched_shipments"]) == 1
+        assert payload["amazon"]["unmatched_shipments"][0]["order_id"] == "111-0000001-0000001"
+        assert len(payload["amazon"]["parse_errors"]) == 1
+        assert payload["amazon"]["parse_errors"][0]["error"] == "Invalid date"
+
     def test_write_unified_changeset_serializes_unmatched_amazon(self, tmp_path):
         """unmatched_amazon tuples are serialized into amazon.unmatched_ynab."""
         from enrich import write_unified_changeset
