@@ -216,7 +216,6 @@ def write_unified_changeset(
             account_name = None
 
         ship = getattr(proposal, "shipment", None)
-        ship_date = getattr(ship, "ship_date", None) if ship is not None else None
         subtransactions = []
         for sub in getattr(proposal, "subtransactions", []) or []:
             item = getattr(sub, "item", None)
@@ -242,7 +241,7 @@ def write_unified_changeset(
             "account_name": account_name,
             "shipment": {
                 "order_id": getattr(ship, "order_id", None) if ship is not None else None,
-                "ship_date": ship_date,
+                "ship_date": getattr(ship, "ship_date", None) if ship is not None else None,
                 "payment_method_last4": getattr(ship, "payment_method_last4", None) if ship is not None else None,
                 "total_amount": getattr(ship, "total_amount", None) if ship is not None else None,
                 "item_count": len(getattr(ship, "items", []) or []) if ship is not None else 0,
