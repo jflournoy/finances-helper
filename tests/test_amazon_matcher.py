@@ -5,6 +5,7 @@ import tempfile
 from datetime import date
 from decimal import Decimal
 from pathlib import Path
+from unittest.mock import patch
 from zipfile import ZipFile
 
 import pytest
@@ -3711,11 +3712,10 @@ class TestCLI:
                 return None
             elif key == "ANTHROPIC_API_KEY":
                 return "test-key"
+            elif key == "YNAB_DEFAULT_BUDGET":
+                return "test-uuid"
             return original_getenv(key, default)
         monkeypatch.setattr(os, "getenv", mock_getenv)
-        (tmp_path / "config.json").write_text(
-            '{"budget_id": "test-uuid", "amazon": {"account_last4": {}}}'
-        )
         with pytest.raises(ValueError, match="YNAB_API_TOKEN"):
             main(["--days", "60"])
 
@@ -3731,57 +3731,35 @@ class TestCLI:
                 return None
             elif key == "YNAB_API_TOKEN":
                 return "test-token"
+            elif key == "YNAB_DEFAULT_BUDGET":
+                return "test-uuid"
             return original_getenv(key, default)
         monkeypatch.setattr(os, "getenv", mock_getenv)
-        (tmp_path / "config.json").write_text(
-            '{"budget_id": "test-uuid", "amazon": {"account_last4": {}}}'
-        )
         with pytest.raises(ValueError, match="ANTHROPIC_API_KEY"):
             main(["--days", "60"])
 
-    def test_missing_config_raises(self, tmp_path, monkeypatch):
-        """Missing config.json → ValueError mentioning config.json."""
+    def test_missing_budget_env_raises(self, tmp_path, monkeypatch):
+        """Missing YNAB_DEFAULT_BUDGET → ValueError mentioning the var."""
         from amazon_matcher import main
         monkeypatch.chdir(tmp_path)
         monkeypatch.setenv("YNAB_API_TOKEN", "test-token")
         monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key")
-        with pytest.raises(ValueError, match="config.json"):
-            main(["--days", "60"])
+        monkeypatch.delenv("YNAB_DEFAULT_BUDGET", raising=False)
+        with patch("amazon_matcher.load_dotenv"):
+            with pytest.raises(ValueError, match="YNAB_DEFAULT_BUDGET"):
+                main(["--days", "60"])
 
-    def test_missing_amazon_section_raises(self, tmp_path, monkeypatch):
-        """config.json without 'amazon' key → ValueError mentioning 'amazon'."""
+    def test_missing_config_is_allowed(self, tmp_path, monkeypatch):
+        """Missing config.json is fine — config is optional, defaults apply."""
         from amazon_matcher import main
         monkeypatch.chdir(tmp_path)
         monkeypatch.setenv("YNAB_API_TOKEN", "test-token")
         monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key")
-        (tmp_path / "config.json").write_text('{"budget_id": "test-uuid"}')
-        with pytest.raises(ValueError, match="amazon"):
-            main(["--days", "60"])
-
-    def test_missing_account_last4_raises(self, tmp_path, monkeypatch):
-        """config.json amazon section without account_last4 → ValueError."""
-        from amazon_matcher import main
-        monkeypatch.chdir(tmp_path)
-        monkeypatch.setenv("YNAB_API_TOKEN", "test-token")
-        monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key")
-        (tmp_path / "config.json").write_text(
-            '{"budget_id": "test-uuid", "amazon": {"date_window_days": 3}}'
-        )
-        with pytest.raises(ValueError, match="account_last4"):
-            main(["--days", "60"])
-
-    def test_empty_account_last4_is_allowed(self, tmp_path, monkeypatch):
-        """account_last4 as empty dict is valid config (passes validation)."""
-        from amazon_matcher import main
-        monkeypatch.chdir(tmp_path)
-        monkeypatch.setenv("YNAB_API_TOKEN", "test-token")
-        monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key")
-        (tmp_path / "config.json").write_text(
-            '{"budget_id": "test-uuid", "amazon": {"account_last4": {}}}'
-        )
-        # Config validation passes, but dump is missing, so FileNotFoundError is expected
-        with pytest.raises(FileNotFoundError, match="No Amazon dump"):
-            main(["--days", "60"])
+        monkeypatch.setenv("YNAB_DEFAULT_BUDGET", "test-uuid")
+        # No config.json. Validation passes; dump is missing, so we hit that error instead.
+        with patch("amazon_matcher.load_dotenv"):
+            with pytest.raises(FileNotFoundError, match="No Amazon dump"):
+                main(["--days", "60"])
 
     def test_date_window_days_defaults_to_3(self, tmp_path, monkeypatch):
         """date_window_days defaults to 3 when absent from config."""
@@ -3789,13 +3767,13 @@ class TestCLI:
         monkeypatch.chdir(tmp_path)
         monkeypatch.setenv("YNAB_API_TOKEN", "test-token")
         monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key")
-        (tmp_path / "config.json").write_text(
-            '{"budget_id": "test-uuid", "amazon": {"account_last4": {}}}'
-        )
-        try:
-            main(["--days", "60"])
-        except (FileNotFoundError, ValueError) as e:
-            assert "date_window_days" not in str(e)
+        monkeypatch.setenv("YNAB_DEFAULT_BUDGET", "test-uuid")
+        (tmp_path / "config.json").write_text('{"amazon": {}}')
+        with patch("amazon_matcher.load_dotenv"):
+            try:
+                main(["--days", "60"])
+            except (FileNotFoundError, ValueError) as e:
+                assert "date_window_days" not in str(e)
 
     def test_it_cli_full_pipeline(self, tmp_path, monkeypatch, capsys):
         """IT-CLI: Full pipeline with mocked YNAB and Anthropic."""
@@ -3809,9 +3787,9 @@ class TestCLI:
         monkeypatch.chdir(tmp_path)
         monkeypatch.setenv("YNAB_API_TOKEN", "test-token")
         monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key")
+        monkeypatch.setenv("YNAB_DEFAULT_BUDGET", "budget-uuid-test")
 
         (tmp_path / "config.json").write_text(json.dumps({
-            "budget_id": "budget-uuid-test",
             "amazon": {"account_last4": {"acct-1": "0804"}, "date_window_days": 3}
         }))
 
@@ -3842,6 +3820,7 @@ class TestCLI:
         monkeypatch.setattr(_ynab_mod.YNABClient, "get_transactions", mock_get_transactions)
         monkeypatch.setattr(_ynab_mod.YNABClient, "get_categories", mock_get_categories)
         monkeypatch.setattr(_ynab_mod.YNABClient, "get_accounts", mock_get_accounts)
+        monkeypatch.setattr(_ynab_mod.YNABClient, "resolve_budget_id", lambda self, name: "budget-uuid-test")
 
         monkeypatch.setattr(_categorizer_mod.anthropic, "Anthropic", _ITChangesetAnthropicMock)
 

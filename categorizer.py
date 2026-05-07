@@ -1169,21 +1169,16 @@ def main():
     if not anthropic_key:
         raise ValueError("ANTHROPIC_API_KEY environment variable is required")
 
-    # Load config
-    config_path = Path("config.json")
-    if not config_path.exists():
-        raise ValueError("config.json not found. Run setup.py first.")
-
-    config = json.loads(config_path.read_text())
-    budget_id = config.get("budget_id")
-    if not budget_id:
-        raise ValueError("budget_id not found in config.json")
+    budget_name = os.getenv("YNAB_DEFAULT_BUDGET")
+    if not budget_name:
+        raise ValueError("YNAB_DEFAULT_BUDGET environment variable is required (set in .env)")
 
     # Fetch data from YNAB
     from ynab_client import YNABClient
     from datetime import datetime, timedelta
 
     client = YNABClient(token=ynab_token)
+    budget_id = client.resolve_budget_id(budget_name)
     since_date = (datetime.now() - timedelta(days=args.days)).strftime("%Y-%m-%d")
 
     transactions, _ = client.get_transactions(budget_id, since_date=since_date)

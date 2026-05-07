@@ -196,6 +196,35 @@ def test_get_budget_single(client):
     assert budget["id"] == "aaaaaaaa-0000-0000-0000-000000000001"
 
 
+def test_resolve_budget_id_match(client):
+    fixture = {"data": {"budgets": [
+        {"id": "uuid-a", "name": "Personal"},
+        {"id": "uuid-b", "name": "Business"},
+    ], "default_budget": None}}
+    with mock_get(client, fixture):
+        assert client.resolve_budget_id("Personal") == "uuid-a"
+        assert client.resolve_budget_id("Business") == "uuid-b"
+
+
+def test_resolve_budget_id_not_found_lists_available(client):
+    fixture = {"data": {"budgets": [
+        {"id": "uuid-a", "name": "Personal"},
+    ], "default_budget": None}}
+    with mock_get(client, fixture):
+        with pytest.raises(ValueError, match="Personal"):
+            client.resolve_budget_id("DoesNotExist")
+
+
+def test_resolve_budget_id_ambiguous(client):
+    fixture = {"data": {"budgets": [
+        {"id": "uuid-a", "name": "Same"},
+        {"id": "uuid-b", "name": "Same"},
+    ], "default_budget": None}}
+    with mock_get(client, fixture):
+        with pytest.raises(ValueError, match="matches 2"):
+            client.resolve_budget_id("Same")
+
+
 def test_get_accounts_filters_deleted(client):
     fixture = load_fixture("ynab_accounts.json")
     with mock_get(client, fixture):

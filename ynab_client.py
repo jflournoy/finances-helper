@@ -138,6 +138,32 @@ class YNABClient:
         data = self._get(f"/budgets/{budget_id}")
         return data.get("budget", {})
 
+    def resolve_budget_id(self, name_or_id: str) -> str:
+        """Resolve YNAB_DEFAULT_BUDGET to a budget UUID.
+
+        Treats the input as a name and looks it up against /budgets. If exactly
+        one budget matches, returns its id. Raises ValueError on no match or
+        multiple matches with a list of available names so the user can fix
+        their .env.
+
+        A bare UUID is treated as a name too — if the user has a budget literally
+        named like a UUID this works; otherwise it falls through to the
+        not-found path with the available-names list.
+        """
+        budgets = self.get_budgets()
+        matches = [b for b in budgets if b.get("name") == name_or_id]
+        if len(matches) == 1:
+            return matches[0]["id"]
+        if not matches:
+            available = [b.get("name") for b in budgets]
+            raise ValueError(
+                f"YNAB_DEFAULT_BUDGET={name_or_id!r} not found. Available: {available}"
+            )
+        raise ValueError(
+            f"YNAB_DEFAULT_BUDGET={name_or_id!r} matches {len(matches)} budgets — "
+            "rename one in YNAB to disambiguate."
+        )
+
     def get_accounts(self, budget_id: str) -> list:
         """Get accounts for a budget, filtering out deleted accounts."""
         data = self._get(f"/budgets/{budget_id}/accounts")

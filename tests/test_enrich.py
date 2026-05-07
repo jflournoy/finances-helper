@@ -81,7 +81,7 @@ class TestEnrichMain:
         monkeypatch.chdir(tmp_path)
         monkeypatch.delenv("YNAB_API_TOKEN", raising=False)
         monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
-        tmp_path.joinpath("config.json").write_text(json.dumps({"budget_id": "b123"}))
+        monkeypatch.setenv("YNAB_DEFAULT_BUDGET", "b123")
 
         result = main(["--days", "30"])
         assert result == 1
@@ -91,16 +91,17 @@ class TestEnrichMain:
         monkeypatch.chdir(tmp_path)
         monkeypatch.setenv("YNAB_API_TOKEN", "token123")
         monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
-        tmp_path.joinpath("config.json").write_text(json.dumps({"budget_id": "b123"}))
+        monkeypatch.setenv("YNAB_DEFAULT_BUDGET", "b123")
 
         result = main(["--days", "30"])
         assert result == 1
 
-    def test_missing_config(self, tmp_path, monkeypatch):
-        """Missing config.json exits 1 with clear message."""
+    def test_missing_budget_env(self, tmp_path, monkeypatch):
+        """Missing YNAB_DEFAULT_BUDGET exits 1 with clear message."""
         monkeypatch.chdir(tmp_path)
         monkeypatch.setenv("YNAB_API_TOKEN", "token123")
         monkeypatch.setenv("ANTHROPIC_API_KEY", "key123")
+        monkeypatch.delenv("YNAB_DEFAULT_BUDGET", raising=False)
 
         result = main(["--days", "30"])
         assert result == 1
@@ -110,17 +111,8 @@ class TestEnrichMain:
         monkeypatch.chdir(tmp_path)
         monkeypatch.setenv("YNAB_API_TOKEN", "token123")
         monkeypatch.setenv("ANTHROPIC_API_KEY", "key123")
+        monkeypatch.setenv("YNAB_DEFAULT_BUDGET", "b123")
         tmp_path.joinpath("config.json").write_text("{invalid json")
-
-        result = main(["--days", "30"])
-        assert result == 1
-
-    def test_missing_budget_id(self, tmp_path, monkeypatch):
-        """Missing budget_id in config exits 1."""
-        monkeypatch.chdir(tmp_path)
-        monkeypatch.setenv("YNAB_API_TOKEN", "token123")
-        monkeypatch.setenv("ANTHROPIC_API_KEY", "key123")
-        tmp_path.joinpath("config.json").write_text(json.dumps({}))
 
         result = main(["--days", "30"])
         assert result == 1
@@ -130,12 +122,13 @@ class TestEnrichMain:
         monkeypatch.chdir(tmp_path)
         monkeypatch.setenv("YNAB_API_TOKEN", "token123")
         monkeypatch.setenv("ANTHROPIC_API_KEY", "key123")
-        tmp_path.joinpath("config.json").write_text(json.dumps({"budget_id": "b123"}))
+        monkeypatch.setenv("YNAB_DEFAULT_BUDGET", "b123")
 
         mock_client = Mock()
         mock_client.get_transactions.return_value = ([], 0)
         mock_client.get_categories.return_value = []
         mock_client.get_accounts.return_value = []
+        mock_client.resolve_budget_id.return_value = "b123"
 
         with patch("enrich.YNABClient", return_value=mock_client):
             with patch("enrich.load_payee_cache", return_value={}):
@@ -150,12 +143,13 @@ class TestEnrichMain:
         monkeypatch.chdir(tmp_path)
         monkeypatch.setenv("YNAB_API_TOKEN", "token123")
         monkeypatch.setenv("ANTHROPIC_API_KEY", "key123")
-        tmp_path.joinpath("config.json").write_text(json.dumps({"budget_id": "b123"}))
+        monkeypatch.setenv("YNAB_DEFAULT_BUDGET", "b123")
 
         mock_client = Mock()
         mock_client.get_transactions.return_value = ([], 0)
         mock_client.get_categories.return_value = []
         mock_client.get_accounts.return_value = []
+        mock_client.resolve_budget_id.return_value = "b123"
 
         with patch("enrich.YNABClient", return_value=mock_client):
             with patch("enrich.load_payee_cache", return_value=None):
@@ -172,12 +166,13 @@ class TestEnrichMain:
         monkeypatch.chdir(tmp_path)
         monkeypatch.setenv("YNAB_API_TOKEN", "token123")
         monkeypatch.setenv("ANTHROPIC_API_KEY", "key123")
-        tmp_path.joinpath("config.json").write_text(json.dumps({"budget_id": "b123"}))
+        monkeypatch.setenv("YNAB_DEFAULT_BUDGET", "b123")
 
         mock_client = Mock()
         mock_client.get_transactions.return_value = ([], 0)
         mock_client.get_categories.return_value = []
         mock_client.get_accounts.return_value = []
+        mock_client.resolve_budget_id.return_value = "b123"
 
         with patch("enrich.YNABClient", return_value=mock_client):
             with patch("enrich.load_payee_cache", return_value={"_version": 2}):
@@ -193,7 +188,7 @@ class TestEnrichMain:
         monkeypatch.chdir(tmp_path)
         monkeypatch.setenv("YNAB_API_TOKEN", "token123")
         monkeypatch.setenv("ANTHROPIC_API_KEY", "key123")
-        tmp_path.joinpath("config.json").write_text(json.dumps({"budget_id": "b123"}))
+        monkeypatch.setenv("YNAB_DEFAULT_BUDGET", "b123")
 
         # Provide at least one writable transaction to avoid early return
         writable_txn = {"id": "t1", "payee_name": "Test Store", "category_id": None, "cleared": "cleared", "deleted": False}
@@ -202,6 +197,7 @@ class TestEnrichMain:
         mock_client.get_transactions.return_value = ([writable_txn], 0)  # return 1 txn for all calls
         mock_client.get_categories.return_value = []
         mock_client.get_accounts.return_value = []
+        mock_client.resolve_budget_id.return_value = "b123"
 
         with patch("enrich.YNABClient", return_value=mock_client):
             with patch("enrich.load_payee_cache", return_value=None):
@@ -224,12 +220,13 @@ class TestEnrichMain:
         monkeypatch.chdir(tmp_path)
         monkeypatch.setenv("YNAB_API_TOKEN", "token123")
         monkeypatch.setenv("ANTHROPIC_API_KEY", "key123")
-        tmp_path.joinpath("config.json").write_text(json.dumps({"budget_id": "b123"}))
+        monkeypatch.setenv("YNAB_DEFAULT_BUDGET", "b123")
 
         mock_client = Mock()
         mock_client.get_transactions.return_value = ([], 0)
         mock_client.get_categories.return_value = []
         mock_client.get_accounts.return_value = []
+        mock_client.resolve_budget_id.return_value = "b123"
 
         with patch("enrich.YNABClient", return_value=mock_client):
             with patch("enrich.load_payee_cache", return_value={}):
@@ -1406,8 +1403,8 @@ class TestITEnrich:
         monkeypatch.setenv("YNAB_API_TOKEN", "token123")
         monkeypatch.setenv("ANTHROPIC_API_KEY", "key123")
 
+        monkeypatch.setenv("YNAB_DEFAULT_BUDGET", "budget-uuid-test")
         (tmp_path / "config.json").write_text(json.dumps({
-            "budget_id": "budget-uuid-test",
             "amazon": {"account_last4": {"acct-1": "0804"}, "date_window_days": 3}
         }))
 
@@ -1459,6 +1456,7 @@ class TestITEnrich:
         monkeypatch.setattr(_ynab_mod.YNABClient, "get_transactions", mock_get_transactions)
         monkeypatch.setattr(_ynab_mod.YNABClient, "get_categories", mock_get_categories)
         monkeypatch.setattr(_ynab_mod.YNABClient, "get_accounts", mock_get_accounts)
+        monkeypatch.setattr(_ynab_mod.YNABClient, "resolve_budget_id", lambda self, name: "budget-uuid-test")
         monkeypatch.setattr(_categorizer_mod.anthropic, "Anthropic", _ITEnrichAnthropicMock)
 
         payee_cache = {
@@ -1551,8 +1549,8 @@ class TestITEnrich:
         monkeypatch.setenv("YNAB_API_TOKEN", "token123")
         monkeypatch.setenv("ANTHROPIC_API_KEY", "key123")
 
+        monkeypatch.setenv("YNAB_DEFAULT_BUDGET", "budget-uuid-test")
         (tmp_path / "config.json").write_text(json.dumps({
-            "budget_id": "budget-uuid-test",
             "amazon": {"account_last4": {"acct-1": "0804"}, "date_window_days": 3}
         }))
 
@@ -1597,6 +1595,7 @@ class TestITEnrich:
         monkeypatch.setattr(_ynab_mod.YNABClient, "get_transactions", mock_get_transactions)
         monkeypatch.setattr(_ynab_mod.YNABClient, "get_categories", mock_get_categories)
         monkeypatch.setattr(_ynab_mod.YNABClient, "get_accounts", mock_get_accounts)
+        monkeypatch.setattr(_ynab_mod.YNABClient, "resolve_budget_id", lambda self, name: "budget-uuid-test")
         monkeypatch.setattr(_categorizer_mod.anthropic, "Anthropic", _ITEnrichAnthropicMock)
 
         from enrich import main
@@ -1650,8 +1649,8 @@ class TestITEnrich:
         monkeypatch.setenv("YNAB_API_TOKEN", "token123")
         monkeypatch.setenv("ANTHROPIC_API_KEY", "key123")
 
+        monkeypatch.setenv("YNAB_DEFAULT_BUDGET", "budget-uuid-test")
         (tmp_path / "config.json").write_text(json.dumps({
-            "budget_id": "budget-uuid-test",
             "amazon": {"account_last4": {"acct-1": "0804"}, "date_window_days": 3}
         }))
 
@@ -1707,6 +1706,7 @@ class TestITEnrich:
         monkeypatch.setattr(_ynab_mod.YNABClient, "get_transactions", mock_get_transactions)
         monkeypatch.setattr(_ynab_mod.YNABClient, "get_categories", mock_get_categories)
         monkeypatch.setattr(_ynab_mod.YNABClient, "get_accounts", mock_get_accounts)
+        monkeypatch.setattr(_ynab_mod.YNABClient, "resolve_budget_id", lambda self, name: "budget-uuid-test")
         monkeypatch.setattr(_categorizer_mod.anthropic, "Anthropic", _ITEnrichAnthropicMock)
 
         # Warm cache with Whole Foods resolved to history tier

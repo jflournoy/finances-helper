@@ -965,26 +965,15 @@ def test_main_raises_when_anthropic_key_missing(monkeypatch, tmp_path):
                 main()
 
 
-def test_main_raises_when_config_missing(monkeypatch, tmp_path):
+def test_main_raises_when_budget_env_missing(monkeypatch, tmp_path):
     monkeypatch.setenv("YNAB_API_TOKEN", "token")
     monkeypatch.setenv("ANTHROPIC_API_KEY", "key")
+    monkeypatch.delenv("YNAB_DEFAULT_BUDGET", raising=False)
     monkeypatch.chdir(tmp_path)
 
     with patch("dotenv.load_dotenv"):
         with patch("sys.argv", ["categorizer.py", "--days", "7"]):
-            with pytest.raises(ValueError, match="config.json not found"):
-                main()
-
-
-def test_main_raises_when_budget_id_missing(monkeypatch, tmp_path):
-    monkeypatch.setenv("YNAB_API_TOKEN", "token")
-    monkeypatch.setenv("ANTHROPIC_API_KEY", "key")
-    monkeypatch.chdir(tmp_path)
-    (tmp_path / "config.json").write_text(json.dumps({}))
-
-    with patch("dotenv.load_dotenv"):
-        with patch("sys.argv", ["categorizer.py", "--days", "7"]):
-            with pytest.raises(ValueError, match="budget_id not found"):
+            with pytest.raises(ValueError, match="YNAB_DEFAULT_BUDGET"):
                 main()
 
 
@@ -992,7 +981,7 @@ def test_main_no_uncategorized_exits_early(monkeypatch, tmp_path, capsys):
     monkeypatch.setenv("YNAB_API_TOKEN", "token")
     monkeypatch.setenv("ANTHROPIC_API_KEY", "key")
     monkeypatch.chdir(tmp_path)
-    (tmp_path / "config.json").write_text(json.dumps({"budget_id": "b1"}))
+    monkeypatch.setenv("YNAB_DEFAULT_BUDGET", "b1")
 
     mock_client = Mock()
     mock_client.get_transactions.return_value = ([
@@ -1012,7 +1001,7 @@ def test_main_bootstraps_empty_cache(monkeypatch, tmp_path, capsys):
     monkeypatch.setenv("YNAB_API_TOKEN", "token")
     monkeypatch.setenv("ANTHROPIC_API_KEY", "key")
     monkeypatch.chdir(tmp_path)
-    (tmp_path / "config.json").write_text(json.dumps({"budget_id": "b1"}))
+    monkeypatch.setenv("YNAB_DEFAULT_BUDGET", "b1")
 
     mock_ynab = Mock()
     k_txns = [{"id": "t2", "payee_name": "OldStore", "category_id": "c1", "category_name": "Groceries", "amount": -3000, "date": "2026-02-01"}]
@@ -1046,7 +1035,7 @@ def test_main_full_run_with_existing_cache(monkeypatch, tmp_path, capsys):
     monkeypatch.setenv("YNAB_API_TOKEN", "token")
     monkeypatch.setenv("ANTHROPIC_API_KEY", "key")
     monkeypatch.chdir(tmp_path)
-    (tmp_path / "config.json").write_text(json.dumps({"budget_id": "b1"}))
+    monkeypatch.setenv("YNAB_DEFAULT_BUDGET", "b1")
 
     # Pre-populate cache
     cache_dir = tmp_path / "data" / "cache"
@@ -1084,7 +1073,7 @@ def test_main_updates_cache_with_claude_results(monkeypatch, tmp_path):
     monkeypatch.setenv("YNAB_API_TOKEN", "token")
     monkeypatch.setenv("ANTHROPIC_API_KEY", "key")
     monkeypatch.chdir(tmp_path)
-    (tmp_path / "config.json").write_text(json.dumps({"budget_id": "b1"}))
+    monkeypatch.setenv("YNAB_DEFAULT_BUDGET", "b1")
 
     cache_dir = tmp_path / "data" / "cache"
     cache_dir.mkdir(parents=True)
@@ -1124,7 +1113,7 @@ def test_main_triggers_rebuild_on_v1_migration(monkeypatch, tmp_path, capsys):
     monkeypatch.setenv("YNAB_API_TOKEN", "token")
     monkeypatch.setenv("ANTHROPIC_API_KEY", "key")
     monkeypatch.chdir(tmp_path)
-    (tmp_path / "config.json").write_text(json.dumps({"budget_id": "b1"}))
+    monkeypatch.setenv("YNAB_DEFAULT_BUDGET", "b1")
 
     # Write a v1 cache
     cache_dir = tmp_path / "data" / "cache"

@@ -13,6 +13,7 @@ from datetime import date, datetime, timedelta
 from decimal import Decimal, InvalidOperation, ROUND_HALF_EVEN
 from pathlib import Path
 from zipfile import ZipFile, BadZipFile
+from dotenv import load_dotenv
 
 logger = logging.getLogger(__name__)
 
@@ -1369,7 +1370,6 @@ def main(argv: list[str] | None = None) -> int:
     """CLI entry point for Amazon order matching."""
     import argparse
     import os
-    from dotenv import load_dotenv
 
     parser = argparse.ArgumentParser(
         description="Match Amazon orders to YNAB transactions and propose item-level splits"
@@ -1402,30 +1402,17 @@ def main(argv: list[str] | None = None) -> int:
     if not anthropic_key:
         raise ValueError("ANTHROPIC_API_KEY not set. Add it to .env (see README).")
 
-    # Only check config after env vars (fail early on env)
+    budget_name = os.getenv("YNAB_DEFAULT_BUDGET")
+    if not budget_name:
+        raise ValueError("YNAB_DEFAULT_BUDGET environment variable is required (set in .env)")
+
+    # config.json is optional; only the 'amazon' section is read when present
     config_path = Path("config.json")
-    if not config_path.exists():
-        raise ValueError(
-            "config.json not found. See CLAUDE_project-spec.md for required schema."
-        )
-    config = json.loads(config_path.read_text())
+    config = {}
+    if config_path.exists():
+        config = json.loads(config_path.read_text())
 
-    budget_id = config.get("budget_id")
-    if not budget_id:
-        raise ValueError("budget_id not found in config.json")
-
-    if "amazon" not in config:
-        raise ValueError(
-            "config.json missing 'amazon' section. "
-            "Required keys: account_last4 (dict, may be empty). "
-            "See CLAUDE_project-spec.md."
-        )
-    amazon_cfg = config["amazon"]
-    if "account_last4" not in amazon_cfg:
-        raise ValueError(
-            "config.json amazon section missing 'account_last4'. "
-            "Provide a dict mapping YNAB account IDs to last-4 card digits (may be empty)."
-        )
+    amazon_cfg = config.get("amazon", {})
     date_window_days = amazon_cfg.get("date_window_days", 3)
 
     from ynab_client import YNABClient
@@ -1453,6 +1440,7 @@ def main(argv: list[str] | None = None) -> int:
     print(f"Parsed {len(shipments)} shipments ({len(parse_errors_list)} parse errors)")
 
     client = YNABClient(token=ynab_token)
+    budget_id = client.resolve_budget_id(budget_name)
     since_date = (datetime.now() - timedelta(days=args.days)).strftime("%Y-%m-%d")
     txns, _ = client.get_transactions(budget_id, since_date=since_date)
 

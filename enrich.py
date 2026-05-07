@@ -476,31 +476,29 @@ def main(argv=None):
         print("Error: ANTHROPIC_API_KEY not set in .env or environment")
         return 1
 
-    # Load config
+    budget_name = os.environ.get("YNAB_DEFAULT_BUDGET")
+    if not budget_name:
+        print("Error: YNAB_DEFAULT_BUDGET not set in .env or environment")
+        return 1
+
+    # config.json is optional; if present, only the 'amazon' section is read
     config_path = Path("config.json")
-    if not config_path.exists():
-        print(f"Error: {config_path} not found")
-        return 1
-
-    try:
-        config = json.loads(config_path.read_text())
-    except json.JSONDecodeError as e:
-        print(f"Error: {config_path} is not valid JSON: {e}")
-        return 1
-
-    if "budget_id" not in config:
-        print("Error: config.json missing 'budget_id'")
-        return 1
-
-    budget_id = config["budget_id"]
+    config = {}
+    if config_path.exists():
+        try:
+            config = json.loads(config_path.read_text())
+        except json.JSONDecodeError as e:
+            print(f"Error: {config_path} is not valid JSON: {e}")
+            return 1
 
     # Calculate date windows
     now = datetime.now()
     since_date = (now - timedelta(days=args.days)).strftime("%Y-%m-%d")
     k_since = (now - timedelta(days=548)).strftime("%Y-%m-%d")
 
-    # Initialize YNAB client
+    # Initialize YNAB client and resolve budget name → UUID
     client = YNABClient(token=ynab_token)
+    budget_id = client.resolve_budget_id(budget_name)
 
     # YNAB fetches (counted order)
     txns_window, _ = client.get_transactions(budget_id, since_date=since_date)  # call #1
