@@ -933,6 +933,247 @@ class TestWriteUnifiedChangeset:
         assert json1_content["amazon"]["parse_errors"] == json2_content["amazon"]["parse_errors"], \
             "parse_errors not deterministic: order changed between runs"
 
+    def test_excluded_shipments_unpacks_tuple_with_reason(self, tmp_path):
+        """Issue #142: excluded_shipments is list[tuple[shipment, reason]] — must unpack."""
+        from enrich import write_unified_changeset
+        from amazon_matcher import AmazonShipment, MatchResult
+        from datetime import datetime
+
+        out_dir = tmp_path / "changesets"
+        now = datetime(2026, 4, 27, 14, 30, 0)
+
+        shipment = AmazonShipment(
+            order_id="111-EXCL-0000001",
+            ship_date=datetime(2026, 3, 25).date(),
+            payment_method_raw="Visa - XXXX",
+            payment_method_last4="0804",
+            is_split_tender=False,
+            currency="USD",
+            item_subtotal=Decimal("50.00"),
+            tax=Decimal("2.50"),
+            shipping=Decimal("0"),
+            discounts=Decimal("0"),
+            total_amount=Decimal("52.50"),
+            items=[],
+            shipment_status="Not Available",
+        )
+
+        match_result = MatchResult(
+            matched=[],
+            unmatched_ynab=[],
+            unmatched_shipments=[],
+            excluded_shipments=[(shipment, "shipment_status=Not Available")],
+            parse_errors=[],
+        )
+
+        md_path, json_path = write_unified_changeset(
+            flat_results=[],
+            skipped=[],
+            unmatched_amazon=[],
+            split_proposals=[],
+            source_txns=[],
+            budget_id="b123",
+            since_date="2026-03-28",
+            days_back=30,
+            K=312,
+            confidence_threshold=0.0096,
+            dump_path=None,
+            out_dir=out_dir,
+            match_result=match_result,
+            now=now,
+        )
+
+        payload = json.loads(json_path.read_text())
+        excluded = payload["amazon"]["excluded_shipments"]
+        assert len(excluded) == 1
+        entry = excluded[0]
+        assert entry["reason"] == "shipment_status=Not Available"
+        assert entry["shipment"]["order_id"] == "111-EXCL-0000001"
+        assert entry["shipment"]["payment_method_last4"] == "0804"
+        assert entry["shipment"]["total_amount"] == "52.50"
+
+    def test_unmatched_shipments_mixed_none_dates_sorts(self, tmp_path):
+        """Issue #143: ship_date None alongside real dates must sort without TypeError."""
+        from enrich import write_unified_changeset
+        from amazon_matcher import AmazonShipment, MatchResult
+        from datetime import datetime
+
+        out_dir = tmp_path / "changesets"
+        now = datetime(2026, 4, 27, 14, 30, 0)
+
+        ship_with_date = AmazonShipment(
+            order_id="111-AAA",
+            ship_date=datetime(2026, 4, 1).date(),
+            payment_method_raw="Visa - XXXX",
+            payment_method_last4="0804",
+            is_split_tender=False,
+            currency="USD",
+            item_subtotal=Decimal("10.00"),
+            tax=Decimal("0"),
+            shipping=Decimal("0"),
+            discounts=Decimal("0"),
+            total_amount=Decimal("10.00"),
+            items=[],
+            shipment_status="Shipped",
+        )
+        ship_without_date = AmazonShipment(
+            order_id="111-BBB",
+            ship_date=None,
+            payment_method_raw="Visa - XXXX",
+            payment_method_last4="0804",
+            is_split_tender=False,
+            currency="USD",
+            item_subtotal=Decimal("20.00"),
+            tax=Decimal("0"),
+            shipping=Decimal("0"),
+            discounts=Decimal("0"),
+            total_amount=Decimal("20.00"),
+            items=[],
+            shipment_status="Not Available",
+        )
+
+        match_result = MatchResult(
+            matched=[],
+            unmatched_ynab=[],
+            unmatched_shipments=[ship_without_date, ship_with_date],
+            excluded_shipments=[
+                (ship_without_date, "no_date"),
+                (ship_with_date, "no_date"),
+            ],
+            parse_errors=[],
+        )
+
+        md_path, json_path = write_unified_changeset(
+            flat_results=[],
+            skipped=[],
+            unmatched_amazon=[],
+            split_proposals=[],
+            source_txns=[],
+            budget_id="b123",
+            since_date="2026-03-28",
+            days_back=30,
+            K=312,
+            confidence_threshold=0.0096,
+            dump_path=None,
+            out_dir=out_dir,
+            match_result=match_result,
+            now=now,
+        )
+
+        payload = json.loads(json_path.read_text())
+        unmatched = payload["amazon"]["unmatched_shipments"]
+        assert len(unmatched) == 2
+        # Real-date shipment sorts before None-date shipment (None last) per amazon_matcher pattern
+        assert unmatched[0]["order_id"] == "111-AAA"
+        assert unmatched[1]["order_id"] == "111-BBB"
+
+        excluded = payload["amazon"]["excluded_shipments"]
+        assert len(excluded) == 2
+        assert excluded[0]["shipment"]["order_id"] == "111-AAA"
+        assert excluded[1]["shipment"]["order_id"] == "111-BBB"
+
+    def test_proposed_splits_schema_and_account_name(self, tmp_path):
+        """Issue #145 + #144: amazon split schema fields + account_name_lookup resolution."""
+        from enrich import write_unified_changeset
+        from datetime import datetime
+        from categorizer import AmazonSplitProposal, ItemCategoryResult
+        from amazon_matcher import AmazonShipment, AmazonItem
+
+        out_dir = tmp_path / "changesets"
+        now = datetime(2026, 4, 27, 14, 30, 0)
+
+        item = AmazonItem(
+            order_id="111-SPLIT-0000001",
+            ship_date=datetime(2026, 3, 25).date(),
+            asin="B000TEST",
+            product_name="Test Product",
+            quantity=1,
+            unit_price=Decimal("50.00"),
+            unit_price_tax=Decimal("2.50"),
+            raw_row_index=2,
+        )
+        shipment = AmazonShipment(
+            order_id="111-SPLIT-0000001",
+            ship_date=datetime(2026, 3, 25).date(),
+            payment_method_raw="Visa - 0804",
+            payment_method_last4="0804",
+            is_split_tender=False,
+            currency="USD",
+            item_subtotal=Decimal("50.00"),
+            tax=Decimal("2.50"),
+            shipping=Decimal("0"),
+            discounts=Decimal("0"),
+            total_amount=Decimal("52.50"),
+            items=[item],
+            shipment_status="Shipped",
+        )
+        sub = ItemCategoryResult(
+            ynab_transaction_id="txn-amz-1",
+            item=item,
+            allocated_amount=Decimal("52.50"),
+            category_id="cat-house",
+            category_name="House",
+            confidence=0.9,
+            rationale="Test rationale",
+        )
+        parent_txn = {
+            "id": "txn-amz-1",
+            "date": "2026-03-25",
+            "amount": -52500,
+            "payee_name": "Amazon.com",
+            "account_id": "acct-1",
+        }
+        proposal = AmazonSplitProposal(
+            parent_ynab_txn=parent_txn,
+            shipment=shipment,
+            subtransactions=[sub],
+        )
+
+        md_path, json_path = write_unified_changeset(
+            flat_results=[],
+            skipped=[],
+            unmatched_amazon=[],
+            split_proposals=[proposal],
+            source_txns=[parent_txn],
+            budget_id="b123",
+            since_date="2026-03-28",
+            days_back=30,
+            K=312,
+            confidence_threshold=0.0096,
+            dump_path=None,
+            out_dir=out_dir,
+            account_name_lookup={"acct-1": "Amazon Visa 0804"},
+            now=now,
+        )
+
+        payload = json.loads(json_path.read_text())
+        # #145: payload uses 'proposed_splits' (matching amazon_matcher schema)
+        assert "proposed_splits" in payload["amazon"]
+        splits = payload["amazon"]["proposed_splits"]
+        assert len(splits) == 1
+        s = splits[0]
+        assert s["transaction_id"] == "txn-amz-1"
+        assert s["parent_ynab_transaction"]["id"] == "txn-amz-1"
+        assert s["parent_ynab_transaction"]["amount"] == -52500
+        # #144: account_name resolved via lookup
+        assert s["account_name"] == "Amazon Visa 0804"
+        # #145: shipment block has full fields
+        assert s["shipment"]["order_id"] == "111-SPLIT-0000001"
+        assert s["shipment"]["payment_method_last4"] == "0804"
+        assert s["shipment"]["total_amount"] == "52.50"
+        assert s["shipment"]["item_count"] == 1
+        # #145: subtransactions have allocated_amount, confidence, rationale, item block
+        assert len(s["subtransactions"]) == 1
+        sub_out = s["subtransactions"][0]
+        assert sub_out["allocated_amount"] == "52.50"
+        assert sub_out["category_id"] == "cat-house"
+        assert sub_out["category_name"] == "House"
+        assert sub_out["confidence"] == 0.9
+        assert sub_out["rationale"] == "Test rationale"
+        assert sub_out["item"]["asin"] == "B000TEST"
+        assert sub_out["item"]["product_name"] == "Test Product"
+        assert sub_out["item"]["quantity"] == 1
+
 
 class TestDumpFreshnessWarning:
     """Test _dump_freshness_warning function."""
@@ -1281,7 +1522,7 @@ class TestITEnrich:
         assert len(non_amazon) >= 1, f"Assertion #11: non_amazon has proposals (got {len(non_amazon)})"
 
         # Assertion #13: No txn id appears in both buckets (set intersection empty)
-        amazon_splits = changeset.get("amazon", {}).get("splits", [])
+        amazon_splits = changeset.get("amazon", {}).get("proposed_splits", [])
         non_amazon_ids = {t.get("transaction_id") for t in non_amazon if isinstance(t, dict)}
         split_ids = {s.get("transaction_id") for s in amazon_splits if isinstance(s, dict)}
         overlap = non_amazon_ids & split_ids
@@ -1448,14 +1689,19 @@ class TestITEnrich:
         ]
 
         get_transactions_calls = []
+        get_categories_calls = []
+        get_accounts_calls = []
+
         def mock_get_transactions(self, budget_id, since_date=None):
             get_transactions_calls.append(since_date)
             return ynab_txns, None
 
         def mock_get_categories(self, budget_id):
+            get_categories_calls.append(budget_id)
             return categories
 
         def mock_get_accounts(self, budget_id):
+            get_accounts_calls.append(budget_id)
             return accounts
 
         monkeypatch.setattr(_ynab_mod.YNABClient, "get_transactions", mock_get_transactions)
@@ -1501,10 +1747,11 @@ class TestITEnrich:
         # Assertion #3: exactly one K-window call
         assert get_transactions_calls.count(k_start) == 1, f"Assertion #3: exactly 1 K-window call (got {get_transactions_calls.count(k_start)})"
 
-        # Assertion #4: get_categories called exactly once (should be in the calls list via monkeypatch)
-        # (indirectly validated via engine routing)
+        # Assertion #4: get_categories called exactly once
+        assert len(get_categories_calls) == 1, f"Assertion #4: get_categories called once (got {len(get_categories_calls)})"
 
-        # Assertion #5: get_accounts called exactly once (same)
+        # Assertion #5: get_accounts called exactly once
+        assert len(get_accounts_calls) == 1, f"Assertion #5: get_accounts called once (got {len(get_accounts_calls)})"
 
         # Assertion #6a: no bootstrap for warm cache
         assert get_transactions_calls.count(None) == 0, f"Assertion #6a: no bootstrap (warm), got {get_transactions_calls.count(None)}"
@@ -1525,7 +1772,7 @@ class TestITEnrich:
 
         # Assertion #10: Amazon split count and unmatched count
         # (Simplified: no matched splits, both Amazon txns unmatched)
-        amazon_splits = changeset.get("amazon", {}).get("splits", [])
+        amazon_splits = changeset.get("amazon", {}).get("proposed_splits", [])
         amazon_unmatched = changeset.get("amazon", {}).get("unmatched_ynab", [])
         assert len(amazon_splits) == 0, f"Assertion #10: 0 Amazon splits (got {len(amazon_splits)})"
         assert len(amazon_unmatched) == 2, f"Assertion #10: 2 unmatched Amazon txns (got {len(amazon_unmatched)})"

@@ -105,6 +105,7 @@ def write_unified_changeset(
     dump_path: Path | None,
     out_dir: Path = Path("data/cache"),
     match_result=None,
+    account_name_lookup: dict[str, str] | None = None,
     now: datetime | None = None,
 ) -> tuple[Path, Path]:
     """Write unified enrich changeset to paired markdown + JSON artifacts.
@@ -122,6 +123,9 @@ def write_unified_changeset(
         confidence_threshold: Confidence threshold used.
         dump_path: Path to Amazon dump (may be None if no Amazon txns).
         out_dir: Directory for output files (created if missing).
+        match_result: Optional MatchResult with unmatched_shipments, excluded_shipments, parse_errors.
+        account_name_lookup: Optional {account_id: account_name} mapping for resolving
+            Amazon split account names when txn lacks account_name.
         now: Injected datetime for testing.
 
     Returns:
@@ -184,24 +188,66 @@ def write_unified_changeset(
             "reason": reason,
         })
 
+    def _parent_field(parent, field):
+        if isinstance(parent, dict):
+            return parent.get(field)
+        return getattr(parent, field, None)
+
     # Serialize split proposals — sorted by parent txn date then id
-    splits = []
-    for proposal in sorted(split_proposals, key=lambda p: (getattr(p.parent_ynab_txn, 'date', '9999-12-31') if hasattr(p, 'parent_ynab_txn') else '9999-12-31', getattr(p.parent_ynab_txn, 'id', '') if hasattr(p, 'parent_ynab_txn') else '')):
-        parent_date = getattr(proposal.parent_ynab_txn, 'date', None) if hasattr(proposal, 'parent_ynab_txn') else None
-        parent_id = getattr(proposal.parent_ynab_txn, 'id', None) if hasattr(proposal, 'parent_ynab_txn') else None
-        splits.append({
-            "transaction_id": parent_id,
-            "parent_txn_date": parent_date,
-            "order_id": getattr(proposal.shipment, 'order_id', None) if hasattr(proposal, 'shipment') else None,
-            "ship_date": str(getattr(proposal.shipment, 'ship_date', None)) if hasattr(proposal, 'shipment') and getattr(proposal.shipment, 'ship_date', None) else None,
-            "items": [
-                {
-                    "description": getattr(item, 'description', None),
-                    "category_id": getattr(item, 'category_id', None),
-                    "category_name": getattr(item, 'category_name', None),
+    proposed_splits = []
+    for proposal in sorted(
+        split_proposals,
+        key=lambda p: (
+            _parent_field(p.parent_ynab_txn, "date") or "9999-12-31",
+            _parent_field(p.parent_ynab_txn, "id") or "",
+        ),
+    ):
+        parent = proposal.parent_ynab_txn
+        parent_id = _parent_field(parent, "id")
+        parent_date = _parent_field(parent, "date")
+        # Resolve account_name (txn → lookup → account_id fallback)
+        if isinstance(parent, dict):
+            account_name = parent.get("account_name")
+            if not account_name and account_name_lookup:
+                account_name = account_name_lookup.get(parent.get("account_id"))
+            if not account_name:
+                account_name = parent.get("account_id")
+        else:
+            account_name = None
+
+        ship = getattr(proposal, "shipment", None)
+        ship_date = getattr(ship, "ship_date", None) if ship is not None else None
+        subtransactions = []
+        for sub in getattr(proposal, "subtransactions", []) or []:
+            item = getattr(sub, "item", None)
+            item_block = None
+            if item is not None:
+                item_block = {
+                    "asin": getattr(item, "asin", None),
+                    "product_name": getattr(item, "product_name", None),
+                    "quantity": getattr(item, "quantity", None),
                 }
-                for item in (getattr(proposal, 'subtransactions', []) or [])
-            ],
+            subtransactions.append({
+                "item": item_block,
+                "allocated_amount": getattr(sub, "allocated_amount", None),
+                "category_id": getattr(sub, "category_id", None),
+                "category_name": getattr(sub, "category_name", None),
+                "confidence": getattr(sub, "confidence", None),
+                "rationale": getattr(sub, "rationale", None),
+            })
+
+        proposed_splits.append({
+            "transaction_id": parent_id,
+            "parent_ynab_transaction": parent if isinstance(parent, dict) else None,
+            "account_name": account_name,
+            "shipment": {
+                "order_id": getattr(ship, "order_id", None) if ship is not None else None,
+                "ship_date": ship_date,
+                "payment_method_last4": getattr(ship, "payment_method_last4", None) if ship is not None else None,
+                "total_amount": getattr(ship, "total_amount", None) if ship is not None else None,
+                "item_count": len(getattr(ship, "items", []) or []) if ship is not None else 0,
+            },
+            "subtransactions": subtransactions,
         })
 
     # Serialize match_result if provided
@@ -209,33 +255,59 @@ def write_unified_changeset(
     excluded_shipments = []
     parse_errors = []
     if match_result:
+        from datetime import date as _date
+
+        def _shipment_dict(s):
+            return {
+                "order_id": getattr(s, "order_id", None),
+                "ship_date": getattr(s, "ship_date", None),
+                "payment_method_last4": getattr(s, "payment_method_last4", None),
+                "total_amount": getattr(s, "total_amount", None),
+                "item_count": len(getattr(s, "items", []) or []),
+            }
+
+        # None-safe sort key matching amazon_matcher's pattern
+        _ship_sort = lambda s: (
+            getattr(s, "order_id", "") or "",
+            getattr(s, "ship_date", None) is None,
+            getattr(s, "ship_date", None) or _date.min,
+        )
+
         unmatched_shipments = [
-            {
-                "order_id": getattr(s, 'order_id', None),
-                "ship_date": str(getattr(s, 'ship_date', None)) if getattr(s, 'ship_date', None) else None,
-                "total_amount": float(getattr(s, 'total_amount', 0)) if getattr(s, 'total_amount', None) else None,
-            }
-            for s in sorted(match_result.unmatched_shipments, key=lambda s: (getattr(s, 'order_id', ''), getattr(s, 'ship_date', '')))
+            _shipment_dict(s)
+            for s in sorted(match_result.unmatched_shipments, key=_ship_sort)
         ]
+
+        # excluded_shipments is list[tuple[shipment, reason]]
         excluded_shipments = [
-            {
-                "order_id": getattr(s, 'order_id', None),
-                "ship_date": str(getattr(s, 'ship_date', None)) if getattr(s, 'ship_date', None) else None,
-                "total_amount": float(getattr(s, 'total_amount', 0)) if getattr(s, 'total_amount', None) else None,
-            }
-            for s in sorted(match_result.excluded_shipments, key=lambda s: (getattr(s, 'order_id', ''), getattr(s, 'ship_date', '')))
+            {"shipment": _shipment_dict(s), "reason": reason}
+            for s, reason in sorted(
+                match_result.excluded_shipments,
+                key=lambda x: (
+                    getattr(x[0], "order_id", "") or "",
+                    getattr(x[0], "ship_date", None) is None,
+                    getattr(x[0], "ship_date", None) or _date.min,
+                    x[1],
+                ),
+            )
         ]
+
         def _serialize_parse_error(e):
             if isinstance(e, dict):
                 return e
             return {
-                "row_index": getattr(e, 'row_index', None),
-                "reason": getattr(e, 'reason', None),
+                "row_index": getattr(e, "row_index", None),
+                "reason": getattr(e, "reason", None),
             }
+
+        def _parse_error_sort_key(e):
+            if isinstance(e, dict):
+                return e.get("line", e.get("row_index", 0)) or 0
+            return getattr(e, "row_index", 0) or 0
 
         parse_errors = [
             _serialize_parse_error(e)
-            for e in sorted(match_result.parse_errors, key=lambda e: getattr(e, 'row_index', e.get('line', 0) if isinstance(e, dict) else 0))
+            for e in sorted(match_result.parse_errors, key=_parse_error_sort_key)
         ]
 
     # Build JSON payload
@@ -252,7 +324,7 @@ def write_unified_changeset(
             "confidence_threshold": confidence_threshold,
         },
         "amazon": {
-            "splits": splits,
+            "proposed_splits": proposed_splits,
             "unmatched_ynab": unmatched_ynab,
             "unmatched_shipments": unmatched_shipments,
             "excluded_shipments": excluded_shipments,
@@ -296,13 +368,24 @@ def write_unified_changeset(
             "| Date | Order ID | Ship Date | Items | Categories |",
             "|------|----------|-----------|-------|------------|",
         ])
-        for proposal in sorted(split_proposals, key=lambda p: (getattr(p.parent_ynab_txn, 'date', '9999-12-31') if hasattr(p, 'parent_ynab_txn') else '9999-12-31', getattr(p.parent_ynab_txn, 'id', '') if hasattr(p, 'parent_ynab_txn') else '')):
-            parent_date = getattr(proposal.parent_ynab_txn, 'date', '') if hasattr(proposal, 'parent_ynab_txn') else ''
-            order_id = getattr(proposal.shipment, 'order_id', '') if hasattr(proposal, 'shipment') else ''
-            ship_date = str(getattr(proposal.shipment, 'ship_date', '')) if hasattr(proposal, 'shipment') and getattr(proposal.shipment, 'ship_date', None) else ''
-            items = getattr(proposal.shipment, 'items', []) if hasattr(proposal, 'shipment') else []
-            item_count = len(items) if items else 0
-            categories = ', '.join(_md_escape(getattr(item, 'category_name', '')) for item in items if hasattr(item, 'category_name')) if items else ''
+        for proposal in sorted(
+            split_proposals,
+            key=lambda p: (
+                _parent_field(p.parent_ynab_txn, "date") or "9999-12-31",
+                _parent_field(p.parent_ynab_txn, "id") or "",
+            ),
+        ):
+            parent_date = _parent_field(proposal.parent_ynab_txn, "date") or ""
+            ship = getattr(proposal, "shipment", None)
+            order_id = getattr(ship, "order_id", "") if ship is not None else ""
+            ship_date = str(getattr(ship, "ship_date", "")) if ship is not None and getattr(ship, "ship_date", None) else ""
+            subs = getattr(proposal, "subtransactions", []) or []
+            item_count = len(subs)
+            categories = ", ".join(
+                _md_escape(getattr(s, "category_name", "") or "")
+                for s in subs
+                if getattr(s, "category_name", None)
+            )
             markdown_lines.append(f"| {parent_date} | {order_id} | {ship_date} | {item_count} | {categories} |")
         markdown_lines.append("")
 
@@ -423,7 +506,9 @@ def main(argv=None):
     # YNAB fetches (counted order)
     txns_window, _ = client.get_transactions(budget_id, since_date=since_date)  # call #1
     categories = client.get_categories(budget_id)  # call #2
-    k_txns, _ = client.get_transactions(budget_id, since_date=k_since)  # call #3
+    accounts = client.get_accounts(budget_id)  # call #3
+    k_txns, _ = client.get_transactions(budget_id, since_date=k_since)  # call #4
+    account_name_lookup = {a["id"]: a["name"] for a in accounts if a.get("id")}
 
     # Confidence threshold + recent categories
     K = count_categories_from_transactions(k_txns) or count_categories(categories)
@@ -496,6 +581,7 @@ def main(argv=None):
         confidence_threshold=confidence_threshold,
         dump_path=dump_path,
         match_result=match_result,
+        account_name_lookup=account_name_lookup,
         out_dir=args.out_dir,
     )
 
