@@ -168,6 +168,44 @@ Categorization runs three tiers before touching the Claude API:
 
 The payee lookup lives in `data/cache/payee_lookup.json` and is rebuilt after every confirmed categorization run. Over time, Claude is called less and less frequently as the lookup matures.
 
+## Amazon Matcher Workflow: Changeset Review (Current State as of 2026-05-08)
+
+**What works:** You can now generate a changeset of proposed Amazon splits:
+
+```bash
+uv run python amazon_matcher.py --days 60 --out-dir data/cache
+```
+
+This produces two files:
+- `data/cache/amazon-changeset-YYYYMMDD-HHMMSS.md` — human-readable summary and review document
+- `data/cache/amazon-changeset-YYYYMMDD-HHMMSS.json` — machine-readable changeset (for future automation)
+
+**The workflow:**
+1. Run the command above
+2. Open the `.md` file and review the proposed splits for each multi-item Amazon order
+3. Check the counts in the Summary table:
+   - Proposed splits (multi-item)
+   - Proposed single categorizations
+   - Unmatched YNAB transactions (unexpected matches)
+   - Unmatched Amazon shipments (shipments not found in YNAB)
+   - Excluded shipments (cancelled, missing date, etc)
+   - Parse errors (malformed CSV rows)
+
+**What is NOT yet implemented:** 
+
+The `--confirm` step that applies splits to YNAB:
+```bash
+# Not yet implemented (see issue #55)
+uv run python amazon_matcher.py --confirm data/cache/amazon-changeset-YYYYMMDD-HHMMSS.json
+```
+
+Until #55 is done, **manually apply the splits** via the YNAB web interface:
+1. For each proposed split, go to the YNAB transaction
+2. Click "Split" and create subtransactions matching the changeset
+3. Assign categories as shown in the changeset
+
+When #55 is implemented, `--confirm` will automate step 1-3 via the YNAB API (PATCH /transactions with subtransactions).
+
 ## Diagnostic and Specialized CLIs
 
 These tools remain available for single-purpose workflows or diagnostics, but **are not the recommended entry point** — use `enrich.py` instead.
