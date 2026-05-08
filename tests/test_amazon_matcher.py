@@ -669,44 +669,50 @@ class TestFilterAmazonTransactions:
     """Test filtering YNAB transactions to Amazon purchases only."""
 
     def test_filter_plain_amazon_payee(self):
-        """Include transactions with 'Amazon' payee."""
-        txns = [{"payee_name": "Amazon", "category_id": None, "cleared": "uncleared", "deleted": False}]
+        """Include unapproved transactions with 'Amazon' payee."""
+        txns = [{"payee_name": "Amazon", "approved": False, "cleared": "uncleared", "deleted": False}]
         result = filter_amazon_transactions(txns)
         assert len(result) == 1
 
     def test_filter_amazon_lowercase(self):
         """Include transactions with 'amazon.com' payee (case-insensitive)."""
-        txns = [{"payee_name": "amazon.com", "category_id": None, "cleared": "uncleared", "deleted": False}]
+        txns = [{"payee_name": "amazon.com", "approved": False, "cleared": "uncleared", "deleted": False}]
         result = filter_amazon_transactions(txns)
         assert len(result) == 1
 
     def test_filter_amzn_variant(self):
         """Include transactions with 'AMZN' pattern."""
-        txns = [{"payee_name": "AMZN Mktp US", "category_id": None, "cleared": "uncleared", "deleted": False}]
+        txns = [{"payee_name": "AMZN Mktp US", "approved": False, "cleared": "uncleared", "deleted": False}]
         result = filter_amazon_transactions(txns)
         assert len(result) == 1
 
     def test_filter_non_amazon(self):
         """Exclude non-Amazon payees."""
-        txns = [{"payee_name": "Target", "category_id": None, "cleared": "uncleared", "deleted": False}]
+        txns = [{"payee_name": "Target", "approved": False, "cleared": "uncleared", "deleted": False}]
         result = filter_amazon_transactions(txns)
         assert len(result) == 0
 
-    def test_filter_already_categorized(self):
-        """Exclude transactions with category_id set."""
-        txns = [{"payee_name": "Amazon", "category_id": "cat-123", "cleared": "uncleared", "deleted": False}]
+    def test_filter_approved(self):
+        """Exclude approved transactions."""
+        txns = [{"payee_name": "Amazon", "approved": True, "cleared": "uncleared", "deleted": False}]
         result = filter_amazon_transactions(txns)
         assert len(result) == 0
+
+    def test_filter_categorized_unapproved(self):
+        """Include categorized but unapproved transactions (auto-rule may have set category)."""
+        txns = [{"payee_name": "Amazon", "approved": False, "category_id": "cat-123", "cleared": "uncleared", "deleted": False}]
+        result = filter_amazon_transactions(txns)
+        assert len(result) == 1
 
     def test_filter_reconciled(self):
         """Exclude reconciled transactions."""
-        txns = [{"payee_name": "Amazon", "category_id": None, "cleared": "reconciled", "deleted": False}]
+        txns = [{"payee_name": "Amazon", "approved": False, "cleared": "reconciled", "deleted": False}]
         result = filter_amazon_transactions(txns)
         assert len(result) == 0
 
     def test_filter_deleted(self):
         """Exclude deleted transactions."""
-        txns = [{"payee_name": "Amazon", "category_id": None, "cleared": "uncleared", "deleted": True}]
+        txns = [{"payee_name": "Amazon", "approved": False, "cleared": "uncleared", "deleted": True}]
         result = filter_amazon_transactions(txns)
         assert len(result) == 0
 
@@ -718,10 +724,10 @@ class TestFilterAmazonTransactions:
     def test_filter_mixed(self):
         """Filter a mixed list correctly."""
         txns = [
-            {"payee_name": "Amazon", "category_id": None, "cleared": "uncleared", "deleted": False},  # keep
-            {"payee_name": "Amazon", "category_id": "cat-123", "cleared": "uncleared", "deleted": False},  # categorized
-            {"payee_name": "Amazon", "category_id": None, "cleared": "reconciled", "deleted": False},  # reconciled
-            {"payee_name": "Target", "category_id": None, "cleared": "uncleared", "deleted": False},  # non-amazon
+            {"payee_name": "Amazon", "approved": False, "cleared": "uncleared", "deleted": False},  # keep
+            {"payee_name": "Amazon", "approved": True, "cleared": "uncleared", "deleted": False},   # approved
+            {"payee_name": "Amazon", "approved": False, "cleared": "reconciled", "deleted": False},  # reconciled
+            {"payee_name": "Target", "approved": False, "cleared": "uncleared", "deleted": False},  # non-amazon
         ]
         result = filter_amazon_transactions(txns)
         assert len(result) == 1
@@ -1852,9 +1858,9 @@ class TestIntegrationMatching:
         # Parse the CSV
         shipments, parse_errors = parse_order_history(csv_content)
 
-        # Filter YNAB transactions (should exclude already-categorized, reconciled, non-Amazon)
+        # Filter YNAB transactions (should exclude already-approved, reconciled, non-Amazon)
         amazon_txns = filter_amazon_transactions(ynab_txns)
-        # From fixture: 12 txns, filter removes txn-006 (categorized), txn-007 (reconciled), txn-009 (non-Amazon)
+        # From fixture: 13 txns, filter removes txn-006 (approved), txn-007 (reconciled), txn-009 (non-Amazon), txn-grocery-001 (approved+non-Amazon)
         assert len(amazon_txns) == 9, f"Expected 9 Amazon txns, got {len(amazon_txns)}"
 
         # Match (no account_last4_map required)
@@ -3783,11 +3789,13 @@ class TestCLI:
         import categorizer as _categorizer_mod
         import ynab_client as _ynab_mod
         from amazon_matcher import main
+        from unittest.mock import patch
 
         monkeypatch.chdir(tmp_path)
         monkeypatch.setenv("YNAB_API_TOKEN", "test-token")
         monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key")
         monkeypatch.setenv("YNAB_DEFAULT_BUDGET", "budget-uuid-test")
+        monkeypatch.delenv("YNAB_SANDBOX_MODE", raising=False)
 
         (tmp_path / "config.json").write_text(json.dumps({
             "amazon": {"account_last4": {"acct-1": "0804"}, "date_window_days": 3}
@@ -3824,20 +3832,21 @@ class TestCLI:
 
         monkeypatch.setattr(_categorizer_mod.anthropic, "Anthropic", _ITChangesetAnthropicMock)
 
-        out_dir = tmp_path / "out"
-        out_dir.mkdir()
+        with patch("amazon_matcher.load_dotenv"):
+            out_dir = tmp_path / "out"
+            out_dir.mkdir()
 
-        result = main(["--days", "60", "--out-dir", str(out_dir)])
-        assert result == 0
+            result = main(["--days", "60", "--out-dir", str(out_dir)])
+            assert result == 0
 
-        changeset_files = list(out_dir.glob("amazon-changeset-*.json"))
-        assert len(changeset_files) == 1
-        md_files = list(out_dir.glob("amazon-changeset-*.md"))
-        assert len(md_files) == 1
+            changeset_files = list(out_dir.glob("amazon-changeset-*.json"))
+            assert len(changeset_files) == 1
+            md_files = list(out_dir.glob("amazon-changeset-*.md"))
+            assert len(md_files) == 1
 
-        changeset = json.loads(changeset_files[0].read_text())
-        assert changeset["version"] == 1
-        assert "proposed_splits" in changeset
+            changeset = json.loads(changeset_files[0].read_text())
+            assert changeset["version"] == 1
+            assert "proposed_splits" in changeset
 
         captured = capsys.readouterr()
         assert "Amazon categorization run complete" in captured.out
