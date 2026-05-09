@@ -1431,15 +1431,15 @@ class TestITEnrich:
         accounts = [{"id": "acct-1", "name": "Amazon Visa 0804"}]
 
         ynab_txns = [
-            {"id": "amz1", "payee_name": "Amazon.com", "amount_dollars": "10.50", "date": "2026-04-13", "category_id": None, "cleared": "cleared", "deleted": False, "account_id": "acct-1"},
-            {"id": "amz2", "payee_name": "Amazon.com", "amount_dollars": "25.00", "date": "2026-04-12", "category_id": None, "cleared": "cleared", "deleted": False, "account_id": "acct-1"},
-            {"id": "non_amz1", "payee_name": "Whole Foods", "amount_dollars": "50.00", "date": "2026-04-13", "category_id": None, "cleared": "cleared", "deleted": False},
-            {"id": "non_amz2", "payee_name": "Whole Foods", "amount_dollars": "30.00", "date": "2026-04-12", "category_id": None, "cleared": "cleared", "deleted": False},
-            {"id": "non_amz_novel", "payee_name": "Novel Store", "amount_dollars": "15.00", "date": "2026-04-11", "category_id": None, "cleared": "cleared", "deleted": False},
-            {"id": "transfer", "payee_name": "Transfer : Savings", "amount_dollars": "-200.00", "date": "2026-04-10", "category_id": None, "cleared": "cleared", "deleted": False},
-            {"id": "reconciled", "payee_name": "Some Store", "amount_dollars": "20.00", "date": "2026-04-09", "category_id": None, "cleared": "reconciled", "deleted": False},
-            {"id": "deleted", "payee_name": "Deleted Store", "amount_dollars": "10.00", "date": "2026-04-08", "category_id": None, "cleared": "cleared", "deleted": True},
-            {"id": "categorized", "payee_name": "Already Cat", "amount_dollars": "5.00", "date": "2026-04-07", "category_id": "cat1", "cleared": "cleared", "deleted": False},
+            {"id": "amz1", "payee_name": "Amazon.com", "amount_dollars": "10.50", "date": "2026-04-13", "category_id": None, "cleared": "cleared", "deleted": False, "approved": False, "account_id": "acct-1"},
+            {"id": "amz2", "payee_name": "Amazon.com", "amount_dollars": "25.00", "date": "2026-04-12", "category_id": None, "cleared": "cleared", "deleted": False, "approved": False, "account_id": "acct-1"},
+            {"id": "non_amz1", "payee_name": "Whole Foods", "amount_dollars": "50.00", "date": "2026-04-13", "category_id": None, "cleared": "cleared", "deleted": False, "approved": False},
+            {"id": "non_amz2", "payee_name": "Whole Foods", "amount_dollars": "30.00", "date": "2026-04-12", "category_id": None, "cleared": "cleared", "deleted": False, "approved": False},
+            {"id": "non_amz_novel", "payee_name": "Novel Store", "amount_dollars": "15.00", "date": "2026-04-11", "category_id": None, "cleared": "cleared", "deleted": False, "approved": False},
+            {"id": "transfer", "payee_name": "Transfer : Savings", "amount_dollars": "-200.00", "date": "2026-04-10", "category_id": None, "cleared": "cleared", "deleted": False, "approved": False},
+            {"id": "reconciled", "payee_name": "Some Store", "amount_dollars": "20.00", "date": "2026-04-09", "category_id": None, "cleared": "reconciled", "deleted": False, "approved": False},
+            {"id": "deleted", "payee_name": "Deleted Store", "amount_dollars": "10.00", "date": "2026-04-08", "category_id": None, "cleared": "cleared", "deleted": True, "approved": False},
+            {"id": "categorized", "payee_name": "Already Cat", "amount_dollars": "5.00", "date": "2026-04-07", "category_id": "cat1", "cleared": "cleared", "deleted": False, "approved": True},
         ]
 
         get_transactions_calls = []
@@ -1677,14 +1677,14 @@ class TestITEnrich:
         accounts = [{"id": "acct-1", "name": "Amazon Visa 0804"}]
 
         ynab_txns = [
-            {"id": "amz1", "payee_name": "Amazon.com", "amount_dollars": "10.50", "date": "2026-04-13", "category_id": None, "cleared": "cleared", "deleted": False, "account_id": "acct-1", "import_payee_name": None},
-            {"id": "amz_unmatch", "payee_name": "Amazon.com", "amount_dollars": "999.00", "date": "2026-04-01", "category_id": None, "cleared": "cleared", "deleted": False, "account_id": "acct-1", "import_payee_name": None},
-            {"id": "non_amz_history", "payee_name": "Whole Foods", "amount_dollars": "50.00", "date": "2026-04-13", "category_id": None, "cleared": "cleared", "deleted": False, "import_payee_name": None},
-            {"id": "non_amz_novel", "payee_name": "Novel Store", "amount_dollars": "15.00", "date": "2026-04-11", "category_id": None, "cleared": "cleared", "deleted": False, "import_payee_name": None},
-            {"id": "transfer", "payee_name": "Transfer : Savings", "amount_dollars": "-200.00", "date": "2026-04-10", "category_id": None, "cleared": "cleared", "deleted": False, "import_payee_name": None},
-            {"id": "reconciled", "payee_name": "Some Store", "amount_dollars": "20.00", "date": "2026-04-09", "category_id": None, "cleared": "reconciled", "deleted": False, "import_payee_name": None},
-            {"id": "deleted", "payee_name": "Deleted Store", "amount_dollars": "10.00", "date": "2026-04-08", "category_id": None, "cleared": "cleared", "deleted": True, "import_payee_name": None},
-            {"id": "categorized", "payee_name": "Already Cat", "amount_dollars": "5.00", "date": "2026-04-07", "category_id": "cat1", "cleared": "cleared", "deleted": False, "import_payee_name": None},
+            {"id": "amz1", "payee_name": "Amazon.com", "amount_dollars": "10.50", "date": "2026-04-13", "category_id": None, "cleared": "cleared", "deleted": False, "approved": False, "account_id": "acct-1", "import_payee_name": None},
+            {"id": "amz_unmatch", "payee_name": "Amazon.com", "amount_dollars": "999.00", "date": "2026-04-01", "category_id": None, "cleared": "cleared", "deleted": False, "approved": False, "account_id": "acct-1", "import_payee_name": None},
+            {"id": "non_amz_history", "payee_name": "Whole Foods", "amount_dollars": "50.00", "date": "2026-04-13", "category_id": None, "cleared": "cleared", "deleted": False, "approved": False, "import_payee_name": None},
+            {"id": "non_amz_novel", "payee_name": "Novel Store", "amount_dollars": "15.00", "date": "2026-04-11", "category_id": None, "cleared": "cleared", "deleted": False, "approved": False, "import_payee_name": None},
+            {"id": "transfer", "payee_name": "Transfer : Savings", "amount_dollars": "-200.00", "date": "2026-04-10", "category_id": None, "cleared": "cleared", "deleted": False, "approved": False, "import_payee_name": None},
+            {"id": "reconciled", "payee_name": "Some Store", "amount_dollars": "20.00", "date": "2026-04-09", "category_id": None, "cleared": "reconciled", "deleted": False, "approved": False, "import_payee_name": None},
+            {"id": "deleted", "payee_name": "Deleted Store", "amount_dollars": "10.00", "date": "2026-04-08", "category_id": None, "cleared": "cleared", "deleted": True, "approved": False, "import_payee_name": None},
+            {"id": "categorized", "payee_name": "Already Cat", "amount_dollars": "5.00", "date": "2026-04-07", "category_id": "cat1", "cleared": "cleared", "deleted": False, "approved": True, "import_payee_name": None},
         ]
 
         get_transactions_calls = []

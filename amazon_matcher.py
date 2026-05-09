@@ -448,6 +448,13 @@ class MatchResult:
     parse_errors: list[ParseError]
 
 
+def is_whole_foods_payee(payee: str | None) -> bool:
+    """Return True if payee name looks like a Whole Foods delivery transaction."""
+    if not payee:
+        return False
+    return "whole foods" in payee.lower()
+
+
 def is_amazon_payee(payee: str | None) -> bool:
     """Return True if payee name looks like an Amazon transaction.
 
@@ -469,7 +476,7 @@ def filter_amazon_transactions(ynab_txns: list[dict]) -> list[dict]:
 
     Keep a transaction if ALL:
     - payee_name matches "amazon" (case-insensitive) or contains "AMZN"
-    - category_id is None (not yet categorized)
+    - approved is not True (not yet human-reviewed)
     - cleared != "reconciled" (reconciled cannot be edited via API)
     - deleted is not True
 
@@ -482,19 +489,15 @@ def filter_amazon_transactions(ynab_txns: list[dict]) -> list[dict]:
     result = []
 
     for txn in ynab_txns:
-        # Check payee
         if not is_amazon_payee(txn.get("payee_name")):
             continue
 
-        # Check category
-        if txn.get("category_id") is not None:
+        if txn.get("approved") is True:
             continue
 
-        # Check cleared status
         if txn.get("cleared") == "reconciled":
             continue
 
-        # Check deleted
         if txn.get("deleted") is True:
             continue
 

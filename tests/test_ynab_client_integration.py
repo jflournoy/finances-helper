@@ -2,7 +2,11 @@
 
 Run with: uv run pytest tests/test_ynab_client_integration.py -v -m integration
 
-Requires YNAB_API_TOKEN in .env (or environment).
+Read tests use live_client + live_budget_id (My Budget, read-only).
+Write tests use sandbox_client — requires YNAB_SANDBOX_MODE=1 in .env,
+which redirects all writes to the Sandbox budget/account.
+
+Requires YNAB_API_TOKEN and YNAB_DEFAULT_BUDGET in .env.
 """
 import pytest
 
@@ -52,9 +56,32 @@ def test_get_transactions_live(live_client, live_budget_id):
 
 
 def test_get_transactions_delta_sync_live(live_client, live_budget_id):
-    # First fetch — get server_knowledge
     _, sk = live_client.get_transactions(live_budget_id)
-    # Second fetch with server_knowledge — should return empty or only new txns
     txns2, sk2 = live_client.get_transactions(live_budget_id, last_knowledge_of_server=sk)
     assert isinstance(txns2, list)
     assert sk2 >= sk
+
+
+def test_create_transactions_sandbox(sandbox_client, live_budget_id):
+    """Write a real transaction to Sandbox via create_transactions."""
+    txn = {
+        "date": "2026-05-08",
+        "amount": -9990,
+        "payee_name": "Integration Test Payee",
+        "memo": "pytest sandbox write test",
+        "cleared": "uncleared",
+        "approved": False,
+        "account_id": "will-be-overridden-by-sandbox",
+    }
+    result = sandbox_client.create_transactions(live_budget_id, [txn])
+    created = result.get("transactions", [])
+    assert len(created) == 1
+    t = created[0]
+    assert t["amount"] == -9990
+    assert t["date"] == "2026-05-08"
+    assert t["memo"] == "pytest sandbox write test"
+
+
+def test_create_transactions_sandbox_rejects_empty(sandbox_client, live_budget_id):
+    with pytest.raises(ValueError, match="must not be empty"):
+        sandbox_client.create_transactions(live_budget_id, [])

@@ -17,8 +17,9 @@ from categorizer import (
     filter_categories_by_usage, categorize_transactions, update_cache_from_claude_results,
 )
 from amazon_matcher import (
-    is_amazon_payee, find_latest_dump, extract_order_history_csv, parse_order_history,
-    match_shipments_to_transactions, _json_default, _md_escape, _next_free_path,
+    is_amazon_payee, is_whole_foods_payee, find_latest_dump, extract_order_history_csv,
+    parse_order_history, match_shipments_to_transactions, _json_default, _md_escape,
+    _next_free_path,
 )
 
 logger = logging.getLogger(__name__)
@@ -216,18 +217,25 @@ def write_unified_changeset(
             account_name = None
 
         ship = getattr(proposal, "shipment", None)
+        parent_payee = _parent_field(parent, "payee_name")
+        include_memo = not is_whole_foods_payee(parent_payee)
         subtransactions = []
         for sub in getattr(proposal, "subtransactions", []) or []:
             item = getattr(sub, "item", None)
             item_block = None
+            memo = None
             if item is not None:
                 item_block = {
                     "asin": getattr(item, "asin", None),
                     "product_name": getattr(item, "product_name", None),
                     "quantity": getattr(item, "quantity", None),
                 }
+                if include_memo:
+                    product_name = getattr(item, "product_name", None) or ""
+                    memo = product_name[:200] if product_name else None
             subtransactions.append({
                 "item": item_block,
+                "memo": memo,
                 "allocated_amount": getattr(sub, "allocated_amount", None),
                 "category_id": getattr(sub, "category_id", None),
                 "category_name": getattr(sub, "category_name", None),

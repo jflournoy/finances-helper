@@ -7,7 +7,7 @@
     "payee_name": "Amazon.com",
     "category_id": null,
     "cleared": "uncleared",
-    "approved": true,
+    "approved": false,
     "amount": -37090,
     "memo": "Order 111-0000001 ($37.09)",
     "account_name": "Account 1"
@@ -20,7 +20,7 @@
     "payee_name": "Amazon.com",
     "category_id": null,
     "cleared": "uncleared",
-    "approved": true,
+    "approved": false,
     "amount": -48120,
     "memo": "Order 111-0000002 ($48.12)",
     "account_name": "Account 2"
@@ -33,7 +33,7 @@
     "payee_name": "Amazon.com",
     "category_id": null,
     "cleared": "uncleared",
-    "approved": true,
+    "approved": false,
     "amount": -14200,
     "memo": "No matching shipment ($14.20)",
     "account_name": "Account 3"
@@ -46,7 +46,7 @@
     "payee_name": "AMZN Mktp US",
     "category_id": null,
     "cleared": "uncleared",
-    "approved": true,
+    "approved": false,
     "amount": -17410,
     "memo": "No matching shipment ($17.41)",
     "account_name": "Account 4"
@@ -59,7 +59,7 @@
     "payee_name": "Amazon.com",
     "category_id": null,
     "cleared": "uncleared",
-    "approved": true,
+    "approved": false,
     "amount": -54710,
     "memo": "Date too far from matching shipment ($54.71)",
     "account_name": "Account 1"
@@ -74,7 +74,7 @@
     "cleared": "uncleared",
     "approved": true,
     "amount": -22820,
-    "memo": "Already categorized",
+    "memo": "Already approved — should be excluded",
     "account_name": "Account 1"
   },
   {
@@ -85,9 +85,9 @@
     "payee_name": "Amazon.com",
     "category_id": null,
     "cleared": "reconciled",
-    "approved": true,
+    "approved": false,
     "amount": -58850,
-    "memo": "Already reconciled",
+    "memo": "Already reconciled — should be excluded",
     "account_name": "Account 1"
   },
   {
@@ -98,7 +98,7 @@
     "payee_name": "Amazon.com",
     "category_id": null,
     "cleared": "uncleared",
-    "approved": true,
+    "approved": false,
     "amount": -12830,
     "memo": "Unknown account",
     "account_name": "Account n"
@@ -111,7 +111,7 @@
     "payee_name": "Target",
     "category_id": null,
     "cleared": "uncleared",
-    "approved": true,
+    "approved": false,
     "amount": -25000,
     "memo": "Non-Amazon transaction",
     "account_name": "Account 1"
@@ -124,7 +124,7 @@
     "payee_name": "Amazon.com",
     "category_id": null,
     "cleared": "uncleared",
-    "approved": true,
+    "approved": false,
     "amount": -37710,
     "memo": "Order 111-0000003 (3-item shipment, $37.71)",
     "account_name": "Account 3"
@@ -137,7 +137,7 @@
     "payee_name": "Amazon.com",
     "category_id": null,
     "cleared": "uncleared",
-    "approved": true,
+    "approved": false,
     "amount": -82480,
     "memo": "Order 111-0000010 (5-item shipment, $82.48)",
     "account_name": "Account 1"
@@ -150,7 +150,7 @@
     "payee_name": "AMZN Mktp US",
     "category_id": null,
     "cleared": "uncleared",
-    "approved": true,
+    "approved": false,
     "amount": -42800,
     "memo": "Order 111-0000023 (2-item shipment, $42.80)",
     "account_name": "Account 3"

@@ -440,33 +440,39 @@ def test_get_transactions_delta_sync_param(client):
 class TestFilterUncategorizedWritable:
     """Test filter_uncategorized_writable for writability constraints."""
 
-    def test_excludes_categorized(self):
-        """Transaction with category_id set is excluded."""
-        txn = {"id": "t1", "category_id": "cat-123", "cleared": "cleared", "deleted": False}
+    def test_excludes_approved(self):
+        """Transaction with approved=True is excluded."""
+        txn = {"id": "t1", "approved": True, "cleared": "cleared", "deleted": False}
         result = filter_uncategorized_writable([txn])
         assert result == []
 
     def test_excludes_reconciled(self):
         """Transaction with cleared == 'reconciled' is excluded."""
-        txn = {"id": "t1", "category_id": None, "cleared": "reconciled", "deleted": False}
+        txn = {"id": "t1", "approved": False, "cleared": "reconciled", "deleted": False}
         result = filter_uncategorized_writable([txn])
         assert result == []
 
     def test_excludes_deleted(self):
         """Transaction with deleted == True is excluded."""
-        txn = {"id": "t1", "category_id": None, "cleared": "cleared", "deleted": True}
+        txn = {"id": "t1", "approved": False, "cleared": "cleared", "deleted": True}
         result = filter_uncategorized_writable([txn])
         assert result == []
 
-    def test_includes_uncategorized_cleared(self):
-        """Uncategorized, cleared, not deleted is included."""
-        txn = {"id": "t1", "category_id": None, "cleared": "cleared", "deleted": False}
+    def test_includes_unapproved_cleared(self):
+        """Unapproved, cleared, not deleted is included."""
+        txn = {"id": "t1", "approved": False, "cleared": "cleared", "deleted": False}
         result = filter_uncategorized_writable([txn])
         assert result == [txn]
 
-    def test_includes_uncategorized_uncleared(self):
-        """Uncategorized, uncleared, not deleted is included."""
-        txn = {"id": "t1", "category_id": None, "cleared": "uncleared"}
+    def test_includes_unapproved_uncleared(self):
+        """Unapproved, uncleared, not deleted is included."""
+        txn = {"id": "t1", "approved": False, "cleared": "uncleared"}
+        result = filter_uncategorized_writable([txn])
+        assert result == [txn]
+
+    def test_includes_categorized_unapproved(self):
+        """Categorized but unapproved transaction is included (auto-rule assigned category)."""
+        txn = {"id": "t1", "approved": False, "category_id": "cat-123", "cleared": "cleared", "deleted": False}
         result = filter_uncategorized_writable([txn])
         assert result == [txn]
 
@@ -478,11 +484,11 @@ class TestFilterUncategorizedWritable:
     def test_mixed_states(self):
         """Multiple txns with mixed states filters correctly."""
         txns = [
-            {"id": "t1", "category_id": None, "cleared": "cleared", "deleted": False},  # include
-            {"id": "t2", "category_id": "cat-123", "cleared": "cleared", "deleted": False},  # exclude (categorized)
-            {"id": "t3", "category_id": None, "cleared": "reconciled", "deleted": False},  # exclude (reconciled)
-            {"id": "t4", "category_id": None, "cleared": "cleared", "deleted": True},  # exclude (deleted)
-            {"id": "t5", "category_id": None, "cleared": "uncleared"},  # include
+            {"id": "t1", "approved": False, "cleared": "cleared", "deleted": False},  # include
+            {"id": "t2", "approved": True, "cleared": "cleared", "deleted": False},   # exclude (approved)
+            {"id": "t3", "approved": False, "cleared": "reconciled", "deleted": False},  # exclude (reconciled)
+            {"id": "t4", "approved": False, "cleared": "cleared", "deleted": True},   # exclude (deleted)
+            {"id": "t5", "approved": False, "cleared": "uncleared"},                  # include
         ]
         result = filter_uncategorized_writable(txns)
         assert len(result) == 2
@@ -491,7 +497,7 @@ class TestFilterUncategorizedWritable:
 
     def test_handles_missing_keys(self):
         """Does not raise on missing keys, uses .get()."""
-        txn = {"id": "t1"}  # missing category_id, cleared, deleted
+        txn = {"id": "t1"}  # missing approved, cleared, deleted
         result = filter_uncategorized_writable([txn])
-        # Should treat missing keys as: category_id=None, cleared!=reconciled, deleted!=True
+        # approved missing → not True → included
         assert result == [txn]

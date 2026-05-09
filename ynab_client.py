@@ -44,19 +44,23 @@ def milliunits_to_dollars(milliunits: int) -> float:
 
 
 def filter_uncategorized_writable(ynab_txns: list[dict]) -> list[dict]:
-    """Return uncategorized transactions the YNAB API allows us to write to.
+    """Return unapproved transactions the YNAB API allows us to write to.
 
     Excludes:
-    - category_id is set (already categorized)
+    - approved is True (already human-reviewed)
     - cleared == "reconciled" (locked, API rejects edits)
     - deleted is True
     """
     return [
         t for t in ynab_txns
-        if t.get("category_id") is None
+        if t.get("approved") is not True
         and t.get("cleared") != "reconciled"
         and t.get("deleted") is not True
     ]
+
+
+SANDBOX_BUDGET_NAME = "Sandbox"
+SANDBOX_ACCOUNT_NAME = "Sandbox"
 
 
 class YNABClient:
@@ -82,6 +86,45 @@ class YNABClient:
             "Authorization": f"Bearer {token}",
             "Content-Type": "application/json",
         })
+
+        self.sandbox_mode = os.environ.get("YNAB_SANDBOX_MODE", "").strip() == "1"
+        self._sandbox_budget_id: str | None = None
+        self._sandbox_account_id: str | None = None
+
+        if self.sandbox_mode:
+            self._init_sandbox()
+
+    def _init_sandbox(self) -> None:
+        """Resolve and cache the Sandbox budget and account IDs.
+
+        Raises:
+            ValueError: If the Sandbox budget or account cannot be found.
+        """
+        self._sandbox_budget_id = self.resolve_budget_id(SANDBOX_BUDGET_NAME)
+        accounts = self.get_accounts(self._sandbox_budget_id)
+        matches = [a for a in accounts if a.get("name") == SANDBOX_ACCOUNT_NAME]
+        if not matches:
+            available = [a.get("name") for a in accounts]
+            raise ValueError(
+                f"Sandbox account {SANDBOX_ACCOUNT_NAME!r} not found in budget {SANDBOX_BUDGET_NAME!r}. "
+                f"Available accounts: {available}"
+            )
+        self._sandbox_account_id = matches[0]["id"]
+        print(
+            f"[SANDBOX MODE] All writes redirected to budget={SANDBOX_BUDGET_NAME!r} "
+            f"account={SANDBOX_ACCOUNT_NAME!r} ({self._sandbox_account_id})"
+        )
+
+    def _sandbox_redirect(self, budget_id: str, account_id: str | None) -> tuple[str, str]:
+        """Return (budget_id, account_id) redirected to sandbox targets.
+
+        Always prints a warning so sandbox writes are never silent.
+        """
+        print(
+            f"[SANDBOX MODE] Redirecting write: budget {budget_id} → {self._sandbox_budget_id}, "
+            f"account {account_id} → {self._sandbox_account_id}"
+        )
+        return self._sandbox_budget_id, self._sandbox_account_id
 
     def _get(self, path: str, params: dict | None = None) -> dict:
         """Make a GET request to the YNAB API.
@@ -127,6 +170,68 @@ class YNABClient:
             raise YNABAPIError(response.status_code, detail="Response missing 'data' key")
 
         return body["data"]
+
+    def _post(self, path: str, payload: dict) -> dict:
+        """Make a POST request to the YNAB API.
+
+        Raises:
+            YNABNotFoundError: On 404
+            YNABRateLimitError: On 429
+            YNABAPIError: On other errors
+        """
+        url = f"{self.base_url}{path}"
+        response = self.session.post(url, json=payload)
+
+        try:
+            body = response.json()
+        except ValueError:
+            raise YNABAPIError(response.status_code, detail=f"Malformed JSON response: {response.text}")
+
+        if response.status_code >= 400:
+            error_data = body.get("error", {})
+            status = response.status_code
+            error_id = error_data.get("id", "")
+            error_name = error_data.get("name", "")
+            error_detail = error_data.get("detail", "")
+
+            if status == 404:
+                raise YNABNotFoundError(status, error_id, error_name, error_detail)
+            elif status == 429:
+                raise YNABRateLimitError(status, error_id, error_name, error_detail)
+            else:
+                raise YNABAPIError(status, error_id, error_name, error_detail)
+
+        if "data" not in body:
+            raise YNABAPIError(response.status_code, detail="Response missing 'data' key")
+
+        return body["data"]
+
+    def create_transactions(self, budget_id: str, transactions: list[dict]) -> dict:
+        """Create one or more transactions in a budget.
+
+        Each transaction dict must include at minimum: account_id, date, amount.
+        In sandbox mode, budget_id and every account_id are redirected to the
+        Sandbox budget/account and a warning is printed for each call.
+
+        Args:
+            budget_id: Target budget ID (ignored in sandbox mode).
+            transactions: List of transaction dicts per YNAB API schema.
+
+        Returns:
+            The YNAB API response data dict (contains 'transactions', 'duplicate_import_ids', etc.)
+        """
+        if not transactions:
+            raise ValueError("transactions must not be empty")
+
+        write_budget_id = budget_id
+        if self.sandbox_mode:
+            write_budget_id, sandbox_account_id = self._sandbox_redirect(budget_id, None)
+            transactions = [
+                {**t, "account_id": sandbox_account_id}
+                for t in transactions
+            ]
+
+        return self._post(f"/budgets/{write_budget_id}/transactions", {"transactions": transactions})
 
     def get_budgets(self) -> list:
         """Get all budgets."""
