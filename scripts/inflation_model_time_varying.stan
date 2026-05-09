@@ -27,7 +27,7 @@ transformed data {
 parameters {
     // Time-varying inflation (spline coefficients)
     vector[K] beta_pop;              // population spline coefficients
-    matrix[I, K] beta_i;             // item-level deviations
+    matrix[I, K] beta_i_raw;         // standardized item-level deviations (non-centered)
 
     // Item base prices
     real log_p0_pop;                 // population mean log base price
@@ -37,13 +37,13 @@ parameters {
     // Hyperpriors
     real<lower=0> sigma_fs;          // sd for factor smooth shrinkage
     real<lower=0> lambda_pop;        // smoothing parameter for population spline
-    real<lower=0> lambda_i;          // smoothing parameter for item splines
     real<lower=0> sigma;             // observation noise on log scale
     real<lower=1> nu;                // Student-t degrees of freedom
 }
 
 transformed parameters {
-    vector[I] log_p0_i = log_p0_pop + z_p0 * sigma_p0;  // item-level base prices
+    vector[I] log_p0_i = log_p0_pop + z_p0 * sigma_p0;       // item-level base prices
+    matrix[I, K] beta_i = beta_i_raw * sigma_fs;             // scaled item-level deviations
     vector[N] mu;
     for (n in 1:N) {
         vector[K] beta_n = beta_pop + to_vector(beta_i[ii[n]]);  // combined coefficients
@@ -58,10 +58,8 @@ model {
     sigma_fs    ~ normal(0, 0.3);     // factor smooth shrinkage
     sigma       ~ normal(0, 0.2);     // observation noise
     nu          ~ gamma(2, 0.1);      // heavy tails
-    // Tighter priors on smoothing parameters: gamma(2,1) has mean 2, mode 1
-    // strongly informative: prefers moderate smoothing, prevents pathologically wiggly fits
-    lambda_pop  ~ gamma(2, 1);        // smoothing parameter (population)
-    lambda_i    ~ gamma(2, 0.5);      // smoothing parameter (items, mean 4 — more shrinkage)
+    // Tighter prior on the population smoothing parameter
+    lambda_pop  ~ gamma(2, 1);        // smoothing parameter (population), mean 2, mode 1
 
     // Non-centered item intercepts
     z_p0 ~ normal(0, 1);
@@ -75,11 +73,10 @@ model {
     // Population smooth: penalize for smoothness
     target += -0.5 * lambda_pop * quad_form(S, beta_pop);
 
-    // Item splines: penalize for smoothness AND shrink toward zero
-    for (i in 1:I) {
-        target += -0.5 * lambda_i * quad_form(S, to_vector(beta_i[i]));
-        beta_i[i] ~ normal(0, sigma_fs);  // shrink toward population
-    }
+    // Item splines (non-centered): beta_i_raw ~ N(0,1), beta_i = beta_i_raw * sigma_fs
+    // The implied prior beta_i[i] ~ N(0, sigma_fs) is the only regularization on item
+    // deviations — the population spline beta_pop carries the smoothness structure.
+    to_vector(beta_i_raw) ~ normal(0, 1);
 
     // Likelihood
     for (n in 1:N)

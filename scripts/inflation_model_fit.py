@@ -103,7 +103,7 @@ def main() -> None:
     def make_inits():
         return {
             "beta_pop":    beta_pop_init,
-            "beta_i":      np.zeros((I, K)),
+            "beta_i_raw":  np.zeros((I, K)),  # unit-scale; zeros mean no item-level deviation
             "log_p0_pop":  log_p0_pop_init,
             "sigma_p0":    sigma_p0_init,
             "sigma_fs":    0.1,
@@ -111,7 +111,6 @@ def main() -> None:
             "nu":          10.0,
             "z_p0":        z_p0_init,
             "lambda_pop":  2.0,
-            "lambda_i":    4.0,
         }
 
     model = cmdstanpy.CmdStanModel(
