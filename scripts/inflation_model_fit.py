@@ -68,18 +68,50 @@ def main() -> None:
 
     K = stan_data["K"]
 
+    # --- Data-informed initialization via least-squares ---
+    # 1) Item base prices: mean log price per item
+    # 2) Population spline: regress (log_price - log_p0_i) on B
+    # 3) Item-level deviations: small zeros (let the sampler explore)
+    print("\nComputing data-informed inits via least-squares...")
+    B_arr = np.array(stan_data["B"])              # (N, K)
+    log_price_arr = np.log(np.array(stan_data["price"]))  # (N,)
+    ii_init = np.array(stan_data["ii"]) - 1       # 0-based item indices
+
+    # Per-item mean log price
+    log_p0_i_init = np.zeros(I)
+    for i in range(I):
+        mask_i = (ii_init == i)
+        log_p0_i_init[i] = np.mean(log_price_arr[mask_i]) if mask_i.any() else log_p0_pop_init
+
+    # Population spline init: lstsq fit of (log_price - log_p0_i) on B
+    centered = log_price_arr - log_p0_i_init[ii_init]
+    beta_pop_init, *_ = np.linalg.lstsq(B_arr, centered, rcond=None)
+
+    # Convert log_p0_i -> z_p0 init via standardization
+    sigma_p0_init = max(np.std(log_p0_i_init - log_p0_pop_init), 0.1)
+    z_p0_init = (log_p0_i_init - log_p0_pop_init) / sigma_p0_init
+
+    # Estimate sigma from residuals of the LS fit
+    pred_init = log_p0_i_init[ii_init] + B_arr @ beta_pop_init
+    sigma_init = max(np.std(log_price_arr - pred_init), 0.05)
+
+    print(f"  beta_pop init range: [{beta_pop_init.min():.3f}, {beta_pop_init.max():.3f}]")
+    print(f"  log_p0_i init range: [{log_p0_i_init.min():.3f}, {log_p0_i_init.max():.3f}]")
+    print(f"  sigma_p0 init: {sigma_p0_init:.3f}")
+    print(f"  sigma init: {sigma_init:.3f}")
+
     def make_inits():
         return {
-            "beta_pop":    np.zeros(K),
+            "beta_pop":    beta_pop_init,
             "beta_i":      np.zeros((I, K)),
             "log_p0_pop":  log_p0_pop_init,
-            "sigma_p0":    0.5,
+            "sigma_p0":    sigma_p0_init,
             "sigma_fs":    0.1,
-            "sigma":       0.1,
+            "sigma":       sigma_init,
             "nu":          10.0,
-            "z_p0":        np.zeros(I),
-            "lambda_pop":  1.0,
-            "lambda_i":    1.0,
+            "z_p0":        z_p0_init,
+            "lambda_pop":  2.0,
+            "lambda_i":    4.0,
         }
 
     model = cmdstanpy.CmdStanModel(

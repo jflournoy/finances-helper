@@ -58,11 +58,18 @@ model {
     sigma_fs    ~ normal(0, 0.3);     // factor smooth shrinkage
     sigma       ~ normal(0, 0.2);     // observation noise
     nu          ~ gamma(2, 0.1);      // heavy tails
-    lambda_pop  ~ gamma(1, 0.1);      // smoothing parameter
-    lambda_i    ~ gamma(1, 0.1);      // smoothing parameter
+    // Tighter priors on smoothing parameters: gamma(2,1) has mean 2, mode 1
+    // strongly informative: prefers moderate smoothing, prevents pathologically wiggly fits
+    lambda_pop  ~ gamma(2, 1);        // smoothing parameter (population)
+    lambda_i    ~ gamma(2, 0.5);      // smoothing parameter (items, mean 4 — more shrinkage)
 
     // Non-centered item intercepts
     z_p0 ~ normal(0, 1);
+
+    // Explicit prior on population spline coefficients
+    // Constrains the unpenalized null space (constant + linear trend in tp basis)
+    // log price changes of more than ~0.5 (50%) over the window are unlikely
+    beta_pop ~ normal(0, 0.5);
 
     // Spline priors with thin plate penalties
     // Population smooth: penalize for smoothness
