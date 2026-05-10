@@ -18,8 +18,8 @@ from categorizer import (
 )
 from amazon_matcher import (
     is_amazon_payee, is_whole_foods_payee, find_latest_dump, extract_order_history_csv,
-    parse_order_history, match_shipments_to_transactions, _json_default, _md_escape,
-    _next_free_path,
+    parse_order_history, match_shipments_to_transactions, filter_shipments_to_window,
+    _json_default, _md_escape, _next_free_path,
 )
 
 logger = logging.getLogger(__name__)
@@ -389,9 +389,8 @@ def write_unified_changeset(
             subs = getattr(proposal, "subtransactions", []) or []
             item_count = len(subs)
             categories = ", ".join(
-                _md_escape(getattr(s, "category_name", "") or "")
+                _md_escape(getattr(s, "category_name", None) or "[UNCATEGORIZED]")
                 for s in subs
-                if getattr(s, "category_name", None)
             )
             markdown_lines.append(f"| {parent_date} | {order_id} | {ship_date} | {item_count} | {categories} |")
         markdown_lines.append("")
@@ -549,10 +548,19 @@ def main(argv=None):
         csv_text = extract_order_history_csv(dump_path)
         shipments, parse_errors_list = parse_order_history(csv_text)
         amazon_writable = [t for t in writable if is_amazon_payee(t.get("payee_name"))]
+        date_window_days = config.get("amazon", {}).get("date_window_days", 3)
+
+        from datetime import date as _date
+        shipments_in_window = filter_shipments_to_window(
+            shipments,
+            since_date=_date.fromisoformat(since_date),
+            date_window_days=date_window_days,
+        )
+
         match_result = match_shipments_to_transactions(
-            amazon_writable, shipments,
+            amazon_writable, shipments_in_window,
             parse_errors=parse_errors_list,
-            date_window_days=config.get("amazon", {}).get("date_window_days", 3),
+            date_window_days=date_window_days,
         )
 
         # Warn if dump is stale

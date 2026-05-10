@@ -772,6 +772,98 @@ class TestWriteUnifiedChangeset:
         assert "111-0000001-0000001" in markdown
         assert "111-0000002-0000002" in markdown
 
+    def test_write_unified_changeset_markdown_uncategorized_amazon_item(self, tmp_path):
+        """Amazon split items with no category render as [UNCATEGORIZED] in the markdown table."""
+        from enrich import write_unified_changeset
+        from datetime import datetime
+        from decimal import Decimal
+        from categorizer import AmazonSplitProposal, ItemCategoryResult
+        from amazon_matcher import AmazonItem
+
+        out_dir = tmp_path / "changesets"
+        now = datetime(2026, 4, 27, 14, 30, 0)
+
+        class MockShipment:
+            def __init__(self, order_id, ship_date):
+                self.order_id = order_id
+                self.ship_date = ship_date
+
+        item_uncategorized = AmazonItem(
+            order_id="111-9999999-9999999", asin="B000NOCAT", product_name="Mystery Widget",
+            quantity=1, unit_price=Decimal("9.99"), unit_price_tax=Decimal("0.00"),
+            ship_date=datetime(2026, 4, 14).date(), raw_row_index=1,
+        )
+        sub_uncategorized = ItemCategoryResult(
+            ynab_transaction_id="t-uncat",
+            item=item_uncategorized,
+            allocated_amount=Decimal("9.99"),
+            category_id=None,
+            category_name=None,
+            confidence=0.0,
+            rationale="no category assigned",
+        )
+        item_categorized = AmazonItem(
+            order_id="111-9999999-9999999", asin="B000HASCAT", product_name="Soap",
+            quantity=1, unit_price=Decimal("4.50"), unit_price_tax=Decimal("0.00"),
+            ship_date=datetime(2026, 4, 14).date(), raw_row_index=2,
+        )
+        sub_categorized = ItemCategoryResult(
+            ynab_transaction_id="t-uncat",
+            item=item_categorized,
+            allocated_amount=Decimal("4.50"),
+            category_id="cat-1",
+            category_name="Household supplies",
+            confidence=0.9,
+            rationale="cleaning",
+        )
+
+        proposal_all_uncategorized = AmazonSplitProposal(
+            parent_ynab_txn={"id": "t-all-uncat", "date": "2026-04-14", "payee_name": "Amazon"},
+            shipment=MockShipment("111-1111111-1111111", datetime(2026, 4, 14).date()),
+            subtransactions=[sub_uncategorized],
+        )
+        proposal_mixed = AmazonSplitProposal(
+            parent_ynab_txn={"id": "t-mixed", "date": "2026-04-15", "payee_name": "Amazon"},
+            shipment=MockShipment("111-2222222-2222222", datetime(2026, 4, 15).date()),
+            subtransactions=[sub_uncategorized, sub_categorized],
+        )
+
+        md_path, _ = write_unified_changeset(
+            flat_results=[],
+            skipped=[],
+            unmatched_amazon=[],
+            split_proposals=[proposal_all_uncategorized, proposal_mixed],
+            source_txns=[],
+            budget_id="b123",
+            since_date="2026-04-01",
+            days_back=30,
+            K=70,
+            confidence_threshold=0.05,
+            dump_path=None,
+            out_dir=out_dir,
+            now=now,
+        )
+
+        markdown = md_path.read_text()
+        all_uncat_line = next(
+            (line for line in markdown.splitlines() if "111-1111111-1111111" in line), None
+        )
+        assert all_uncat_line is not None, f"all-uncategorized split row not in markdown:\n{markdown}"
+        assert "[UNCATEGORIZED]" in all_uncat_line, (
+            f"row for shipment with no categories should contain '[UNCATEGORIZED]', got: {all_uncat_line!r}"
+        )
+
+        mixed_line = next(
+            (line for line in markdown.splitlines() if "111-2222222-2222222" in line), None
+        )
+        assert mixed_line is not None
+        assert "[UNCATEGORIZED]" in mixed_line, (
+            f"mixed row should contain [UNCATEGORIZED] for the uncategorized item, got: {mixed_line!r}"
+        )
+        assert "Household supplies" in mixed_line, (
+            f"mixed row should also contain the categorized item's category, got: {mixed_line!r}"
+        )
+
     def test_write_unified_changeset_markdown_no_amazon_splits(self, tmp_path):
         """Markdown output omits Amazon section when no splits."""
         from enrich import write_unified_changeset
