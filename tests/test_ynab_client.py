@@ -437,6 +437,53 @@ def test_get_transactions_delta_sync_param(client):
     assert params.get("last_knowledge_of_server") == 300
 
 
+def test_get_transactions_injects_amount_dollars(client):
+    """Each returned transaction must have amount_dollars derived from amount milliunits."""
+    fixture = load_fixture("ynab_transactions.json")
+    with mock_get(client, fixture):
+        txns, _ = client.get_transactions(BUDGET_ID)
+    assert len(txns) >= 1
+    for t in txns:
+        assert "amount_dollars" in t, "amount_dollars must be injected at the boundary"
+        assert t["amount_dollars"] == t["amount"] / 1000.0
+
+
+def test_get_transactions_injects_amount_dollars_into_subtransactions(client):
+    """Subtransactions must also have amount_dollars injected."""
+    fixture = {
+        "data": {
+            "transactions": [
+                {
+                    "id": "p1", "date": "2026-04-01", "amount": -10000, "deleted": False,
+                    "subtransactions": [
+                        {"id": "s1", "amount": -3000, "deleted": False},
+                        {"id": "s2", "amount": -7000, "deleted": False},
+                    ],
+                },
+            ],
+            "server_knowledge": 1,
+        }
+    }
+    with mock_get(client, fixture):
+        txns, _ = client.get_transactions(BUDGET_ID)
+    assert len(txns) == 1
+    assert txns[0]["amount_dollars"] == -10.0
+    subs = txns[0]["subtransactions"]
+    assert len(subs) == 2
+    assert subs[0]["amount_dollars"] == -3.0
+    assert subs[1]["amount_dollars"] == -7.0
+
+
+def test_get_account_transactions_injects_amount_dollars(client):
+    """get_account_transactions must also inject amount_dollars."""
+    fixture = load_fixture("ynab_transactions.json")
+    with mock_get(client, fixture):
+        txns, _ = client.get_account_transactions(BUDGET_ID, ACCOUNT_ID)
+    for t in txns:
+        assert "amount_dollars" in t
+        assert t["amount_dollars"] == t["amount"] / 1000.0
+
+
 class TestFilterUncategorizedWritable:
     """Test filter_uncategorized_writable for writability constraints."""
 

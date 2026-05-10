@@ -43,6 +43,23 @@ def milliunits_to_dollars(milliunits: int) -> float:
     return milliunits / 1000.0
 
 
+def _with_amount_dollars(txn: dict) -> dict:
+    """Return a shallow copy of a YNAB transaction with amount_dollars injected.
+
+    Converts the milliunit `amount` to dollars at the API boundary so downstream
+    code never has to do milliunit math. Recurses into `subtransactions` so each
+    split also gets `amount_dollars`.
+    """
+    out = {**txn, "amount_dollars": milliunits_to_dollars(txn.get("amount", 0))}
+    subs = txn.get("subtransactions")
+    if isinstance(subs, list):
+        out["subtransactions"] = [
+            {**s, "amount_dollars": milliunits_to_dollars(s.get("amount", 0))}
+            for s in subs
+        ]
+    return out
+
+
 def filter_uncategorized_writable(ynab_txns: list[dict]) -> list[dict]:
     """Return unapproved transactions the YNAB API allows us to write to.
 
@@ -331,7 +348,7 @@ class YNABClient:
 
         data = self._get(f"/budgets/{budget_id}/transactions", params=params if params else None)
         transactions = data.get("transactions", [])
-        filtered = [t for t in transactions if not t.get("deleted", False)]
+        filtered = [_with_amount_dollars(t) for t in transactions if not t.get("deleted", False)]
         server_knowledge = data.get("server_knowledge", 0)
 
         return filtered, server_knowledge
@@ -369,7 +386,7 @@ class YNABClient:
             params=params if params else None
         )
         transactions = data.get("transactions", [])
-        filtered = [t for t in transactions if not t.get("deleted", False)]
+        filtered = [_with_amount_dollars(t) for t in transactions if not t.get("deleted", False)]
         server_knowledge = data.get("server_knowledge", 0)
 
         return filtered, server_knowledge
