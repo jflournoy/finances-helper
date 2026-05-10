@@ -6,7 +6,7 @@
     "unmatched_ynab": 3,
     "unmatched_shipments": 0,
     "excluded_shipments": 4,
-    "parse_errors": 4
+    "parse_errors": 1
   },
   "proposed_splits": [
     {
@@ -478,21 +478,6 @@
     {
       "row_index": 30,
       "reason": "non-USD currency: EUR",
-      "raw_row": null
-    },
-    {
-      "row_index": 13,
-      "reason": "charge math mismatch: expected 76.49, got 82.48",
-      "raw_row": null
-    },
-    {
-      "row_index": 22,
-      "reason": "charge math mismatch: expected 53.85, got 58.85",
-      "raw_row": null
-    },
-    {
-      "row_index": 31,
-      "reason": "charge math mismatch: expected 32.57, got 32.02",
       "raw_row": null
     }
   ]

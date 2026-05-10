@@ -260,7 +260,7 @@ class TestAmazonShipment:
         assert len(shipment.items) == 1
 
     def test_expected_charge_property(self):
-        """expected_charge calculates total correctly."""
+        """expected_charge sums item_subtotal + tax + shipping + discounts (discounts are negative)."""
         shipment = AmazonShipment(
             order_id="111-0000001-0000001",
             ship_date=date(2024, 1, 16),
@@ -271,12 +271,12 @@ class TestAmazonShipment:
             item_subtotal=Decimal("100.00"),
             tax=Decimal("7.00"),
             shipping=Decimal("5.00"),
-            discounts=Decimal("2.00"),
+            discounts=Decimal("-2.00"),
             total_amount=Decimal("110.00"),
             items=[],
             shipment_status="Shipped",
         )
-        expected = Decimal("100.00") + Decimal("7.00") + Decimal("5.00") - Decimal("2.00")
+        expected = Decimal("100.00") + Decimal("7.00") + Decimal("5.00") + Decimal("-2.00")
         assert shipment.expected_charge == expected
         assert shipment.expected_charge == Decimal("110.00")
 
@@ -521,16 +521,40 @@ class TestParseOrderHistory:
         assert "charge math" in errors[0].reason
 
     def test_parse_multi_item_shipment(self):
-        """Multiple items with same grouping key form one shipment."""
+        """Multiple items with same shipment key form one shipment.
+
+        Real Amazon CSVs put a per-item charge in Total Amount, not a per-shipment
+        total. Group key must NOT include Total Amount or each item becomes its
+        own one-item 'shipment'.
+        """
         csv_text = """Order ID,Order Date,Ship Date,Order Status,Shipment Status,Payment Method Type,Currency,Unit Price,Unit Price Tax,Shipment Item Subtotal,Shipment Item Subtotal Tax,Shipping Charge,Total Amount,Total Discounts,ASIN,Product Name,Original Quantity
-111-0000001-0000001,2024-01-15,2024-01-16,Closed,Shipped,Visa - 0804,USD,10.00,0.70,30.00,2.10,2.00,34.10,0.00,B0C1234567,Item A,1
-111-0000001-0000001,2024-01-15,2024-01-16,Closed,Shipped,Visa - 0804,USD,10.00,0.70,30.00,2.10,2.00,34.10,0.00,B0C2234567,Item B,1
-111-0000001-0000001,2024-01-15,2024-01-16,Closed,Shipped,Visa - 0804,USD,10.00,0.70,30.00,2.10,2.00,34.10,0.00,B0C3234567,Item C,1
+111-0000001-0000001,2024-01-15,2024-01-16,Closed,Shipped,Visa - 0804,USD,10.00,0.70,30.00,2.10,2.00,10.70,0.00,B0C1234567,Item A,1
+111-0000001-0000001,2024-01-15,2024-01-16,Closed,Shipped,Visa - 0804,USD,10.00,0.70,30.00,2.10,2.00,10.70,0.00,B0C2234567,Item B,1
+111-0000001-0000001,2024-01-15,2024-01-16,Closed,Shipped,Visa - 0804,USD,10.00,0.70,30.00,2.10,2.00,12.70,0.00,B0C3234567,Item C,1
+"""
+        shipments, errors = parse_order_history(csv_text)
+        assert len(shipments) == 1, f"three rows in same shipment should produce 1 shipment, got {len(shipments)}: {[s.items[0].asin for s in shipments]}"
+        assert len(shipments[0].items) == 3
+        assert [item.asin for item in shipments[0].items] == ["B0C1234567", "B0C2234567", "B0C3234567"]
+        # total_amount on the shipment is the sum of per-item Total Amounts plus shipping (shipping isn't repeated per row)
+        assert shipments[0].total_amount == Decimal("34.10"), (
+            f"shipment total should sum per-item Total Amounts (+ shipping if not already in items), got {shipments[0].total_amount}"
+        )
+
+    def test_parse_multi_item_negative_discounts_real_world(self):
+        """Real Amazon CSVs use NEGATIVE values for Total Discounts.
+
+        Reproduces issue #152: charge math mismatch on every discounted row
+        because expected_charge formula subtracts a negative number.
+        """
+        csv_text = """Order ID,Order Date,Ship Date,Order Status,Shipment Status,Payment Method Type,Currency,Unit Price,Unit Price Tax,Shipment Item Subtotal,Shipment Item Subtotal Tax,Shipping Charge,Total Amount,Total Discounts,ASIN,Product Name,Original Quantity
+111-0000002-0000002,2024-01-15,2024-01-16,Closed,Shipped,Visa - 0804,USD,8.10,0.43,8.10,0.43,0.00,7.31,-1.22,B0C9990001,Discounted Item,1
 """
         shipments, errors = parse_order_history(csv_text)
         assert len(shipments) == 1
-        assert len(shipments[0].items) == 3
-        assert [item.asin for item in shipments[0].items] == ["B0C1234567", "B0C2234567", "B0C3234567"]
+        # Real-world expected_charge with negative discount: subtotal + tax + ship + disc (disc is negative, so net is reduced)
+        # 8.10 + 0.43 + 0 + (-1.22) = 7.31, which equals total_amount → no parse error
+        assert errors == [], f"discounted shipment should not produce charge math error, got: {[e.reason for e in errors]}"
 
     def test_parse_header_drift(self):
         """Missing required column raises ValueError."""
@@ -663,6 +687,49 @@ class TestIntegrationParseOrderHistory:
 # ============================================================================
 # Matcher Tests: Filter Transactions
 # ============================================================================
+
+
+class TestFilterShipmentsToWindow:
+    """Test filter_shipments_to_window for date-window pre-filtering."""
+
+    def _ship(self, order_id, ship_date):
+        return AmazonShipment(
+            order_id=order_id, ship_date=ship_date,
+            payment_method_raw="Visa - 0001", payment_method_last4="0001",
+            is_split_tender=False, currency="USD",
+            item_subtotal=Decimal("10.00"), tax=Decimal("0.50"),
+            shipping=Decimal("0"), discounts=Decimal("0"),
+            total_amount=Decimal("10.50"), items=[],
+            shipment_status="Shipped",
+        )
+
+    def test_drops_shipments_before_window(self):
+        from amazon_matcher import filter_shipments_to_window
+        old = self._ship("o-old", date(2020, 1, 1))
+        recent = self._ship("o-recent", date(2026, 5, 1))
+        result = filter_shipments_to_window(
+            [old, recent], since_date=date(2026, 4, 1), date_window_days=3,
+        )
+        assert [s.order_id for s in result] == ["o-recent"]
+
+    def test_keeps_shipments_within_date_window_buffer(self):
+        from amazon_matcher import filter_shipments_to_window
+        # since_date - 3 days = 2026-03-29; ship_date 2026-03-29 must be kept
+        edge = self._ship("o-edge", date(2026, 3, 29))
+        before_edge = self._ship("o-before", date(2026, 3, 28))
+        result = filter_shipments_to_window(
+            [edge, before_edge], since_date=date(2026, 4, 1), date_window_days=3,
+        )
+        assert [s.order_id for s in result] == ["o-edge"]
+
+    def test_drops_shipments_with_no_ship_date(self):
+        from amazon_matcher import filter_shipments_to_window
+        nodate = self._ship("o-nodate", None)
+        recent = self._ship("o-recent", date(2026, 5, 1))
+        result = filter_shipments_to_window(
+            [nodate, recent], since_date=date(2026, 4, 1), date_window_days=3,
+        )
+        assert [s.order_id for s in result] == ["o-recent"]
 
 
 class TestFilterAmazonTransactions:
@@ -1911,8 +1978,16 @@ class TestIntegrationMatching:
         # Verify excluded shipments exist (from other orders with split tender, Not Available, zero price)
         assert len(result.excluded_shipments) >= 4, f"Expected ≥4 excluded shipments, got {len(result.excluded_shipments)}"
 
-        # Verify parse errors exist (EUR currency, embedded newline, etc.)
-        assert len(result.parse_errors) >= 3, f"Expected ≥3 parse errors, got {len(result.parse_errors)}"
+        # Verify legitimate parse errors exist (EUR currency).
+        # Old fixture had additional 'charge math mismatch' parse errors caused by
+        # treating per-item Total Amount as per-shipment, which is now fixed.
+        parse_reasons = [e.reason for e in result.parse_errors]
+        assert any("non-USD currency: EUR" in r for r in parse_reasons), (
+            f"Expected EUR parse error, got: {parse_reasons}"
+        )
+        assert not any("charge math mismatch" in r for r in parse_reasons), (
+            f"Fixture should not produce charge math errors after parser fix: {parse_reasons}"
+        )
 
 
 # ============================================================================

@@ -183,8 +183,14 @@ class AmazonShipment:
 
     @property
     def expected_charge(self) -> Decimal:
-        """Calculate expected total charge."""
-        return self.item_subtotal + self.tax + self.shipping - self.discounts
+        """Calculate expected total charge.
+
+        Real Amazon CSVs put discounts as a NEGATIVE number in 'Total Discounts'
+        (e.g. -1.22 means a $1.22 discount). The formula adds discounts so the
+        sign already reduces the total; positive discount values would increase
+        it, which is the convention some hand-rolled fixtures use.
+        """
+        return self.item_subtotal + self.tax + self.shipping + self.discounts
 
     @property
     def is_matchable(self) -> bool:
@@ -358,12 +364,20 @@ def parse_order_history(csv_text: str) -> tuple[list[AmazonShipment], list[Parse
             raw_row_index=row_index,
         )
 
-        # Group by shipment key (must use Total Amount as string to avoid Decimal precision issues)
+        # Group by shipment key. Total Amount is per-ITEM in real Amazon CSVs
+        # so it must NOT be in the key — otherwise a multi-item shipment with
+        # distinct per-item totals fragments into N one-item "shipments".
+        # Shipping Charge and Total Discounts are per-row (allocated across items),
+        # so they must be summed across rows. item_subtotal / tax are per-shipment
+        # (repeated identically on each row) — take from the first row.
+        # Carrier tracking number is required to disambiguate two separate
+        # shipments that share order_id + ship_date + status (e.g. an order
+        # split into two parcels delivered the same day).
         group_key = (
             row["Order ID"],
             str(ship_date) if ship_date else "N/A",
             row["Shipment Status"],
-            row["Total Amount"],
+            row.get("Carrier Name & Tracking Number", ""),
         )
 
         if group_key not in rows_by_group:
@@ -371,9 +385,9 @@ def parse_order_history(csv_text: str) -> tuple[list[AmazonShipment], list[Parse
                 "rows": [],
                 "item_subtotal": item_subtotal,
                 "tax": tax,
-                "shipping": shipping,
-                "discounts": discounts,
-                "total_amount": total_amount,
+                "shipping": Decimal("0"),
+                "discounts": Decimal("0"),
+                "total_amount": Decimal("0"),
                 "payment_method_raw": payment_method_raw,
                 "payment_method_last4": payment_method_last4,
                 "is_split_tender": is_split_tender,
@@ -382,11 +396,14 @@ def parse_order_history(csv_text: str) -> tuple[list[AmazonShipment], list[Parse
             }
 
         rows_by_group[group_key]["rows"].append(item)
+        rows_by_group[group_key]["total_amount"] += total_amount
+        rows_by_group[group_key]["shipping"] += shipping
+        rows_by_group[group_key]["discounts"] += discounts
         row_index += 1
 
     # Build shipments from groups
     for group_key, group_data in rows_by_group.items():
-        order_id, ship_date_str, shipment_status, total_amount_str = group_key
+        order_id, ship_date_str, shipment_status, _carrier = group_key
         ship_date = None if ship_date_str == "N/A" else date.fromisoformat(ship_date_str)
 
         # Get the first row for row_index in the group (for error reporting)
@@ -446,6 +463,27 @@ class MatchResult:
     unmatched_shipments: list[AmazonShipment]
     excluded_shipments: list[tuple[AmazonShipment, str]]  # (shipment, reason)
     parse_errors: list[ParseError]
+
+
+def filter_shipments_to_window(
+    shipments: list[AmazonShipment],
+    since_date: date,
+    date_window_days: int,
+) -> list[AmazonShipment]:
+    """Restrict shipments to those plausibly matchable to YNAB transactions in the window.
+
+    A shipment is in-window if its ship_date is on or after `since_date - date_window_days`.
+    Shipments without a ship_date are dropped. Shipments after today are kept (could be
+    drop-shipped before the YNAB charge clears).
+
+    This prevents the changeset from reporting historical excluded/unmatched shipments
+    that are outside the user's working window (issue #154).
+    """
+    cutoff = since_date - timedelta(days=date_window_days)
+    return [
+        s for s in shipments
+        if s.ship_date is not None and s.ship_date >= cutoff
+    ]
 
 
 def is_whole_foods_payee(payee: str | None) -> bool:
