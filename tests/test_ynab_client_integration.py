@@ -99,3 +99,55 @@ def test_sandbox_client_construction_makes_no_api_calls():
     assert client._sandbox_budget_id is None
     assert client._sandbox_account_id is None
     assert client._sandbox_initialized is False
+
+
+def test_update_transaction_sandbox_real_patch(sandbox_client, live_client, live_budget_id):
+    """Create a real test transaction in Sandbox via create_transactions,
+    then PATCH it via update_transaction, and verify the change.
+    """
+    from ynab_client import dollars_to_milliunits
+
+    categories = live_client.get_categories(live_budget_id)
+    cat_id = None
+    for group in categories:
+        for cat in group.get("categories", []):
+            if not cat.get("hidden"):
+                cat_id = cat["id"]
+                break
+        if cat_id:
+            break
+    assert cat_id, "No visible category found in budget"
+
+    txn = {
+        "date": "2026-05-10",
+        "amount": dollars_to_milliunits(-15.50),
+        "payee_name": "Test PATCH Target",
+        "memo": "PYTEST-CONFIRM-update_transaction",
+        "cleared": "uncleared",
+        "approved": False,
+        "account_id": "will-be-overridden",
+    }
+    created_result = sandbox_client.create_transactions(live_budget_id, [txn])
+    created_txns = created_result.get("transactions", [])
+    assert len(created_txns) == 1
+    created_txn = created_txns[0]
+    txn_id = created_txn["id"]
+
+    sandbox_budget_id = sandbox_client._sandbox_budget_id
+    assert sandbox_budget_id, "Sandbox budget ID not initialized"
+
+    patched = sandbox_client.update_transaction(
+        sandbox_budget_id,
+        txn_id,
+        {"category_id": cat_id}
+    )
+    assert patched["id"] == txn_id
+    assert patched["category_id"] == cat_id
+
+    txns, _ = sandbox_client.get_account_transactions(
+        sandbox_budget_id,
+        sandbox_client._sandbox_account_id
+    )
+    found = next((t for t in txns if t["id"] == txn_id), None)
+    assert found is not None
+    assert found["category_id"] == cat_id

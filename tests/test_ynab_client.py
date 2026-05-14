@@ -734,3 +734,67 @@ def test_validation_error_is_subclass_of_api_error():
 def test_conflict_error_is_subclass_of_api_error():
     from ynab_client import YNABConflictError
     assert issubclass(YNABConflictError, YNABAPIError)
+
+
+# Issue #2: update_transaction() method
+
+
+def test_update_transaction_wraps_body_under_transaction_key(client):
+    fixture = {"data": {"transaction": {"id": "t1", "amount": -5000}}}
+    patch_dict = {"category_id": "cat-123"}
+    with patch.object(client, "_patch", return_value=fixture["data"]) as mock_patch:
+        client.update_transaction("b1", "t1", patch_dict)
+    call_args = mock_patch.call_args
+    assert call_args[0][1] == {"transaction": patch_dict}
+
+
+def test_update_transaction_uses_correct_url(client):
+    fixture = {"data": {"transaction": {"id": "t1"}}}
+    with patch.object(client, "_patch", return_value=fixture["data"]) as mock_patch:
+        client.update_transaction("b1", "t1", {})
+    call_args = mock_patch.call_args
+    assert call_args[0][0] == "/budgets/b1/transactions/t1"
+
+
+def test_update_transaction_returns_unwrapped_transaction(client):
+    txn_data = {"id": "t1", "amount": -10000, "category_id": "cat-456"}
+    with patch.object(client, "_patch", return_value={"transaction": txn_data}):
+        result = client.update_transaction("b1", "t1", {})
+    assert result == txn_data
+
+
+def test_update_transaction_sandbox_mode_raises_notimplemented():
+    client = YNABClient(token="tok")
+    client.sandbox_mode = True
+    with pytest.raises(NotImplementedError) as exc:
+        client.update_transaction("b1", "t1", {})
+    assert "create_transactions" in str(exc.value)
+    assert "seed" in str(exc.value)
+
+
+def test_update_transaction_propagates_404(client):
+    with patch.object(client, "_patch", side_effect=YNABNotFoundError(404, detail="Not found")):
+        with pytest.raises(YNABNotFoundError):
+            client.update_transaction("b1", "bad-id", {})
+
+
+def test_update_transaction_propagates_409(client):
+    with patch.object(client, "_patch", side_effect=YNABConflictError(409, detail="Conflict")):
+        with pytest.raises(YNABConflictError):
+            client.update_transaction("b1", "t1", {})
+
+
+def test_update_transaction_propagates_400_with_detail(client):
+    with patch.object(client, "_patch", side_effect=YNABValidationError(400, detail="sum mismatch")):
+        with pytest.raises(YNABValidationError) as exc:
+            client.update_transaction("b1", "t1", {})
+    assert "sum mismatch" in str(exc.value)
+
+
+def test_update_transaction_with_subtransactions_preserves_amounts(client):
+    patch_dict = {"subtransactions": [{"amount": -37090, "category_id": "abc"}]}
+    with patch.object(client, "_patch", return_value={"transaction": {}}) as mock_patch:
+        client.update_transaction("b1", "t1", patch_dict)
+    call_args = mock_patch.call_args
+    passed_patch = call_args[0][1]
+    assert passed_patch["transaction"]["subtransactions"][0]["amount"] == -37090

@@ -319,6 +319,37 @@ class YNABClient:
 
         return self._post(f"/budgets/{write_budget_id}/transactions", {"transactions": transactions})
 
+    def update_transaction(self, budget_id: str, txn_id: str, patch_dict: dict) -> dict:
+        """PATCH a single transaction. Sandbox mode is NOT supported.
+
+        Args:
+            budget_id: Real budget ID. Must match the budget txn_id belongs to.
+            txn_id: YNAB transaction UUID.
+            patch_dict: Partial fields to update. Amounts inside subtransactions
+                        MUST already be in milliunits. This method wraps the dict
+                        under {"transaction": ...} per the YNAB API schema.
+
+        Returns:
+            Updated transaction dict from YNAB response (unwrapped from "transaction" key).
+
+        Raises:
+            NotImplementedError: If self.sandbox_mode is True. PATCH cannot be sanely
+                redirected to sandbox. Use create_transactions() to seed sandbox test
+                transactions, then PATCH those by their real IDs.
+            YNABNotFoundError, YNABConflictError, YNABValidationError,
+            YNABRateLimitError, YNABAPIError: as documented on _patch().
+        """
+        if self.sandbox_mode:
+            raise NotImplementedError(
+                "update_transaction() does not support YNAB_SANDBOX_MODE redirect. "
+                "Use create_transactions() to seed sandbox test transactions, then PATCH those by their real IDs."
+            )
+
+        path = f"/budgets/{budget_id}/transactions/{txn_id}"
+        payload = {"transaction": patch_dict}
+        response_data = self._patch(path, payload)
+        return response_data.get("transaction", response_data)
+
     def get_budgets(self) -> list:
         """Get all budgets."""
         data = self._get("/budgets")
