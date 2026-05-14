@@ -186,7 +186,7 @@ def test_integration_split_patch_creates_subtransactions(
     assert found is not None
     assert len(found.get("subtransactions", [])) == 2
     sub_amounts = sorted(s["amount"] for s in found["subtransactions"])
-    assert sub_amounts == [-10000, -5500] or sub_amounts == [-5500, -10000][::-1] or sub_amounts == sorted([-10000, -5500])
+    assert sub_amounts == [-10000, -5500]
     assert sum(s["amount"] for s in found["subtransactions"]) == -15500
 
 
@@ -206,20 +206,3 @@ def test_integration_resume_skips_already_applied(
     second = apply_changeset(changeset_path, patch_client, sandbox_budget_id, throttle_seconds=0.0, report_dir=tmp_path)
     assert len(second.applied) == 0
     assert any("already applied" in s["reason"] for s in second.skipped)
-
-
-def test_integration_400_on_split_sum_mismatch(
-    sandbox_client, patch_client, sandbox_budget_id, live_budget_id, tmp_path
-):
-    """A changeset whose subtransaction amounts don't sum to parent amount
-    will be rejected. proposal_to_patch_body() catches the mismatch client-side
-    and raises ValueError; apply_changeset propagates it (this is a bug-in-data
-    case that should fail loudly, not be caught as YNAB validation)."""
-    cat_ids = _pick_two_categories(patch_client, sandbox_budget_id)
-
-    txn = _seed_txn(sandbox_client, live_budget_id, dollars_to_milliunits(-15.50), "summismatch")
-    proposal = _split_proposal(txn, cat_ids[0], cat_ids[1], amount_a="10.00", amount_b="3.00")
-    changeset_path = _build_changeset(tmp_path, [proposal])
-
-    with pytest.raises(ValueError, match="invariant"):
-        apply_changeset(changeset_path, patch_client, sandbox_budget_id, throttle_seconds=0.0, report_dir=tmp_path)

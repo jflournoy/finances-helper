@@ -420,13 +420,27 @@ def main(argv: list[str] | None = None) -> int:
         print("ERROR: YNAB_DEFAULT_BUDGET not set", file=sys.stderr)
         return 3
 
+    from ynab_client import YNABAPIError, YNABRateLimitError, YNABNotFoundError
+
     try:
         client = YNABClient()
         budget_id = client.resolve_budget_id(budget_name_or_id)
         budget = client.get_budget(budget_id)
         budget_name = budget.get("name", budget_name_or_id)
+    except YNABRateLimitError as e:
+        print(f"ERROR: YNAB rate limit hit while resolving budget ({e.detail or '429'}); try again next hour.", file=sys.stderr)
+        return 2
+    except YNABAPIError as e:
+        if e.status_code == 401:
+            print("ERROR: YNAB_API_TOKEN is invalid (401 Unauthorized). Check the token in your .env.", file=sys.stderr)
+        else:
+            print(f"ERROR: YNAB API error while resolving budget: {e.status_code} {e.name} — {e.detail}", file=sys.stderr)
+        return 3
+    except ValueError as e:
+        print(f"ERROR: {e}", file=sys.stderr)
+        return 3
     except Exception as e:
-        print(f"ERROR: failed to resolve budget: {e}", file=sys.stderr)
+        print(f"ERROR: unexpected error contacting YNAB: {type(e).__name__}: {e}", file=sys.stderr)
         return 3
 
     try:
@@ -448,7 +462,12 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     if not args.yes:
-        prompt = f"\nApply {summary.total_proposals - summary.applied_previously} proposals to budget '{budget_name}'? [y/N]: "
+        applyable = (
+            summary.total_proposals
+            - summary.applied_previously
+            - summary.skipped_uncategorized
+        )
+        prompt = f"\nApply {applyable} proposals to budget '{budget_name}'? [y/N]: "
         try:
             answer = input(prompt).strip().lower()
         except EOFError:

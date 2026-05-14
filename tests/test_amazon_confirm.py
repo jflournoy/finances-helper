@@ -490,6 +490,95 @@ def test_cli_exit_code_reflects_aborted(cli_changeset_path, monkeypatch, tmp_pat
     assert code == 2
 
 
+def test_cli_401_token_clear_message(cli_changeset_path, monkeypatch, tmp_path, capsys):
+    from ynab_client import YNABAPIError
+    import amazon_confirm
+
+    monkeypatch.setenv("YNAB_API_TOKEN", "tok")
+    monkeypatch.setenv("YNAB_DEFAULT_BUDGET", "My Budget")
+    monkeypatch.delenv("YNAB_SANDBOX_MODE", raising=False)
+
+    fake_client = MagicMock()
+    fake_client.sandbox_mode = False
+    fake_client.resolve_budget_id.side_effect = YNABAPIError(401, name="unauthorized", detail="Unauthorized")
+    monkeypatch.setattr(amazon_confirm, "YNABClient", lambda *a, **kw: fake_client)
+
+    code = _run_main([str(cli_changeset_path), "--yes"], monkeypatch, tmp_path)
+    err = capsys.readouterr().err.lower()
+    assert code == 3
+    assert "token" in err or "401" in err or "unauthorized" in err
+
+
+def test_cli_429_clear_message(cli_changeset_path, monkeypatch, tmp_path, capsys):
+    from ynab_client import YNABRateLimitError
+    import amazon_confirm
+
+    monkeypatch.setenv("YNAB_API_TOKEN", "tok")
+    monkeypatch.setenv("YNAB_DEFAULT_BUDGET", "My Budget")
+    monkeypatch.delenv("YNAB_SANDBOX_MODE", raising=False)
+
+    fake_client = MagicMock()
+    fake_client.sandbox_mode = False
+    fake_client.resolve_budget_id.side_effect = YNABRateLimitError(429, detail="rate limited")
+    monkeypatch.setattr(amazon_confirm, "YNABClient", lambda *a, **kw: fake_client)
+
+    code = _run_main([str(cli_changeset_path), "--yes"], monkeypatch, tmp_path)
+    err = capsys.readouterr().err.lower()
+    assert code == 2
+    assert "rate" in err
+
+
+def test_cli_prompt_excludes_uncategorized_from_count(cli_changeset_path, fake_client_factory, monkeypatch, tmp_path, capsys):
+    """The prompt's 'Apply N proposals' count should match the number of
+    PATCH calls — i.e. subtract both already-applied and uncategorized skips."""
+    import amazon_confirm
+
+    monkeypatch.setenv("YNAB_API_TOKEN", "tok")
+    monkeypatch.setenv("YNAB_DEFAULT_BUDGET", "My Budget")
+    monkeypatch.delenv("YNAB_SANDBOX_MODE", raising=False)
+
+    fake_summary = ChangesetSummary(
+        total_proposals=10,
+        split_proposals=6,
+        flat_proposals=4,
+        skipped_uncategorized=3,
+        applied_previously=2,
+        total_outflow_dollars=Decimal("100.00"),
+        by_category={},
+    )
+    monkeypatch.setattr(amazon_confirm, "summarize_changeset", lambda *_: fake_summary)
+
+    prompts = []
+    def fake_input(prompt):
+        prompts.append(prompt)
+        return "n"
+    monkeypatch.setattr("builtins.input", fake_input)
+
+    code = _run_main([str(cli_changeset_path)], monkeypatch, tmp_path, stdin_text="n\n")
+    assert code == 0
+    assert len(prompts) == 1
+    assert "Apply 5 proposals" in prompts[0]
+
+
+def test_cli_unknown_budget_clear_message(cli_changeset_path, monkeypatch, tmp_path, capsys):
+    import amazon_confirm
+
+    monkeypatch.setenv("YNAB_API_TOKEN", "tok")
+    monkeypatch.setenv("YNAB_DEFAULT_BUDGET", "Nonexistent")
+    monkeypatch.delenv("YNAB_SANDBOX_MODE", raising=False)
+
+    fake_client = MagicMock()
+    fake_client.sandbox_mode = False
+    fake_client.resolve_budget_id.side_effect = ValueError("YNAB_DEFAULT_BUDGET='Nonexistent' not found. Available: ['My Budget']")
+    monkeypatch.setattr(amazon_confirm, "YNABClient", lambda *a, **kw: fake_client)
+
+    code = _run_main([str(cli_changeset_path), "--yes"], monkeypatch, tmp_path)
+    err = capsys.readouterr().err
+    assert code == 3
+    assert "Nonexistent" in err
+    assert "Available" in err
+
+
 # Issue #6: apply_changeset() orchestration
 
 
@@ -727,3 +816,42 @@ def test_apply_uses_report_dir_not_real_cache(apply_changeset_path, mock_client,
     real_cache_after = set((repo_root / "data" / "cache").glob("amazon-confirmed-*.json")) if (repo_root / "data" / "cache").exists() else set()
     assert real_cache_after == real_cache_before, "apply_changeset must not write to real data/cache when report_dir is provided"
     assert list(tmp_path.glob("amazon-confirmed-*.json"))
+
+
+def test_apply_propagates_client_side_sum_invariant_error(tmp_path, mock_client):
+    """A changeset whose subtxn amounts don't sum to parent amount is caught
+    client-side by proposal_to_patch_body and surfaces as ValueError. This is
+    a bug-in-data condition that should fail loudly, not be swallowed as a
+    YNAB-validation skip. (Was previously a misnamed integration test.)"""
+    from amazon_confirm import apply_changeset
+    parent_amount = -15500  # -$15.50 in milliunits
+    cs = {
+        "version": 1,
+        "generated_at": "2026-05-14T00:00:00",
+        "summary": {},
+        "proposed_splits": [
+            {
+                "parent_ynab_transaction_id": "txn-1",
+                "parent_ynab_transaction": {"id": "txn-1", "amount": parent_amount, "memo": "x"},
+                "subtransactions": [
+                    {
+                        "item": {"asin": "A", "product_name": "Item A"},
+                        "allocated_amount": "10.00",
+                        "category_id": "cat-a",
+                        "category_name": "A",
+                    },
+                    {
+                        "item": {"asin": "B", "product_name": "Item B"},
+                        "allocated_amount": "3.00",  # sum is $13.00 not $15.50
+                        "category_id": "cat-b",
+                        "category_name": "B",
+                    },
+                ],
+            }
+        ],
+    }
+    path = tmp_path / "bad.json"
+    path.write_text(json.dumps(cs))
+    with pytest.raises(ValueError, match="invariant"):
+        apply_changeset(path, mock_client, "budget-1", report_dir=tmp_path)
+    mock_client.update_transaction.assert_not_called()
