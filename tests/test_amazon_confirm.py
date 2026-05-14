@@ -560,6 +560,26 @@ def test_cli_prompt_excludes_uncategorized_from_count(cli_changeset_path, fake_c
     assert "Apply 5 proposals" in prompts[0]
 
 
+def test_cli_404_budget_clear_message(cli_changeset_path, monkeypatch, tmp_path, capsys):
+    from ynab_client import YNABNotFoundError
+    import amazon_confirm
+
+    monkeypatch.setenv("YNAB_API_TOKEN", "tok")
+    monkeypatch.setenv("YNAB_DEFAULT_BUDGET", "Phantom")
+    monkeypatch.delenv("YNAB_SANDBOX_MODE", raising=False)
+
+    fake_client = MagicMock()
+    fake_client.sandbox_mode = False
+    fake_client.resolve_budget_id.side_effect = YNABNotFoundError(404, name="not_found", detail="No budget with that id")
+    monkeypatch.setattr(amazon_confirm, "YNABClient", lambda *a, **kw: fake_client)
+
+    code = _run_main([str(cli_changeset_path), "--yes"], monkeypatch, tmp_path)
+    err = capsys.readouterr().err
+    assert code == 3
+    assert "404" in err
+    assert "Phantom" in err
+
+
 def test_cli_unknown_budget_clear_message(cli_changeset_path, monkeypatch, tmp_path, capsys):
     import amazon_confirm
 

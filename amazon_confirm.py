@@ -420,7 +420,7 @@ def main(argv: list[str] | None = None) -> int:
         print("ERROR: YNAB_DEFAULT_BUDGET not set", file=sys.stderr)
         return 3
 
-    from ynab_client import YNABAPIError, YNABRateLimitError, YNABNotFoundError
+    from ynab_client import YNABAPIError, YNABRateLimitError
 
     try:
         client = YNABClient()
@@ -433,6 +433,8 @@ def main(argv: list[str] | None = None) -> int:
     except YNABAPIError as e:
         if e.status_code == 401:
             print("ERROR: YNAB_API_TOKEN is invalid (401 Unauthorized). Check the token in your .env.", file=sys.stderr)
+        elif e.status_code == 404:
+            print(f"ERROR: budget {budget_name_or_id!r} not found at YNAB (404). Check YNAB_DEFAULT_BUDGET.", file=sys.stderr)
         else:
             print(f"ERROR: YNAB API error while resolving budget: {e.status_code} {e.name} — {e.detail}", file=sys.stderr)
         return 3
@@ -490,9 +492,6 @@ def main(argv: list[str] | None = None) -> int:
 
 
 if __name__ == "__main__":
-    try:
-        from dotenv import load_dotenv
-        load_dotenv()
-    except ImportError:
-        pass
+    from dotenv import load_dotenv
+    load_dotenv()
     sys.exit(main())

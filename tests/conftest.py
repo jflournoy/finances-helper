@@ -6,8 +6,14 @@ from ynab_client import YNABClient
 
 @pytest.fixture(scope="session")
 def live_client():
+    """YNABClient with sandbox_mode forced OFF — for read-only tests against the
+    user's real budget. Even when .env has YNAB_SANDBOX_MODE=1 (for write
+    safety), reads don't need redirection and the 'live' name should not be
+    misleading."""
     load_dotenv()
-    return YNABClient()
+    client = YNABClient()
+    client.sandbox_mode = False
+    return client
 
 
 @pytest.fixture(scope="session")
