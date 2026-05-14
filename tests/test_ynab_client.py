@@ -28,6 +28,7 @@ def mock_get(client, fixture_data):
     mock_resp = Mock()
     mock_resp.status_code = 200
     mock_resp.json.return_value = fixture_data
+    mock_resp.headers = {}
     return patch.object(client.session, "get", return_value=mock_resp)
 
 
@@ -110,6 +111,7 @@ def make_response(status_code, body):
     mock_resp.status_code = status_code
     mock_resp.json.return_value = body
     mock_resp.text = json.dumps(body)
+    mock_resp.headers = {}
     return mock_resp
 
 
@@ -153,6 +155,7 @@ def test_get_malformed_json_raises_api_error(client):
     mock_resp.status_code = 200
     mock_resp.json.side_effect = ValueError("No JSON")
     mock_resp.text = "not json"
+    mock_resp.headers = {}
     with patch.object(client.session, "get", return_value=mock_resp):
         with pytest.raises(YNABAPIError, match="Malformed"):
             client._get("/budgets")
@@ -367,6 +370,7 @@ def test_get_transactions_returns_server_knowledge(client):
 def test_get_transactions_since_date_passed_as_param(client):
     fixture = load_fixture("ynab_transactions.json")
     mock_resp = Mock(status_code=200)
+    mock_resp.headers = {}
     mock_resp.json.return_value = fixture
     with patch.object(client.session, "get", return_value=mock_resp) as mock_session_get:
         client.get_transactions(BUDGET_ID, since_date="2026-03-01")
@@ -378,6 +382,7 @@ def test_get_transactions_since_date_passed_as_param(client):
 def test_get_transactions_type_param_passed(client):
     fixture = load_fixture("ynab_transactions.json")
     mock_resp = Mock(status_code=200)
+    mock_resp.headers = {}
     mock_resp.json.return_value = fixture
     with patch.object(client.session, "get", return_value=mock_resp) as mock_session_get:
         client.get_transactions(BUDGET_ID, type="uncategorized")
@@ -389,6 +394,7 @@ def test_get_transactions_type_param_passed(client):
 def test_get_transactions_none_params_omitted(client):
     fixture = load_fixture("ynab_transactions.json")
     mock_resp = Mock(status_code=200)
+    mock_resp.headers = {}
     mock_resp.json.return_value = fixture
     with patch.object(client.session, "get", return_value=mock_resp) as mock_session_get:
         client.get_transactions(BUDGET_ID)
@@ -421,6 +427,7 @@ def test_get_transactions_empty_returns_tuple(client):
 def test_get_account_transactions_uses_account_path(client):
     fixture = load_fixture("ynab_transactions.json")
     mock_resp = Mock(status_code=200)
+    mock_resp.headers = {}
     mock_resp.json.return_value = fixture
     with patch.object(client.session, "get", return_value=mock_resp) as mock_session_get:
         client.get_account_transactions(BUDGET_ID, ACCOUNT_ID)
@@ -431,6 +438,7 @@ def test_get_account_transactions_uses_account_path(client):
 def test_get_transactions_delta_sync_param(client):
     fixture = load_fixture("ynab_transactions.json")
     mock_resp = Mock(status_code=200)
+    mock_resp.headers = {}
     mock_resp.json.return_value = fixture
     with patch.object(client.session, "get", return_value=mock_resp) as mock_session_get:
         client.get_transactions(BUDGET_ID, last_knowledge_of_server=300)
@@ -714,6 +722,7 @@ def test_patch_malformed_json_raises_api_error(client):
     mock_resp.status_code = 200
     mock_resp.json.side_effect = ValueError("No JSON")
     mock_resp.text = "not json"
+    mock_resp.headers = {}
     with patch.object(client.session, "patch", return_value=mock_resp):
         with pytest.raises(YNABAPIError, match="Malformed"):
             client._patch("/budgets/b1/transactions/t1", {})
@@ -798,3 +807,95 @@ def test_update_transaction_with_subtransactions_preserves_amounts(client):
     call_args = mock_patch.call_args
     passed_patch = call_args[0][1]
     assert passed_patch["transaction"]["subtransactions"][0]["amount"] == -37090
+
+
+# Issue #3: Rate-limit header parsing
+
+
+def test_rate_limit_attributes_initialized_to_none():
+    client = YNABClient(token="tok")
+    assert client.rate_limit_used is None
+    assert client.rate_limit_max is None
+
+
+def test_rate_limit_header_parsed_from_get(client):
+    fixture = {"data": {"budgets": []}}
+    mock_resp = Mock()
+    mock_resp.status_code = 200
+    mock_resp.json.return_value = fixture
+    mock_resp.headers = {"X-Rate-Limit": "42/200"}
+    with patch.object(client.session, "get", return_value=mock_resp):
+        client._get("/budgets")
+    assert client.rate_limit_used == 42
+    assert client.rate_limit_max == 200
+
+
+def test_rate_limit_header_parsed_from_post(client):
+    fixture = {"data": {"transactions": []}}
+    mock_resp = Mock()
+    mock_resp.status_code = 200
+    mock_resp.json.return_value = fixture
+    mock_resp.headers = {"X-Rate-Limit": "150/200"}
+    with patch.object(client.session, "post", return_value=mock_resp):
+        client._post("/budgets/b1/transactions", {"transactions": []})
+    assert client.rate_limit_used == 150
+    assert client.rate_limit_max == 200
+
+
+def test_rate_limit_header_parsed_from_patch(client):
+    fixture = {"data": {"transaction": {"id": "t1"}}}
+    mock_resp = Mock()
+    mock_resp.status_code = 200
+    mock_resp.json.return_value = fixture
+    mock_resp.headers = {"X-Rate-Limit": "99/200"}
+    with patch.object(client.session, "patch", return_value=mock_resp):
+        client._patch("/budgets/b1/transactions/t1", {})
+    assert client.rate_limit_used == 99
+    assert client.rate_limit_max == 200
+
+
+def test_rate_limit_header_missing_leaves_values_unchanged(client):
+    client.rate_limit_used = 10
+    client.rate_limit_max = 200
+    fixture = {"data": {"budgets": []}}
+    mock_resp = Mock()
+    mock_resp.status_code = 200
+    mock_resp.json.return_value = fixture
+    mock_resp.headers = {}
+    with patch.object(client.session, "get", return_value=mock_resp):
+        client._get("/budgets")
+    assert client.rate_limit_used == 10
+    assert client.rate_limit_max == 200
+
+
+def test_rate_limit_header_malformed_leaves_values_unchanged(client):
+    client.rate_limit_used = 10
+    client.rate_limit_max = 200
+    fixture = {"data": {"budgets": []}}
+    mock_resp = Mock()
+    mock_resp.status_code = 200
+    mock_resp.json.return_value = fixture
+    mock_resp.headers = {"X-Rate-Limit": "garbage"}
+    with patch.object(client.session, "get", return_value=mock_resp):
+        client._get("/budgets")
+    assert client.rate_limit_used == 10
+    assert client.rate_limit_max == 200
+
+
+def test_rate_limit_remaining_returns_none_when_unknown():
+    client = YNABClient(token="tok")
+    assert client.rate_limit_remaining() is None
+
+
+def test_rate_limit_remaining_arithmetic():
+    client = YNABClient(token="tok")
+    client.rate_limit_used = 190
+    client.rate_limit_max = 200
+    assert client.rate_limit_remaining() == 10
+
+
+def test_rate_limit_remaining_at_zero():
+    client = YNABClient(token="tok")
+    client.rate_limit_used = 200
+    client.rate_limit_max = 200
+    assert client.rate_limit_remaining() == 0

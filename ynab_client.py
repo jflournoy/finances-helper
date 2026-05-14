@@ -121,6 +121,9 @@ class YNABClient:
         self._sandbox_account_id: str | None = None
         self._sandbox_initialized = False
 
+        self.rate_limit_used: int | None = None
+        self.rate_limit_max: int | None = None
+
     def _init_sandbox(self) -> None:
         """Resolve and cache the Sandbox budget and account IDs.
 
@@ -170,6 +173,7 @@ class YNABClient:
         """
         url = f"{self.base_url}{path}"
         response = self.session.get(url, params=params)
+        self._record_rate_limit(response)
 
         # Parse response body
         try:
@@ -212,6 +216,7 @@ class YNABClient:
         """
         url = f"{self.base_url}{path}"
         response = self.session.post(url, json=payload)
+        self._record_rate_limit(response)
 
         try:
             body = response.json()
@@ -280,11 +285,25 @@ class YNABClient:
         return body["data"]
 
     def _record_rate_limit(self, response) -> None:
-        """Record rate limit information from response headers.
+        """Parse X-Rate-Limit header (format 'N/200') and update rate_limit_used/max."""
+        try:
+            header = response.headers.get("X-Rate-Limit")
+        except (AttributeError, TypeError):
+            return
+        if not header or "/" not in header:
+            return
+        try:
+            used_str, max_str = header.split("/", 1)
+            self.rate_limit_used = int(used_str)
+            self.rate_limit_max = int(max_str)
+        except ValueError:
+            return
 
-        Stub for Phase 3 (rate-limit header parsing). Currently a no-op.
-        """
-        pass
+    def rate_limit_remaining(self) -> int | None:
+        """Return rate_limit_max - rate_limit_used, or None if either is unknown."""
+        if self.rate_limit_used is None or self.rate_limit_max is None:
+            return None
+        return self.rate_limit_max - self.rate_limit_used
 
     def create_transactions(self, budget_id: str, transactions: list[dict]) -> dict:
         """Create one or more transactions in a budget.
