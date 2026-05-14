@@ -548,3 +548,95 @@ class TestFilterUncategorizedWritable:
         result = filter_uncategorized_writable([txn])
         # approved missing → not True → included
         assert result == [txn]
+
+
+# Issue #155: Sandbox initialization refactor
+
+def test_init_does_not_call_api_when_sandbox_mode_set(monkeypatch):
+    """Constructor must NOT make any API calls, even with YNAB_SANDBOX_MODE=1."""
+    monkeypatch.setenv("YNAB_SANDBOX_MODE", "1")
+    monkeypatch.setenv("YNAB_API_TOKEN", "test-tok")
+    with patch.object(requests.Session, "get", side_effect=AssertionError("no API call during __init__")):
+        client = YNABClient()
+    assert client.sandbox_mode is True
+    assert client._sandbox_budget_id is None
+    assert client._sandbox_account_id is None
+
+
+def test_init_does_not_print_when_sandbox_mode_set(monkeypatch, capsys):
+    """Constructor must be silent — no SANDBOX MODE banner at construction time."""
+    monkeypatch.setenv("YNAB_SANDBOX_MODE", "1")
+    monkeypatch.setenv("YNAB_API_TOKEN", "test-tok")
+    YNABClient()
+    captured = capsys.readouterr()
+    assert "SANDBOX MODE" not in captured.out
+
+
+def test_sandbox_init_runs_on_first_create_transactions(monkeypatch):
+    """First call to create_transactions in sandbox mode triggers _init_sandbox()."""
+    monkeypatch.setenv("YNAB_SANDBOX_MODE", "1")
+    client = YNABClient(token="tok")
+
+    monkeypatch.setattr(client, "get_budgets", lambda: [{"id": "sb-budget-id", "name": "Sandbox"}])
+    monkeypatch.setattr(client, "get_accounts", lambda budget_id: [{"id": "sb-account-id", "name": "Sandbox"}])
+
+    post_called_with = {}
+    def fake_post(path, payload):
+        post_called_with["path"] = path
+        post_called_with["payload"] = payload
+        return {"transactions": []}
+    monkeypatch.setattr(client, "_post", fake_post)
+
+    client.create_transactions("real-budget", [{"account_id": "real-acct", "amount": -1000, "date": "2026-05-08"}])
+
+    assert client._sandbox_budget_id == "sb-budget-id"
+    assert client._sandbox_account_id == "sb-account-id"
+    assert post_called_with["path"] == "/budgets/sb-budget-id/transactions"
+    assert post_called_with["payload"]["transactions"][0]["account_id"] == "sb-account-id"
+
+
+def test_sandbox_init_runs_only_once_across_multiple_writes(monkeypatch):
+    """_init_sandbox must not run a second time on subsequent create_transactions calls."""
+    monkeypatch.setenv("YNAB_SANDBOX_MODE", "1")
+    client = YNABClient(token="tok")
+    monkeypatch.setattr(client, "get_budgets", lambda: [{"id": "sb-b", "name": "Sandbox"}])
+    monkeypatch.setattr(client, "get_accounts", lambda budget_id: [{"id": "sb-a", "name": "Sandbox"}])
+    monkeypatch.setattr(client, "_post", lambda path, payload: {"transactions": []})
+
+    init_calls = []
+    real_init = client._init_sandbox
+    def counting_init():
+        init_calls.append(1)
+        real_init()
+    monkeypatch.setattr(client, "_init_sandbox", counting_init)
+
+    txn = {"account_id": "x", "amount": -100, "date": "2026-05-08"}
+    client.create_transactions("b1", [txn])
+    client.create_transactions("b2", [txn])
+    client.create_transactions("b3", [txn])
+
+    assert len(init_calls) == 1
+
+
+def test_sandbox_init_allows_retry_after_failure(monkeypatch):
+    """If _init_sandbox raises, _sandbox_initialized stays False so the next write retries."""
+    monkeypatch.setenv("YNAB_SANDBOX_MODE", "1")
+    client = YNABClient(token="tok")
+    monkeypatch.setattr(client, "get_budgets", lambda: [])  # no Sandbox budget — init will raise
+
+    txn = {"account_id": "x", "amount": -100, "date": "2026-05-08"}
+    with pytest.raises(ValueError, match="not found"):
+        client.create_transactions("b1", [txn])
+    assert client._sandbox_initialized is False
+
+
+def test_non_sandbox_create_transactions_unaffected(monkeypatch):
+    """When YNAB_SANDBOX_MODE is not set, create_transactions hits the given budget directly."""
+    monkeypatch.delenv("YNAB_SANDBOX_MODE", raising=False)
+    client = YNABClient(token="tok")
+    post_called_with = {}
+    monkeypatch.setattr(client, "_post", lambda path, payload: post_called_with.update({"path": path, "payload": payload}) or {"transactions": []})
+    txn = {"account_id": "user-acct", "amount": -500, "date": "2026-05-08"}
+    client.create_transactions("user-budget", [txn])
+    assert post_called_with["path"] == "/budgets/user-budget/transactions"
+    assert post_called_with["payload"]["transactions"][0]["account_id"] == "user-acct"

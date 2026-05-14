@@ -1,100 +1,78 @@
-// Hierarchical inflation model with time-varying inflation via thin plate smooth
+// Hierarchical inflation model on geometric-mean-normalized log-prices.
 //
-// Model: log(price_it) ~ student_t(nu, mu_it, sigma)
-//   mu_it = log_p0_i + dot_product(B[t], beta_pop + beta_i[i])
-//   beta_pop, beta_i: thin plate regression spline coefficients, penalized via S
-//   log_p0_i ~ normal(log_p0_pop + z_p0[i] * sigma_p0, ...)  (non-centered)
+// Data preprocessing (in prep.py):
+//   y[n] = log(price[n]) - mean_i(log(price))    # log of price / item geo-mean
 //
-// Quantity of interest: inflation rate as a smooth function of time
+// Model:
+//   y[n] ~ normal(mu[n], sigma)
+//   mu[n] = B[n] . (beta_pop + beta_i[i_n])
+//
+// beta_pop: K-dim population thin-plate spline coefficients (loose prior +
+//           smoothness penalty on the wiggle modes via S).
+// beta_i:   per-item deviation in the same K-dim basis space, non-centered.
+//           Each direction has its own shrinkage scale sigma_fs[k], with the
+//           constant-mode prior loose enough to absorb residual per-item
+//           level variation (which is non-trivial even after normalization
+//           because each item's geo-mean is empirical, computed only over its
+//           own observation window).
+//
+//   beta_pop          ~ N(0, 0.5)
+//   target += -0.5 * lambda_pop * quad_form(S, beta_pop)
+//   beta_i_raw[i, k]  ~ N(0, 1)
+//   beta_i[i, k]      = beta_i_raw[i, k] * sigma_fs[k]
+//   sigma_fs[k]       ~ N(0, sigma_fs_prior_sd[k])
 
 data {
-    int<lower=1> N;           // total observations
-    int<lower=1> I;           // number of unique items (ASINs)
-    int<lower=1> K;           // basis dimension for time-varying smooth
-    array[N] int<lower=1, upper=I> ii;  // item index per observation
-    vector[N] t;              // months since base date (t=0 at base month)
-    vector<lower=0>[N] price; // observed unit prices in dollars
-    matrix[N, K] B;           // thin plate basis matrix
-    matrix[K, K] S;           // thin plate penalty matrix
-}
-
-transformed data {
-    vector[N] log_price;
-    for (n in 1:N)
-        log_price[n] = log(price[n]);
+    int<lower=1> N;                      // total observations
+    int<lower=1> I;                      // number of unique items
+    int<lower=1> K;                      // basis dimension
+    array[N] int<lower=1, upper=I> ii;   // item index per observation
+    vector[N] y;                         // normalized log-price (= log(price/geo_mean_i))
+    matrix[N, K] B;                      // population thin-plate basis
+    matrix[K, K] S;                      // K x K penalty matrix
+    vector<lower=0>[K] sigma_fs_prior_sd; // per-direction prior SD on sigma_fs
 }
 
 parameters {
-    // Time-varying inflation (spline coefficients)
-    vector[K] beta_pop;              // population spline coefficients
-    matrix[I, K] beta_i_raw;         // standardized item-level deviations (non-centered)
-
-    // Item base prices
-    real log_p0_pop;                 // population mean log base price
-    real<lower=0> sigma_p0;          // sd of item intercept deviations
-    vector[I] z_p0;                  // standardized item intercept deviations
-
-    // Hyperpriors
-    real<lower=0> sigma_fs;          // sd for factor smooth shrinkage
-    real<lower=0> lambda_pop;        // smoothing parameter for population spline
-    real<lower=0> sigma;             // observation noise on log scale
-    real<lower=1> nu;                // Student-t degrees of freedom
+    vector[K] beta_pop;                  // population spline coefficients
+    matrix[I, K] beta_i_raw;             // standardized item deviations (non-centered)
+    vector<lower=0>[K] sigma_fs;         // per-coefficient shrinkage scale
+    real<lower=0> sigma;                 // observation noise on log scale
+    real<lower=0> lambda_pop;            // population smoothing parameter
 }
 
 transformed parameters {
-    vector[I] log_p0_i = log_p0_pop + z_p0 * sigma_p0;       // item-level base prices
-    matrix[I, K] beta_i = beta_i_raw * sigma_fs;             // scaled item-level deviations
+    matrix[I, K] beta_i;
     vector[N] mu;
+    for (k in 1:K)
+        beta_i[, k] = beta_i_raw[, k] * sigma_fs[k];
     for (n in 1:N) {
-        vector[K] beta_n = beta_pop + to_vector(beta_i[ii[n]]);  // combined coefficients
-        mu[n] = log_p0_i[ii[n]] + dot_product(B[n], beta_n);
+        vector[K] beta_n = beta_pop + to_vector(beta_i[ii[n]]);
+        mu[n] = dot_product(B[n], beta_n);
     }
 }
 
 model {
-    // Hyperpriors
-    log_p0_pop  ~ normal(1.7, 2);     // population base price
-    sigma_p0    ~ normal(0, 1);       // item base price variation
-    sigma_fs    ~ normal(0, 0.3);     // factor smooth shrinkage
-    sigma       ~ normal(0, 0.2);     // observation noise
-    nu          ~ gamma(2, 0.1);      // heavy tails
-    // Tighter prior on the population smoothing parameter
-    lambda_pop  ~ gamma(2, 1);        // smoothing parameter (population), mean 2, mode 1
+    sigma       ~ normal(0.2, 0.1);
+    // gamma(1.5, 1): mean 1.5, mode 0.5 — looser than before to allow the
+    // population spline more wiggle and let it capture the 2022 spike and
+    // recent acceleration that earlier fits were smoothing away.
+    lambda_pop  ~ gamma(1.5, 1);
+    sigma_fs    ~ normal(0, sigma_fs_prior_sd);
 
-    // Non-centered item intercepts
-    z_p0 ~ normal(0, 1);
-
-    // Explicit prior on population spline coefficients
-    // Constrains the unpenalized null space (constant + linear trend in tp basis)
-    // log price changes of more than ~0.5 (50%) over the window are unlikely
-    beta_pop ~ normal(0, 0.5);
-
-    // Spline priors with thin plate penalties
-    // Population smooth: penalize for smoothness
+    beta_pop    ~ normal(0, 0.5);
     target += -0.5 * lambda_pop * quad_form(S, beta_pop);
 
-    // Item splines (non-centered): beta_i_raw ~ N(0,1), beta_i = beta_i_raw * sigma_fs
-    // The implied prior beta_i[i] ~ N(0, sigma_fs) is the only regularization on item
-    // deviations — the population spline beta_pop carries the smoothness structure.
     to_vector(beta_i_raw) ~ normal(0, 1);
 
-    // Likelihood
-    for (n in 1:N)
-        target += student_t_lpdf(log_price[n] | nu, mu[n], sigma);
+    y ~ normal(mu, sigma);
 }
 
 generated quantities {
-    // Per-item base prices
-    vector[I] inflation_rate_i;  // will be reconstructed post-hoc from spline coefficients
-
-    // Time-varying population inflation at observed t values
-    // inflation[t] = d/dt log(exp(B[t] * beta_pop)) = B'[t] * beta_pop (approx numerically)
-
-    // LOO inputs
     vector[N] log_lik;
-    vector[N] log_price_rep;
+    vector[N] y_rep;
     for (n in 1:N) {
-        log_lik[n]       = student_t_lpdf(log_price[n] | nu, mu[n], sigma);
-        log_price_rep[n] = student_t_rng(nu, mu[n], sigma);
+        log_lik[n] = normal_lpdf(y[n] | mu[n], sigma);
+        y_rep[n]   = normal_rng(mu[n], sigma);
     }
 }

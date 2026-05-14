@@ -85,3 +85,15 @@ def test_create_transactions_sandbox(sandbox_client, live_budget_id):
 def test_create_transactions_sandbox_rejects_empty(sandbox_client, live_budget_id):
     with pytest.raises(ValueError, match="must not be empty"):
         sandbox_client.create_transactions(live_budget_id, [])
+
+
+def test_sandbox_client_construction_makes_no_api_calls():
+    """Construction with YNAB_SANDBOX_MODE=1 must make zero API calls (lazy init)."""
+    from dotenv import load_dotenv
+    load_dotenv()
+    assert os.environ.get("YNAB_SANDBOX_MODE") == "1", "requires YNAB_SANDBOX_MODE=1 in .env"
+    client = YNABClient()
+    assert client.sandbox_mode is True
+    assert client._sandbox_budget_id is None
+    assert client._sandbox_account_id is None
+    assert client._sandbox_initialized is False

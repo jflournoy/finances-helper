@@ -107,9 +107,7 @@ class YNABClient:
         self.sandbox_mode = os.environ.get("YNAB_SANDBOX_MODE", "").strip() == "1"
         self._sandbox_budget_id: str | None = None
         self._sandbox_account_id: str | None = None
-
-        if self.sandbox_mode:
-            self._init_sandbox()
+        self._sandbox_initialized = False
 
     def _init_sandbox(self) -> None:
         """Resolve and cache the Sandbox budget and account IDs.
@@ -132,16 +130,16 @@ class YNABClient:
             f"account={SANDBOX_ACCOUNT_NAME!r} ({self._sandbox_account_id})"
         )
 
-    def _sandbox_redirect(self, budget_id: str, account_id: str | None) -> tuple[str, str]:
-        """Return (budget_id, account_id) redirected to sandbox targets.
+    def _ensure_sandbox_initialized(self) -> None:
+        """Run sandbox init exactly once. Idempotent and safe to call before any write.
 
-        Always prints a warning so sandbox writes are never silent.
+        Raises:
+            ValueError: If the Sandbox budget or account cannot be found in YNAB.
         """
-        print(
-            f"[SANDBOX MODE] Redirecting write: budget {budget_id} → {self._sandbox_budget_id}, "
-            f"account {account_id} → {self._sandbox_account_id}"
-        )
-        return self._sandbox_budget_id, self._sandbox_account_id
+        if self._sandbox_initialized:
+            return
+        self._init_sandbox()
+        self._sandbox_initialized = True
 
     def _get(self, path: str, params: dict | None = None) -> dict:
         """Make a GET request to the YNAB API.
@@ -191,6 +189,10 @@ class YNABClient:
     def _post(self, path: str, payload: dict) -> dict:
         """Make a POST request to the YNAB API.
 
+        Callers that write in sandbox mode must call _ensure_sandbox_initialized() before
+        calling _post(), so that budget/account IDs are redirected. Currently only
+        create_transactions() does this. Add the call to any future write methods too.
+
         Raises:
             YNABNotFoundError: On 404
             YNABRateLimitError: On 429
@@ -228,7 +230,8 @@ class YNABClient:
 
         Each transaction dict must include at minimum: account_id, date, amount.
         In sandbox mode, budget_id and every account_id are redirected to the
-        Sandbox budget/account and a warning is printed for each call.
+        Sandbox budget/account and a warning is printed for each call. Sandbox budget/account
+        IDs are lazily resolved on first write.
 
         Args:
             budget_id: Target budget ID (ignored in sandbox mode).
@@ -242,9 +245,14 @@ class YNABClient:
 
         write_budget_id = budget_id
         if self.sandbox_mode:
-            write_budget_id, sandbox_account_id = self._sandbox_redirect(budget_id, None)
+            self._ensure_sandbox_initialized()
+            write_budget_id = self._sandbox_budget_id
+            print(
+                f"[SANDBOX MODE] Redirecting write: budget {budget_id} → {write_budget_id}, "
+                f"account(s) → {self._sandbox_account_id}"
+            )
             transactions = [
-                {**t, "account_id": sandbox_account_id}
+                {**t, "account_id": self._sandbox_account_id}
                 for t in transactions
             ]
 
