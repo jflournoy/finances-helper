@@ -231,15 +231,58 @@ def test_null_category_id_any_subtxn_returns_none():
 def test_memo_truncated_to_200_chars():
     from amazon_confirm import proposal_to_patch_body
     changeset = load_changeset(Path("data/fixtures/expected_amazon_changeset.json"))
-    proposal = changeset["proposed_splits"][0]
-    if "subtransactions" in proposal:
-        proposal["subtransactions"][0]["product_name"] = "x" * 250
-    result = proposal_to_patch_body(proposal)
+    split_proposal = next(
+        (p for p in changeset["proposed_splits"] if len(p["subtransactions"]) >= 2),
+        None,
+    )
+    assert split_proposal is not None, "fixture has no multi-item splits"
+    split_proposal["subtransactions"][0]["item"]["product_name"] = "x" * 250
+    result = proposal_to_patch_body(split_proposal)
     assert result is not None
-    if "subtransactions" in result:
-        for subtxn in result["subtransactions"]:
-            if "memo" in subtxn:
-                assert len(subtxn["memo"]) <= 200
+    assert "subtransactions" in result
+    for subtxn in result["subtransactions"]:
+        assert len(subtxn["memo"]) <= 200
+
+
+def test_split_subtxn_memo_contains_real_product_name():
+    from amazon_confirm import proposal_to_patch_body
+    changeset = load_changeset(Path("data/fixtures/expected_amazon_changeset.json"))
+    split_proposal = next(
+        (p for p in changeset["proposed_splits"] if len(p["subtransactions"]) >= 2),
+        None,
+    )
+    assert split_proposal is not None
+    result = proposal_to_patch_body(split_proposal)
+    assert result is not None
+    for sub_in, sub_out in zip(split_proposal["subtransactions"], result["subtransactions"]):
+        assert sub_in["item"]["product_name"][:128] in sub_out["memo"]
+
+
+def test_split_subtxn_memo_contains_real_asin():
+    from amazon_confirm import proposal_to_patch_body
+    changeset = load_changeset(Path("data/fixtures/expected_amazon_changeset.json"))
+    split_proposal = next(
+        (p for p in changeset["proposed_splits"] if len(p["subtransactions"]) >= 2),
+        None,
+    )
+    assert split_proposal is not None
+    result = proposal_to_patch_body(split_proposal)
+    assert result is not None
+    for sub_in, sub_out in zip(split_proposal["subtransactions"], result["subtransactions"]):
+        assert sub_in["item"]["asin"] in sub_out["memo"]
+
+
+def test_proposal_to_patch_body_raises_when_item_missing():
+    from amazon_confirm import proposal_to_patch_body
+    changeset = load_changeset(Path("data/fixtures/expected_amazon_changeset.json"))
+    split_proposal = next(
+        (p for p in changeset["proposed_splits"] if len(p["subtransactions"]) >= 2),
+        None,
+    )
+    assert split_proposal is not None
+    del split_proposal["subtransactions"][0]["item"]
+    with pytest.raises((KeyError, ValueError)):
+        proposal_to_patch_body(split_proposal)
 
 
 def test_flat_patch_preserves_parent_memo():

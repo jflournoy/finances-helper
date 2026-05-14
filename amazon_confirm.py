@@ -162,8 +162,14 @@ def proposal_to_patch_body(proposal: dict) -> dict | None:
             allocated_dollars = Decimal(str(subtxn.get("allocated_amount", "0")))
             amount_milliunits = -int(allocated_dollars * 1000)
 
-            product_name = subtxn.get("product_name", "Item")[:128]
-            asin = subtxn.get("asin", "")
+            item = subtxn.get("item")
+            if not isinstance(item, dict):
+                raise ValueError(
+                    f"subtransaction missing required 'item' dict in proposal "
+                    f"{proposal['parent_ynab_transaction_id']}"
+                )
+            product_name = item["product_name"][:128]
+            asin = item["asin"]
             memo = f"{product_name} (ASIN {asin})"[:200]
 
             patch_subtxns.append({
