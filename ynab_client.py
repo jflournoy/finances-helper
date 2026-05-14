@@ -30,6 +30,18 @@ class YNABRateLimitError(YNABAPIError):
     pass
 
 
+class YNABConflictError(YNABAPIError):
+    """Raised when YNAB rejects a write due to concurrent edit (409)."""
+    pass
+
+
+class YNABValidationError(YNABAPIError):
+    """Raised when YNAB rejects a write due to validation (400):
+    split sum mismatch, locked transaction, invalid category, etc.
+    """
+    pass
+
+
 def dollars_to_milliunits(amount: float) -> int:
     """Convert dollars to YNAB integer milliunits (1000 = $1.00).
 
@@ -224,6 +236,55 @@ class YNABClient:
             raise YNABAPIError(response.status_code, detail="Response missing 'data' key")
 
         return body["data"]
+
+    def _patch(self, path: str, payload: dict) -> dict:
+        """Make a PATCH request to the YNAB API.
+
+        Raises:
+            YNABValidationError: On 400 (bad request, split mismatch, locked transaction, etc.)
+            YNABConflictError: On 409 (concurrent edit)
+            YNABNotFoundError: On 404
+            YNABRateLimitError: On 429
+            YNABAPIError: On other errors
+        """
+        url = f"{self.base_url}{path}"
+        response = self.session.patch(url, json=payload)
+        self._record_rate_limit(response)
+
+        try:
+            body = response.json()
+        except ValueError:
+            raise YNABAPIError(response.status_code, detail=f"Malformed JSON response: {response.text}")
+
+        if response.status_code >= 400:
+            error_data = body.get("error", {})
+            status = response.status_code
+            error_id = error_data.get("id", "")
+            error_name = error_data.get("name", "")
+            error_detail = error_data.get("detail", "")
+
+            if status == 400:
+                raise YNABValidationError(status, error_id, error_name, error_detail)
+            elif status == 404:
+                raise YNABNotFoundError(status, error_id, error_name, error_detail)
+            elif status == 409:
+                raise YNABConflictError(status, error_id, error_name, error_detail)
+            elif status == 429:
+                raise YNABRateLimitError(status, error_id, error_name, error_detail)
+            else:
+                raise YNABAPIError(status, error_id, error_name, error_detail)
+
+        if "data" not in body:
+            raise YNABAPIError(response.status_code, detail="Response missing 'data' key")
+
+        return body["data"]
+
+    def _record_rate_limit(self, response) -> None:
+        """Record rate limit information from response headers.
+
+        Stub for Phase 3 (rate-limit header parsing). Currently a no-op.
+        """
+        pass
 
     def create_transactions(self, budget_id: str, transactions: list[dict]) -> dict:
         """Create one or more transactions in a budget.

@@ -13,6 +13,8 @@ from ynab_client import (
     YNABAPIError,
     YNABNotFoundError,
     YNABRateLimitError,
+    YNABValidationError,
+    YNABConflictError,
 )
 
 FIXTURES = Path("data/fixtures")
@@ -640,3 +642,95 @@ def test_non_sandbox_create_transactions_unaffected(monkeypatch):
     client.create_transactions("user-budget", [txn])
     assert post_called_with["path"] == "/budgets/user-budget/transactions"
     assert post_called_with["payload"]["transactions"][0]["account_id"] == "user-acct"
+
+
+# Issue #1: _patch() method and error classes
+
+
+def test_patch_success_returns_data_dict(client):
+    fixture = {"data": {"transaction": {"id": "t1", "amount": -5000}}}
+    with patch.object(client.session, "patch", return_value=make_response(200, fixture)):
+        result = client._patch("/budgets/b1/transactions/t1", {"category_id": "cat-123"})
+    assert result == fixture["data"]
+
+
+def test_patch_uses_patch_http_method(client):
+    fixture = {"data": {"transaction": {"id": "t1"}}}
+    with patch.object(client.session, "patch", return_value=make_response(200, fixture)) as mock_patch:
+        client._patch("/budgets/b1/transactions/t1", {"category_id": "cat-123"})
+    mock_patch.assert_called_once()
+
+
+def test_patch_sends_json_payload(client):
+    fixture = {"data": {"transaction": {"id": "t1"}}}
+    payload = {"category_id": "cat-123", "memo": "updated"}
+    with patch.object(client.session, "patch", return_value=make_response(200, fixture)) as mock_patch:
+        client._patch("/budgets/b1/transactions/t1", payload)
+    call_kwargs = mock_patch.call_args[1]
+    assert call_kwargs["json"] == payload
+
+
+def test_patch_400_raises_validation_error(client):
+    from ynab_client import YNABValidationError
+    body = {"error": {"id": "400", "name": "bad_request", "detail": "Split sum mismatch"}}
+    with patch.object(client.session, "patch", return_value=make_response(400, body)):
+        with pytest.raises(YNABValidationError) as exc:
+            client._patch("/budgets/b1/transactions/t1", {})
+    assert "Split sum mismatch" in str(exc.value)
+
+
+def test_patch_404_raises_not_found(client):
+    body = {"error": {"id": "404", "name": "resource_not_found", "detail": "Transaction not found"}}
+    with patch.object(client.session, "patch", return_value=make_response(404, body)):
+        with pytest.raises(YNABNotFoundError):
+            client._patch("/budgets/b1/transactions/bad-id", {})
+
+
+def test_patch_409_raises_conflict_error(client):
+    from ynab_client import YNABConflictError
+    body = {"error": {"id": "409", "name": "conflict", "detail": "Transaction was modified"}}
+    with patch.object(client.session, "patch", return_value=make_response(409, body)):
+        with pytest.raises(YNABConflictError):
+            client._patch("/budgets/b1/transactions/t1", {})
+
+
+def test_patch_429_raises_rate_limit(client):
+    body = {"error": {"id": "429", "name": "too_many_requests", "detail": "Rate limit exceeded"}}
+    with patch.object(client.session, "patch", return_value=make_response(429, body)):
+        with pytest.raises(YNABRateLimitError):
+            client._patch("/budgets/b1/transactions/t1", {})
+
+
+def test_patch_500_raises_api_error(client):
+    body = {"error": {"id": "500", "name": "internal_server_error", "detail": "Server error"}}
+    with patch.object(client.session, "patch", return_value=make_response(500, body)):
+        with pytest.raises(YNABAPIError) as exc:
+            client._patch("/budgets/b1/transactions/t1", {})
+    assert exc.value.status_code == 500
+
+
+def test_patch_malformed_json_raises_api_error(client):
+    mock_resp = Mock()
+    mock_resp.status_code = 200
+    mock_resp.json.side_effect = ValueError("No JSON")
+    mock_resp.text = "not json"
+    with patch.object(client.session, "patch", return_value=mock_resp):
+        with pytest.raises(YNABAPIError, match="Malformed"):
+            client._patch("/budgets/b1/transactions/t1", {})
+
+
+def test_patch_missing_data_key_raises_api_error(client):
+    body = {"something_else": {}}
+    with patch.object(client.session, "patch", return_value=make_response(200, body)):
+        with pytest.raises(YNABAPIError, match="data"):
+            client._patch("/budgets/b1/transactions/t1", {})
+
+
+def test_validation_error_is_subclass_of_api_error():
+    from ynab_client import YNABValidationError
+    assert issubclass(YNABValidationError, YNABAPIError)
+
+
+def test_conflict_error_is_subclass_of_api_error():
+    from ynab_client import YNABConflictError
+    assert issubclass(YNABConflictError, YNABAPIError)
