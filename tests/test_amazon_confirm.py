@@ -354,8 +354,14 @@ def fake_client_factory(monkeypatch):
     return {"make": _make, "constructed": constructed}
 
 
-def _run_main(argv, monkeypatch, stdin_text="", env=None):
+def _run_main(argv, monkeypatch, tmp_path, stdin_text="", env=None):
+    """Invoke amazon_confirm.main() with isolated stdin/argv/cwd.
+
+    chdir(tmp_path) so the default report_dir (Path("data/cache")) lands in
+    the test's tmp directory rather than polluting the real repo cache.
+    """
     import amazon_confirm
+    monkeypatch.chdir(tmp_path)
     monkeypatch.setattr("sys.argv", ["amazon_confirm.py"] + argv)
     monkeypatch.setattr("sys.stdin", io.StringIO(stdin_text))
     if env is not None:
@@ -367,51 +373,51 @@ def _run_main(argv, monkeypatch, stdin_text="", env=None):
     return amazon_confirm.main()
 
 
-def test_cli_dry_run_makes_no_writes(cli_changeset_path, fake_client_factory, monkeypatch):
+def test_cli_dry_run_makes_no_writes(cli_changeset_path, fake_client_factory, monkeypatch, tmp_path):
     monkeypatch.setenv("YNAB_API_TOKEN", "tok")
     monkeypatch.setenv("YNAB_DEFAULT_BUDGET", "My Budget")
     monkeypatch.delenv("YNAB_SANDBOX_MODE", raising=False)
-    code = _run_main([str(cli_changeset_path), "--dry-run", "--yes"], monkeypatch)
+    code = _run_main([str(cli_changeset_path), "--dry-run", "--yes"], monkeypatch, tmp_path)
     assert code == 0
     for client in fake_client_factory["constructed"]:
         client.update_transaction.assert_not_called()
 
 
-def test_cli_yes_skips_prompt(cli_changeset_path, fake_client_factory, monkeypatch):
+def test_cli_yes_skips_prompt(cli_changeset_path, fake_client_factory, monkeypatch, tmp_path):
     monkeypatch.setenv("YNAB_API_TOKEN", "tok")
     monkeypatch.setenv("YNAB_DEFAULT_BUDGET", "My Budget")
     monkeypatch.delenv("YNAB_SANDBOX_MODE", raising=False)
-    code = _run_main([str(cli_changeset_path), "--yes"], monkeypatch, stdin_text="")
+    code = _run_main([str(cli_changeset_path), "--yes"], monkeypatch, tmp_path, stdin_text="")
     assert code == 0
     called = sum(c.update_transaction.call_count for c in fake_client_factory["constructed"])
     assert called > 0
 
 
-def test_cli_prompt_n_exits_zero(cli_changeset_path, fake_client_factory, monkeypatch):
+def test_cli_prompt_n_exits_zero(cli_changeset_path, fake_client_factory, monkeypatch, tmp_path):
     monkeypatch.setenv("YNAB_API_TOKEN", "tok")
     monkeypatch.setenv("YNAB_DEFAULT_BUDGET", "My Budget")
     monkeypatch.delenv("YNAB_SANDBOX_MODE", raising=False)
-    code = _run_main([str(cli_changeset_path)], monkeypatch, stdin_text="n\n")
+    code = _run_main([str(cli_changeset_path)], monkeypatch, tmp_path, stdin_text="n\n")
     assert code == 0
     for client in fake_client_factory["constructed"]:
         client.update_transaction.assert_not_called()
 
 
-def test_cli_prompt_y_proceeds(cli_changeset_path, fake_client_factory, monkeypatch):
+def test_cli_prompt_y_proceeds(cli_changeset_path, fake_client_factory, monkeypatch, tmp_path):
     monkeypatch.setenv("YNAB_API_TOKEN", "tok")
     monkeypatch.setenv("YNAB_DEFAULT_BUDGET", "My Budget")
     monkeypatch.delenv("YNAB_SANDBOX_MODE", raising=False)
-    code = _run_main([str(cli_changeset_path)], monkeypatch, stdin_text="y\n")
+    code = _run_main([str(cli_changeset_path)], monkeypatch, tmp_path, stdin_text="y\n")
     assert code == 0
     called = sum(c.update_transaction.call_count for c in fake_client_factory["constructed"])
     assert called > 0
 
 
-def test_cli_sandbox_mode_set_aborts(cli_changeset_path, fake_client_factory, monkeypatch, capsys):
+def test_cli_sandbox_mode_set_aborts(cli_changeset_path, fake_client_factory, monkeypatch, capsys, tmp_path):
     monkeypatch.setenv("YNAB_API_TOKEN", "tok")
     monkeypatch.setenv("YNAB_DEFAULT_BUDGET", "My Budget")
     monkeypatch.setenv("YNAB_SANDBOX_MODE", "1")
-    code = _run_main([str(cli_changeset_path), "--yes"], monkeypatch)
+    code = _run_main([str(cli_changeset_path), "--yes"], monkeypatch, tmp_path)
     assert code == 2
     err = capsys.readouterr().err
     assert "sandbox" in err.lower()
@@ -422,11 +428,11 @@ def test_cli_missing_changeset_exits_3(tmp_path, fake_client_factory, monkeypatc
     monkeypatch.setenv("YNAB_DEFAULT_BUDGET", "My Budget")
     monkeypatch.delenv("YNAB_SANDBOX_MODE", raising=False)
     missing = tmp_path / "does-not-exist.json"
-    code = _run_main([str(missing), "--yes"], monkeypatch)
+    code = _run_main([str(missing), "--yes"], monkeypatch, tmp_path)
     assert code == 3
 
 
-def test_cli_exit_code_reflects_failures(cli_changeset_path, monkeypatch):
+def test_cli_exit_code_reflects_failures(cli_changeset_path, monkeypatch, tmp_path):
     monkeypatch.setenv("YNAB_API_TOKEN", "tok")
     monkeypatch.setenv("YNAB_DEFAULT_BUDGET", "My Budget")
     monkeypatch.delenv("YNAB_SANDBOX_MODE", raising=False)
@@ -451,11 +457,11 @@ def test_cli_exit_code_reflects_failures(cli_changeset_path, monkeypatch):
     fake_client.get_budget.return_value = {"id": "budget-uuid-123", "name": "My Budget"}
     monkeypatch.setattr(amazon_confirm, "YNABClient", lambda *a, **kw: fake_client)
     monkeypatch.setattr(amazon_confirm, "apply_changeset", fake_apply)
-    code = _run_main([str(cli_changeset_path), "--yes"], monkeypatch)
+    code = _run_main([str(cli_changeset_path), "--yes"], monkeypatch, tmp_path)
     assert code == 1
 
 
-def test_cli_exit_code_reflects_aborted(cli_changeset_path, monkeypatch):
+def test_cli_exit_code_reflects_aborted(cli_changeset_path, monkeypatch, tmp_path):
     monkeypatch.setenv("YNAB_API_TOKEN", "tok")
     monkeypatch.setenv("YNAB_DEFAULT_BUDGET", "My Budget")
     monkeypatch.delenv("YNAB_SANDBOX_MODE", raising=False)
@@ -480,7 +486,7 @@ def test_cli_exit_code_reflects_aborted(cli_changeset_path, monkeypatch):
     fake_client.get_budget.return_value = {"id": "budget-uuid-123", "name": "My Budget"}
     monkeypatch.setattr(amazon_confirm, "YNABClient", lambda *a, **kw: fake_client)
     monkeypatch.setattr(amazon_confirm, "apply_changeset", fake_apply)
-    code = _run_main([str(cli_changeset_path), "--yes"], monkeypatch)
+    code = _run_main([str(cli_changeset_path), "--yes"], monkeypatch, tmp_path)
     assert code == 2
 
 
@@ -514,68 +520,68 @@ def _read_changeset(path):
     return json.loads(path.read_text())
 
 
-def test_apply_refuses_sandbox_mode(apply_changeset_path, mock_client):
+def test_apply_refuses_sandbox_mode(apply_changeset_path, mock_client, tmp_path):
     from amazon_confirm import apply_changeset
     mock_client.sandbox_mode = True
     with pytest.raises(RuntimeError, match="sandbox"):
-        apply_changeset(apply_changeset_path, mock_client, "budget-1")
+        apply_changeset(apply_changeset_path, mock_client, "budget-1", report_dir=tmp_path)
     mock_client.update_transaction.assert_not_called()
 
 
-def test_apply_creates_backup(apply_changeset_path, mock_client):
+def test_apply_creates_backup(apply_changeset_path, mock_client, tmp_path):
     from amazon_confirm import apply_changeset
     original = apply_changeset_path.read_text()
-    apply_changeset(apply_changeset_path, mock_client, "budget-1")
+    apply_changeset(apply_changeset_path, mock_client, "budget-1", report_dir=tmp_path)
     bak = apply_changeset_path.with_suffix(".json.bak")
     assert bak.exists()
     assert bak.read_text() == original
 
 
-def test_apply_does_not_duplicate_backup(apply_changeset_path, mock_client):
+def test_apply_does_not_duplicate_backup(apply_changeset_path, mock_client, tmp_path):
     from amazon_confirm import apply_changeset
     bak = apply_changeset_path.with_suffix(".json.bak")
     bak.write_text('{"sentinel": "pre-existing-backup"}')
-    apply_changeset(apply_changeset_path, mock_client, "budget-1")
+    apply_changeset(apply_changeset_path, mock_client, "budget-1", report_dir=tmp_path)
     assert bak.read_text() == '{"sentinel": "pre-existing-backup"}'
 
 
-def test_apply_dry_run_makes_no_patch_calls(apply_changeset_path, mock_client):
+def test_apply_dry_run_makes_no_patch_calls(apply_changeset_path, mock_client, tmp_path):
     from amazon_confirm import apply_changeset
-    report = apply_changeset(apply_changeset_path, mock_client, "budget-1", dry_run=True)
+    report = apply_changeset(apply_changeset_path, mock_client, "budget-1", dry_run=True, report_dir=tmp_path)
     mock_client.update_transaction.assert_not_called()
     assert any(s.get("reason") == "dry run" for s in report.skipped)
 
 
-def test_apply_skips_proposals_with_applied_at(apply_changeset_path, mock_client):
+def test_apply_skips_proposals_with_applied_at(apply_changeset_path, mock_client, tmp_path):
     from amazon_confirm import apply_changeset
     cs = _read_changeset(apply_changeset_path)
     cs["proposed_splits"][0]["applied_at"] = "2026-05-14T10:00:00"
     apply_changeset_path.write_text(json.dumps(cs))
-    report = apply_changeset(apply_changeset_path, mock_client, "budget-1")
+    report = apply_changeset(apply_changeset_path, mock_client, "budget-1", report_dir=tmp_path)
     skip_reasons = [s["reason"] for s in report.skipped]
     assert any("already applied" in r for r in skip_reasons)
     assert mock_client.update_transaction.call_count == len(cs["proposed_splits"]) - 1
 
 
-def test_apply_skips_proposals_with_null_category(apply_changeset_path, mock_client):
+def test_apply_skips_proposals_with_null_category(apply_changeset_path, mock_client, tmp_path):
     from amazon_confirm import apply_changeset
     cs = _read_changeset(apply_changeset_path)
     cs["proposed_splits"][0]["subtransactions"][0]["category_id"] = None
     apply_changeset_path.write_text(json.dumps(cs))
-    report = apply_changeset(apply_changeset_path, mock_client, "budget-1")
+    report = apply_changeset(apply_changeset_path, mock_client, "budget-1", report_dir=tmp_path)
     assert any("uncategorized" in s["reason"] for s in report.skipped)
     assert mock_client.update_transaction.call_count == len(cs["proposed_splits"]) - 1
 
 
-def test_apply_marks_applied_at_on_success(apply_changeset_path, mock_client):
+def test_apply_marks_applied_at_on_success(apply_changeset_path, mock_client, tmp_path):
     from amazon_confirm import apply_changeset
-    apply_changeset(apply_changeset_path, mock_client, "budget-1")
+    apply_changeset(apply_changeset_path, mock_client, "budget-1", report_dir=tmp_path)
     cs_after = _read_changeset(apply_changeset_path)
     for proposal in cs_after["proposed_splits"]:
         assert "applied_at" in proposal
 
 
-def test_apply_flushes_file_after_each_success(apply_changeset_path, mock_client):
+def test_apply_flushes_file_after_each_success(apply_changeset_path, mock_client, tmp_path):
     from amazon_confirm import apply_changeset
     from ynab_client import YNABValidationError
 
@@ -592,13 +598,13 @@ def test_apply_flushes_file_after_each_success(apply_changeset_path, mock_client
         return {"id": "ok"}
 
     mock_client.update_transaction.side_effect = side_effect
-    apply_changeset(apply_changeset_path, mock_client, "budget-1")
+    apply_changeset(apply_changeset_path, mock_client, "budget-1", report_dir=tmp_path)
     assert flushes_seen_at[0] == 0
     assert flushes_seen_at[1] == 1
     assert flushes_seen_at[2] == 2
 
 
-def test_apply_continues_after_409(apply_changeset_path, mock_client):
+def test_apply_continues_after_409(apply_changeset_path, mock_client, tmp_path):
     from amazon_confirm import apply_changeset
     from ynab_client import YNABConflictError
 
@@ -612,14 +618,14 @@ def test_apply_continues_after_409(apply_changeset_path, mock_client):
 
     mock_client.update_transaction.side_effect = side_effect
     cs = _read_changeset(apply_changeset_path)
-    report = apply_changeset(apply_changeset_path, mock_client, "budget-1")
+    report = apply_changeset(apply_changeset_path, mock_client, "budget-1", report_dir=tmp_path)
     assert len(report.failed) == 1
     assert report.failed[0]["http_status"] == 409
     assert not report.aborted
     assert len(report.applied) == len(cs["proposed_splits"]) - 1
 
 
-def test_apply_continues_after_400_locked(apply_changeset_path, mock_client):
+def test_apply_continues_after_400_locked(apply_changeset_path, mock_client, tmp_path):
     from amazon_confirm import apply_changeset
     from ynab_client import YNABValidationError
 
@@ -632,12 +638,12 @@ def test_apply_continues_after_400_locked(apply_changeset_path, mock_client):
         return {"id": "ok"}
 
     mock_client.update_transaction.side_effect = side_effect
-    report = apply_changeset(apply_changeset_path, mock_client, "budget-1")
+    report = apply_changeset(apply_changeset_path, mock_client, "budget-1", report_dir=tmp_path)
     assert any(f["http_status"] == 400 for f in report.failed)
     assert not report.aborted
 
 
-def test_apply_aborts_on_429(apply_changeset_path, mock_client):
+def test_apply_aborts_on_429(apply_changeset_path, mock_client, tmp_path):
     from amazon_confirm import apply_changeset
     from ynab_client import YNABRateLimitError
 
@@ -651,7 +657,7 @@ def test_apply_aborts_on_429(apply_changeset_path, mock_client):
 
     mock_client.update_transaction.side_effect = side_effect
     cs = _read_changeset(apply_changeset_path)
-    report = apply_changeset(apply_changeset_path, mock_client, "budget-1")
+    report = apply_changeset(apply_changeset_path, mock_client, "budget-1", report_dir=tmp_path)
     assert report.aborted
     assert "rate" in (report.abort_reason or "").lower()
     assert mock_client.update_transaction.call_count == 2
@@ -659,38 +665,34 @@ def test_apply_aborts_on_429(apply_changeset_path, mock_client):
     assert len(cs["proposed_splits"]) > 2
 
 
-def test_apply_aborts_when_rate_limit_floor_breached(apply_changeset_path, mock_client):
+def test_apply_aborts_when_rate_limit_floor_breached(apply_changeset_path, mock_client, tmp_path):
     from amazon_confirm import apply_changeset
 
     remaining_seq = iter([100, 4])
     mock_client.rate_limit_remaining.side_effect = lambda: next(remaining_seq, 4)
 
-    report = apply_changeset(apply_changeset_path, mock_client, "budget-1", rate_limit_floor=5)
+    report = apply_changeset(apply_changeset_path, mock_client, "budget-1", rate_limit_floor=5, report_dir=tmp_path)
     assert report.aborted
     assert "rate limit floor" in (report.abort_reason or "").lower()
     assert mock_client.update_transaction.call_count == 2
 
 
-def test_apply_throttle_sleeps_between_calls(apply_changeset_path, mock_client, monkeypatch):
+def test_apply_throttle_sleeps_between_calls(apply_changeset_path, mock_client, monkeypatch, tmp_path):
     from amazon_confirm import apply_changeset
     import amazon_confirm
 
     sleeps = []
     monkeypatch.setattr(amazon_confirm.time, "sleep", lambda s: sleeps.append(s))
     cs = _read_changeset(apply_changeset_path)
-    apply_changeset(apply_changeset_path, mock_client, "budget-1", throttle_seconds=0.75)
+    apply_changeset(apply_changeset_path, mock_client, "budget-1", throttle_seconds=0.75, report_dir=tmp_path)
     assert all(s == 0.75 for s in sleeps)
     assert len(sleeps) == len(cs["proposed_splits"])
 
 
-def test_apply_writes_summary_report(apply_changeset_path, mock_client, tmp_path, monkeypatch):
+def test_apply_writes_summary_report(apply_changeset_path, mock_client, tmp_path):
     from amazon_confirm import apply_changeset
-    monkeypatch.chdir(tmp_path)
-    src = Path("/home/jflournoy/code/finances-helper/data/fixtures/expected_amazon_changeset.json")
-    local_changeset = tmp_path / "cs.json"
-    shutil.copy(src, local_changeset)
-    apply_changeset(local_changeset, mock_client, "budget-1")
-    reports = list((tmp_path / "data" / "cache").glob("amazon-confirmed-*.json"))
+    apply_changeset(apply_changeset_path, mock_client, "budget-1", report_dir=tmp_path)
+    reports = list(tmp_path.glob("amazon-confirmed-*.json"))
     assert len(reports) == 1
     body = json.loads(reports[0].read_text())
     assert "applied" in body
@@ -707,8 +709,21 @@ def test_apply_handles_empty_proposed_splits(tmp_path, mock_client):
     }
     path = tmp_path / "empty.json"
     path.write_text(json.dumps(cs))
-    report = apply_changeset(path, mock_client, "budget-1")
+    report = apply_changeset(path, mock_client, "budget-1", report_dir=tmp_path)
     assert report.total == 0
     assert report.applied == []
     assert report.failed == []
     mock_client.update_transaction.assert_not_called()
+
+
+def test_apply_uses_report_dir_not_real_cache(apply_changeset_path, mock_client, tmp_path, monkeypatch):
+    """Regression test for #171: when report_dir is provided, the real
+    data/cache/ directory must not receive any files (even if cwd is at the
+    repo root)."""
+    from amazon_confirm import apply_changeset
+    repo_root = Path("/home/jflournoy/code/finances-helper")
+    real_cache_before = set((repo_root / "data" / "cache").glob("amazon-confirmed-*.json")) if (repo_root / "data" / "cache").exists() else set()
+    apply_changeset(apply_changeset_path, mock_client, "budget-1", report_dir=tmp_path)
+    real_cache_after = set((repo_root / "data" / "cache").glob("amazon-confirmed-*.json")) if (repo_root / "data" / "cache").exists() else set()
+    assert real_cache_after == real_cache_before, "apply_changeset must not write to real data/cache when report_dir is provided"
+    assert list(tmp_path.glob("amazon-confirmed-*.json"))

@@ -156,7 +156,7 @@ def test_integration_flat_patch_applies_category(
     proposal = _flat_proposal(txn, cat_id)
     changeset_path = _build_changeset(tmp_path, [proposal])
 
-    report = apply_changeset(changeset_path, patch_client, sandbox_budget_id, throttle_seconds=0.0)
+    report = apply_changeset(changeset_path, patch_client, sandbox_budget_id, throttle_seconds=0.0, report_dir=tmp_path)
     assert not report.aborted
     assert len(report.applied) == 1
     assert len(report.failed) == 0
@@ -176,7 +176,7 @@ def test_integration_split_patch_creates_subtransactions(
     proposal = _split_proposal(txn, cat_ids[0], cat_ids[1], amount_a="10.00", amount_b="5.50")
     changeset_path = _build_changeset(tmp_path, [proposal])
 
-    report = apply_changeset(changeset_path, patch_client, sandbox_budget_id, throttle_seconds=0.0)
+    report = apply_changeset(changeset_path, patch_client, sandbox_budget_id, throttle_seconds=0.0, report_dir=tmp_path)
     assert not report.aborted
     assert len(report.applied) == 1
     assert len(report.failed) == 0
@@ -200,10 +200,10 @@ def test_integration_resume_skips_already_applied(
     proposal = _flat_proposal(txn, cat_id)
     changeset_path = _build_changeset(tmp_path, [proposal])
 
-    first = apply_changeset(changeset_path, patch_client, sandbox_budget_id, throttle_seconds=0.0)
+    first = apply_changeset(changeset_path, patch_client, sandbox_budget_id, throttle_seconds=0.0, report_dir=tmp_path)
     assert len(first.applied) == 1
 
-    second = apply_changeset(changeset_path, patch_client, sandbox_budget_id, throttle_seconds=0.0)
+    second = apply_changeset(changeset_path, patch_client, sandbox_budget_id, throttle_seconds=0.0, report_dir=tmp_path)
     assert len(second.applied) == 0
     assert any("already applied" in s["reason"] for s in second.skipped)
 
@@ -222,4 +222,4 @@ def test_integration_400_on_split_sum_mismatch(
     changeset_path = _build_changeset(tmp_path, [proposal])
 
     with pytest.raises(ValueError, match="invariant"):
-        apply_changeset(changeset_path, patch_client, sandbox_budget_id, throttle_seconds=0.0)
+        apply_changeset(changeset_path, patch_client, sandbox_budget_id, throttle_seconds=0.0, report_dir=tmp_path)

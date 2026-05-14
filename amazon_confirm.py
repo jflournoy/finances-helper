@@ -227,6 +227,7 @@ def apply_changeset(
     dry_run: bool = False,
     throttle_seconds: float = 0.5,
     rate_limit_floor: int = 5,
+    report_dir: Path = Path("data/cache"),
 ) -> ApplyReport:
     """Apply changeset proposals to YNAB.
 
@@ -237,6 +238,8 @@ def apply_changeset(
         dry_run: If True, validate but don't apply.
         throttle_seconds: Delay between YNAB API calls.
         rate_limit_floor: Abort if remaining requests fall below this.
+        report_dir: Directory for the summary report (created if missing).
+            Defaults to data/cache; tests should pass tmp_path.
 
     Returns:
         ApplyReport with detailed results.
@@ -333,9 +336,8 @@ def apply_changeset(
         time.sleep(throttle_seconds)
 
     timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
-    cache_dir = Path("data/cache")
-    cache_dir.mkdir(parents=True, exist_ok=True)
-    report_path = cache_dir / f"amazon-confirmed-{timestamp}.json"
+    report_dir.mkdir(parents=True, exist_ok=True)
+    report_path = report_dir / f"amazon-confirmed-{timestamp}.json"
 
     report = ApplyReport(
         changeset_path=str(changeset_path),
