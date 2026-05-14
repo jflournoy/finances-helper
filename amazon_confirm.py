@@ -114,3 +114,67 @@ def summarize_changeset(changeset: dict) -> ChangesetSummary:
         total_outflow_dollars=total_outflow,
         by_category=by_category,
     )
+
+
+def proposal_to_patch_body(proposal: dict) -> dict | None:
+    """Convert a changeset proposed_split entry into a YNAB PATCH body.
+
+    Returns None if the proposal is not applyable (any subtransaction has
+    category_id == None). The whole proposal is skipped because YNAB requires
+    every subtransaction in a split to have a category.
+
+    Single-subtransaction proposals (len == 1):
+        Returns {"category_id": "...", "memo": "<parent memo preserved>"}
+        (YNAB rejects subtransactions arrays of length 1.)
+
+    Multi-subtransaction proposals (len >= 2):
+        Returns {
+            "subtransactions": [
+                {"amount": <negative int milliunits>, "category_id": "...", "memo": "..."},
+                ...
+            ]
+        }
+    """
+    subtransactions = proposal.get("subtransactions", [])
+
+    if any(s.get("category_id") is None for s in subtransactions):
+        return None
+
+    if len(subtransactions) == 1:
+        subtxn = subtransactions[0]
+        parent_memo = proposal["parent_ynab_transaction"].get("memo", "")
+        return {
+            "category_id": subtxn["category_id"],
+            "memo": parent_memo,
+        }
+
+    if len(subtransactions) >= 2:
+        patch_subtxns = []
+        total_amount = 0
+
+        for subtxn in subtransactions:
+            allocated_dollars = Decimal(str(subtxn.get("allocated_amount", "0")))
+            amount_milliunits = -int(allocated_dollars * 1000)
+
+            product_name = subtxn.get("product_name", "Item")[:128]
+            asin = subtxn.get("asin", "")
+            memo = f"{product_name} (ASIN {asin})"[:200]
+
+            patch_subtxns.append({
+                "amount": amount_milliunits,
+                "category_id": subtxn["category_id"],
+                "memo": memo,
+            })
+
+            total_amount += amount_milliunits
+
+        parent_amount = proposal["parent_ynab_transaction"]["amount"]
+        if total_amount != parent_amount:
+            raise ValueError(
+                f"Sum invariant violated for txn {proposal['parent_ynab_transaction_id']}: "
+                f"subtransactions sum to {total_amount} but parent is {parent_amount}"
+            )
+
+        return {"subtransactions": patch_subtxns}
+
+    return None

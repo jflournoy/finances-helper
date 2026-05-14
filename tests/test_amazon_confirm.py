@@ -158,3 +158,108 @@ def test_load_and_summarize_real_fixture():
     assert summary.total_proposals >= 1
     assert summary.total_outflow_dollars > Decimal("0")
     assert summary.split_proposals + summary.flat_proposals == summary.total_proposals
+
+
+# Issue #5: proposal_to_patch_body() conversion
+
+
+def test_single_subtxn_returns_flat_patch():
+    from amazon_confirm import proposal_to_patch_body
+    changeset = load_changeset(Path("data/fixtures/expected_amazon_changeset.json"))
+    flat_proposal = next((p for p in changeset["proposed_splits"] if len(p["subtransactions"]) == 1), None)
+    if flat_proposal:
+        result = proposal_to_patch_body(flat_proposal)
+        assert result is not None
+        assert "category_id" in result
+        assert "subtransactions" not in result
+
+
+def test_multi_subtxn_returns_split_patch():
+    from amazon_confirm import proposal_to_patch_body
+    changeset = load_changeset(Path("data/fixtures/expected_amazon_changeset.json"))
+    split_proposal = next((p for p in changeset["proposed_splits"] if len(p["subtransactions"]) >= 2), None)
+    if split_proposal:
+        result = proposal_to_patch_body(split_proposal)
+        assert result is not None
+        assert "subtransactions" in result
+        assert len(result["subtransactions"]) == len(split_proposal["subtransactions"])
+
+
+def test_subtxn_amounts_are_negative_milliunits():
+    from amazon_confirm import proposal_to_patch_body
+    changeset = load_changeset(Path("data/fixtures/expected_amazon_changeset.json"))
+    proposal = changeset["proposed_splits"][0]
+    result = proposal_to_patch_body(proposal)
+    assert result is not None
+    if "subtransactions" in result:
+        for subtxn in result["subtransactions"]:
+            assert subtxn["amount"] < 0
+
+
+def test_subtxn_amounts_are_integers_not_floats():
+    from amazon_confirm import proposal_to_patch_body
+    changeset = load_changeset(Path("data/fixtures/expected_amazon_changeset.json"))
+    proposal = changeset["proposed_splits"][0]
+    result = proposal_to_patch_body(proposal)
+    assert result is not None
+    if "subtransactions" in result:
+        for subtxn in result["subtransactions"]:
+            assert isinstance(subtxn["amount"], int)
+
+
+def test_split_amounts_sum_to_parent():
+    from amazon_confirm import proposal_to_patch_body
+    changeset = load_changeset(Path("data/fixtures/expected_amazon_changeset.json"))
+    split_proposal = next((p for p in changeset["proposed_splits"] if len(p["subtransactions"]) >= 2), None)
+    if split_proposal:
+        result = proposal_to_patch_body(split_proposal)
+        assert result is not None
+        if "subtransactions" in result:
+            total = sum(s["amount"] for s in result["subtransactions"])
+            assert total == split_proposal["parent_ynab_transaction"]["amount"]
+
+
+def test_null_category_id_any_subtxn_returns_none():
+    from amazon_confirm import proposal_to_patch_body
+    changeset = load_changeset(Path("data/fixtures/expected_amazon_changeset.json"))
+    proposal = changeset["proposed_splits"][0]
+    proposal["subtransactions"][0]["category_id"] = None
+    result = proposal_to_patch_body(proposal)
+    assert result is None
+
+
+def test_memo_truncated_to_200_chars():
+    from amazon_confirm import proposal_to_patch_body
+    changeset = load_changeset(Path("data/fixtures/expected_amazon_changeset.json"))
+    proposal = changeset["proposed_splits"][0]
+    if "subtransactions" in proposal:
+        proposal["subtransactions"][0]["product_name"] = "x" * 250
+    result = proposal_to_patch_body(proposal)
+    assert result is not None
+    if "subtransactions" in result:
+        for subtxn in result["subtransactions"]:
+            if "memo" in subtxn:
+                assert len(subtxn["memo"]) <= 200
+
+
+def test_flat_patch_preserves_parent_memo():
+    from amazon_confirm import proposal_to_patch_body
+    changeset = load_changeset(Path("data/fixtures/expected_amazon_changeset.json"))
+    flat_proposal = next((p for p in changeset["proposed_splits"] if len(p["subtransactions"]) == 1), None)
+    if flat_proposal:
+        parent_memo = flat_proposal["parent_ynab_transaction"].get("memo", "")
+        result = proposal_to_patch_body(flat_proposal)
+        assert result is not None
+        if "subtransactions" not in result:
+            assert result.get("memo") == parent_memo
+
+
+def test_proposal_to_patch_body_with_all_fixture_proposals():
+    """Exercise full call chain: load_changeset → each proposal through proposal_to_patch_body."""
+    from amazon_confirm import proposal_to_patch_body
+    changeset = load_changeset(Path("data/fixtures/expected_amazon_changeset.json"))
+    for proposal in changeset["proposed_splits"]:
+        result = proposal_to_patch_body(proposal)
+        if result is not None and "subtransactions" in result:
+            total = sum(s["amount"] for s in result["subtransactions"])
+            assert total == proposal["parent_ynab_transaction"]["amount"]
