@@ -482,3 +482,233 @@ def test_cli_exit_code_reflects_aborted(cli_changeset_path, monkeypatch):
     monkeypatch.setattr(amazon_confirm, "apply_changeset", fake_apply)
     code = _run_main([str(cli_changeset_path), "--yes"], monkeypatch)
     assert code == 2
+
+
+# Issue #6: apply_changeset() orchestration
+
+
+@pytest.fixture
+def apply_changeset_path(tmp_path):
+    src = Path("data/fixtures/expected_amazon_changeset.json")
+    dst = tmp_path / "amazon-changeset-orch.json"
+    shutil.copy(src, dst)
+    return dst
+
+
+@pytest.fixture
+def mock_client():
+    client = MagicMock()
+    client.sandbox_mode = False
+    client.rate_limit_remaining.return_value = 199
+    client.update_transaction.return_value = {"id": "txn-1"}
+    return client
+
+
+@pytest.fixture(autouse=True)
+def _no_sleep(monkeypatch):
+    import amazon_confirm
+    monkeypatch.setattr(amazon_confirm.time, "sleep", lambda *_: None)
+
+
+def _read_changeset(path):
+    return json.loads(path.read_text())
+
+
+def test_apply_refuses_sandbox_mode(apply_changeset_path, mock_client):
+    from amazon_confirm import apply_changeset
+    mock_client.sandbox_mode = True
+    with pytest.raises(RuntimeError, match="sandbox"):
+        apply_changeset(apply_changeset_path, mock_client, "budget-1")
+    mock_client.update_transaction.assert_not_called()
+
+
+def test_apply_creates_backup(apply_changeset_path, mock_client):
+    from amazon_confirm import apply_changeset
+    original = apply_changeset_path.read_text()
+    apply_changeset(apply_changeset_path, mock_client, "budget-1")
+    bak = apply_changeset_path.with_suffix(".json.bak")
+    assert bak.exists()
+    assert bak.read_text() == original
+
+
+def test_apply_does_not_duplicate_backup(apply_changeset_path, mock_client):
+    from amazon_confirm import apply_changeset
+    bak = apply_changeset_path.with_suffix(".json.bak")
+    bak.write_text('{"sentinel": "pre-existing-backup"}')
+    apply_changeset(apply_changeset_path, mock_client, "budget-1")
+    assert bak.read_text() == '{"sentinel": "pre-existing-backup"}'
+
+
+def test_apply_dry_run_makes_no_patch_calls(apply_changeset_path, mock_client):
+    from amazon_confirm import apply_changeset
+    report = apply_changeset(apply_changeset_path, mock_client, "budget-1", dry_run=True)
+    mock_client.update_transaction.assert_not_called()
+    assert any(s.get("reason") == "dry run" for s in report.skipped)
+
+
+def test_apply_skips_proposals_with_applied_at(apply_changeset_path, mock_client):
+    from amazon_confirm import apply_changeset
+    cs = _read_changeset(apply_changeset_path)
+    cs["proposed_splits"][0]["applied_at"] = "2026-05-14T10:00:00"
+    apply_changeset_path.write_text(json.dumps(cs))
+    report = apply_changeset(apply_changeset_path, mock_client, "budget-1")
+    skip_reasons = [s["reason"] for s in report.skipped]
+    assert any("already applied" in r for r in skip_reasons)
+    assert mock_client.update_transaction.call_count == len(cs["proposed_splits"]) - 1
+
+
+def test_apply_skips_proposals_with_null_category(apply_changeset_path, mock_client):
+    from amazon_confirm import apply_changeset
+    cs = _read_changeset(apply_changeset_path)
+    cs["proposed_splits"][0]["subtransactions"][0]["category_id"] = None
+    apply_changeset_path.write_text(json.dumps(cs))
+    report = apply_changeset(apply_changeset_path, mock_client, "budget-1")
+    assert any("uncategorized" in s["reason"] for s in report.skipped)
+    assert mock_client.update_transaction.call_count == len(cs["proposed_splits"]) - 1
+
+
+def test_apply_marks_applied_at_on_success(apply_changeset_path, mock_client):
+    from amazon_confirm import apply_changeset
+    apply_changeset(apply_changeset_path, mock_client, "budget-1")
+    cs_after = _read_changeset(apply_changeset_path)
+    for proposal in cs_after["proposed_splits"]:
+        assert "applied_at" in proposal
+
+
+def test_apply_flushes_file_after_each_success(apply_changeset_path, mock_client):
+    from amazon_confirm import apply_changeset
+    from ynab_client import YNABValidationError
+
+    call_count = {"n": 0}
+    flushes_seen_at = []
+
+    def side_effect(*args, **kwargs):
+        call_count["n"] += 1
+        cs_on_disk = _read_changeset(apply_changeset_path)
+        applied_now = sum(1 for p in cs_on_disk["proposed_splits"] if "applied_at" in p)
+        flushes_seen_at.append(applied_now)
+        if call_count["n"] == 3:
+            raise YNABValidationError(400, detail="boom")
+        return {"id": "ok"}
+
+    mock_client.update_transaction.side_effect = side_effect
+    apply_changeset(apply_changeset_path, mock_client, "budget-1")
+    assert flushes_seen_at[0] == 0
+    assert flushes_seen_at[1] == 1
+    assert flushes_seen_at[2] == 2
+
+
+def test_apply_continues_after_409(apply_changeset_path, mock_client):
+    from amazon_confirm import apply_changeset
+    from ynab_client import YNABConflictError
+
+    call_count = {"n": 0}
+
+    def side_effect(*args, **kwargs):
+        call_count["n"] += 1
+        if call_count["n"] == 1:
+            raise YNABConflictError(409, detail="conflict")
+        return {"id": "ok"}
+
+    mock_client.update_transaction.side_effect = side_effect
+    cs = _read_changeset(apply_changeset_path)
+    report = apply_changeset(apply_changeset_path, mock_client, "budget-1")
+    assert len(report.failed) == 1
+    assert report.failed[0]["http_status"] == 409
+    assert not report.aborted
+    assert len(report.applied) == len(cs["proposed_splits"]) - 1
+
+
+def test_apply_continues_after_400_locked(apply_changeset_path, mock_client):
+    from amazon_confirm import apply_changeset
+    from ynab_client import YNABValidationError
+
+    call_count = {"n": 0}
+
+    def side_effect(*args, **kwargs):
+        call_count["n"] += 1
+        if call_count["n"] == 1:
+            raise YNABValidationError(400, name="transaction_locked", detail="reconciled")
+        return {"id": "ok"}
+
+    mock_client.update_transaction.side_effect = side_effect
+    report = apply_changeset(apply_changeset_path, mock_client, "budget-1")
+    assert any(f["http_status"] == 400 for f in report.failed)
+    assert not report.aborted
+
+
+def test_apply_aborts_on_429(apply_changeset_path, mock_client):
+    from amazon_confirm import apply_changeset
+    from ynab_client import YNABRateLimitError
+
+    call_count = {"n": 0}
+
+    def side_effect(*args, **kwargs):
+        call_count["n"] += 1
+        if call_count["n"] == 2:
+            raise YNABRateLimitError(429, detail="too many")
+        return {"id": "ok"}
+
+    mock_client.update_transaction.side_effect = side_effect
+    cs = _read_changeset(apply_changeset_path)
+    report = apply_changeset(apply_changeset_path, mock_client, "budget-1")
+    assert report.aborted
+    assert "rate" in (report.abort_reason or "").lower()
+    assert mock_client.update_transaction.call_count == 2
+    assert len(report.applied) == 1
+    assert len(cs["proposed_splits"]) > 2
+
+
+def test_apply_aborts_when_rate_limit_floor_breached(apply_changeset_path, mock_client):
+    from amazon_confirm import apply_changeset
+
+    remaining_seq = iter([100, 4])
+    mock_client.rate_limit_remaining.side_effect = lambda: next(remaining_seq, 4)
+
+    report = apply_changeset(apply_changeset_path, mock_client, "budget-1", rate_limit_floor=5)
+    assert report.aborted
+    assert "rate limit floor" in (report.abort_reason or "").lower()
+    assert mock_client.update_transaction.call_count == 2
+
+
+def test_apply_throttle_sleeps_between_calls(apply_changeset_path, mock_client, monkeypatch):
+    from amazon_confirm import apply_changeset
+    import amazon_confirm
+
+    sleeps = []
+    monkeypatch.setattr(amazon_confirm.time, "sleep", lambda s: sleeps.append(s))
+    cs = _read_changeset(apply_changeset_path)
+    apply_changeset(apply_changeset_path, mock_client, "budget-1", throttle_seconds=0.75)
+    assert all(s == 0.75 for s in sleeps)
+    assert len(sleeps) == len(cs["proposed_splits"])
+
+
+def test_apply_writes_summary_report(apply_changeset_path, mock_client, tmp_path, monkeypatch):
+    from amazon_confirm import apply_changeset
+    monkeypatch.chdir(tmp_path)
+    src = Path("/home/jflournoy/code/finances-helper/data/fixtures/expected_amazon_changeset.json")
+    local_changeset = tmp_path / "cs.json"
+    shutil.copy(src, local_changeset)
+    apply_changeset(local_changeset, mock_client, "budget-1")
+    reports = list((tmp_path / "data" / "cache").glob("amazon-confirmed-*.json"))
+    assert len(reports) == 1
+    body = json.loads(reports[0].read_text())
+    assert "applied" in body
+    assert "total" in body
+
+
+def test_apply_handles_empty_proposed_splits(tmp_path, mock_client):
+    from amazon_confirm import apply_changeset
+    cs = {
+        "version": 1,
+        "generated_at": "2026-05-14T00:00:00",
+        "summary": {},
+        "proposed_splits": [],
+    }
+    path = tmp_path / "empty.json"
+    path.write_text(json.dumps(cs))
+    report = apply_changeset(path, mock_client, "budget-1")
+    assert report.total == 0
+    assert report.applied == []
+    assert report.failed == []
+    mock_client.update_transaction.assert_not_called()
