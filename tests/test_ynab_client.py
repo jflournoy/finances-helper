@@ -117,7 +117,9 @@ def make_response(status_code, body):
 
 @pytest.fixture
 def client():
-    return YNABClient(token="test-token")
+    c = YNABClient(token="test-token")
+    c.sandbox_mode = False
+    return c
 
 
 def test_get_success_returns_data_dict(client):
