@@ -42,21 +42,12 @@ parameters {
 }
 
 transformed parameters {
-    matrix[I, K] beta_i;
-    vector[N] mu;
-    for (k in 1:K)
-        beta_i[, k] = beta_i_raw[, k] * sigma_fs[k];
-    for (n in 1:N) {
-        vector[K] beta_n = beta_pop + to_vector(beta_i[ii[n]]);
-        mu[n] = dot_product(B[n], beta_n);
-    }
+    matrix[I, K] beta_i = diag_post_multiply(beta_i_raw, sigma_fs);
+    vector[N] mu = B * beta_pop + rows_dot_product(B, beta_i[ii]);
 }
 
 model {
     sigma       ~ normal(0.2, 0.1);
-    // gamma(1.5, 1): mean 1.5, mode 0.5 — looser than before to allow the
-    // population spline more wiggle and let it capture the 2022 spike and
-    // recent acceleration that earlier fits were smoothing away.
     lambda_pop  ~ gamma(1.5, 1);
     sigma_fs    ~ normal(0, sigma_fs_prior_sd);
 
@@ -70,9 +61,7 @@ model {
 
 generated quantities {
     vector[N] log_lik;
-    vector[N] y_rep;
-    for (n in 1:N) {
+    vector[N] y_rep = to_vector(normal_rng(mu, rep_vector(sigma, N)));
+    for (n in 1:N)
         log_lik[n] = normal_lpdf(y[n] | mu[n], sigma);
-        y_rep[n]   = normal_rng(mu[n], sigma);
-    }
 }
