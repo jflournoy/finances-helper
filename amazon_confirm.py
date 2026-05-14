@@ -3,7 +3,10 @@
 Provides tools for loading, validating, and summarizing changesets produced by amazon_matcher.py,
 then applying them to YNAB via the update_transaction() write API.
 """
+import argparse
 import json
+import os
+import sys
 import time
 from pathlib import Path
 from dataclasses import dataclass, asdict
@@ -11,8 +14,10 @@ from datetime import datetime
 from decimal import Decimal
 from typing import TYPE_CHECKING
 
+from ynab_client import YNABClient
+
 if TYPE_CHECKING:
-    from ynab_client import YNABClient
+    pass
 
 
 def load_changeset(path: Path) -> dict:
@@ -216,7 +221,7 @@ def _json_default(obj):
 
 def apply_changeset(
     changeset_path: Path,
-    client: "YNABClient",
+    client: YNABClient,
     budget_id: str,
     *,
     dry_run: bool = False,
@@ -346,3 +351,127 @@ def apply_changeset(
     report_path.write_text(json.dumps(asdict(report), indent=2, default=_json_default))
 
     return report
+
+
+def _print_summary(changeset: dict, summary: ChangesetSummary, budget_name: str, path: Path) -> None:
+    print(f"Changeset:        {path}")
+    print(f"Generated:        {changeset.get('generated_at', '?')}")
+    print(f"Budget:           {budget_name}")
+    print(f"Total proposals:  {summary.total_proposals}")
+    print(f"  Splits (>=2):   {summary.split_proposals}")
+    print(f"  Flats (1):      {summary.flat_proposals}")
+    print(f"  Uncategorized:  {summary.skipped_uncategorized}")
+    print(f"  Resume (done):  {summary.applied_previously}")
+    print(f"Total outflow:    ${summary.total_outflow_dollars:,.2f}")
+    if summary.by_category:
+        print("By category:")
+        for name, amount in sorted(summary.by_category.items(), key=lambda kv: -kv[1]):
+            print(f"  {name:30s} ${amount:>10,.2f}")
+
+
+def _exit_code_for_report(report: ApplyReport) -> int:
+    if report.aborted:
+        return 2
+    if report.failed:
+        return 1
+    return 0
+
+
+def main(argv: list[str] | None = None) -> int:
+    """CLI entry point for applying a changeset to YNAB.
+
+    Exit codes:
+      0 — clean run, no failures, no abort
+      1 — at least one PATCH failed
+      2 — loop aborted (rate limit or systemic error, or sandbox mode set)
+      3 — pre-flight failure (missing file, missing env var, etc.)
+    """
+    parser = argparse.ArgumentParser(
+        description="Apply an Amazon changeset to YNAB via PATCH /transactions."
+    )
+    parser.add_argument("changeset", type=Path, help="path to amazon-changeset-*.json")
+    parser.add_argument("--dry-run", action="store_true", help="show what would change; do not call YNAB")
+    parser.add_argument("--yes", action="store_true", help="skip interactive confirmation")
+    parser.add_argument("--throttle", type=float, default=0.5, help="seconds between PATCH calls")
+    args = parser.parse_args(argv)
+
+    if not args.changeset.exists():
+        print(f"ERROR: changeset file not found: {args.changeset}", file=sys.stderr)
+        return 3
+
+    if os.environ.get("YNAB_SANDBOX_MODE", "").strip() == "1":
+        print(
+            "ERROR: YNAB_SANDBOX_MODE=1 is set, but the confirm step does not support "
+            "sandbox redirect (PATCH operates on a specific transaction ID, which would "
+            "404 in the redirected budget). Unset YNAB_SANDBOX_MODE or use a non-sandbox "
+            "client pointed at the Sandbox budget directly.",
+            file=sys.stderr,
+        )
+        return 2
+
+    if not os.environ.get("YNAB_API_TOKEN"):
+        print("ERROR: YNAB_API_TOKEN not set", file=sys.stderr)
+        return 3
+
+    budget_name_or_id = os.environ.get("YNAB_DEFAULT_BUDGET")
+    if not budget_name_or_id:
+        print("ERROR: YNAB_DEFAULT_BUDGET not set", file=sys.stderr)
+        return 3
+
+    try:
+        client = YNABClient()
+        budget_id = client.resolve_budget_id(budget_name_or_id)
+        budget = client.get_budget(budget_id)
+        budget_name = budget.get("name", budget_name_or_id)
+    except Exception as e:
+        print(f"ERROR: failed to resolve budget: {e}", file=sys.stderr)
+        return 3
+
+    try:
+        changeset = load_changeset(args.changeset)
+    except (ValueError, json.JSONDecodeError) as e:
+        print(f"ERROR: invalid changeset: {e}", file=sys.stderr)
+        return 3
+
+    summary = summarize_changeset(changeset)
+    _print_summary(changeset, summary, budget_name, args.changeset)
+
+    if args.dry_run:
+        report = apply_changeset(
+            args.changeset, client, budget_id,
+            dry_run=True, throttle_seconds=args.throttle,
+        )
+        print(f"\nDRY RUN — no PATCH calls made.")
+        print(f"  Would apply: {len([s for s in report.skipped if s.get('reason') == 'dry run'])}")
+        return 0
+
+    if not args.yes:
+        prompt = f"\nApply {summary.total_proposals - summary.applied_previously} proposals to budget '{budget_name}'? [y/N]: "
+        try:
+            answer = input(prompt).strip().lower()
+        except EOFError:
+            answer = ""
+        if answer != "y":
+            print("Aborted by user.")
+            return 0
+
+    report = apply_changeset(
+        args.changeset, client, budget_id,
+        dry_run=False, throttle_seconds=args.throttle,
+    )
+
+    print(f"\nApplied:  {len(report.applied)} of {report.total}")
+    print(f"Skipped:  {len(report.skipped)}")
+    print(f"Failed:   {len(report.failed)}")
+    print(f"Aborted:  {'yes' if report.aborted else 'no'}" + (f" ({report.abort_reason})" if report.aborted else ""))
+
+    return _exit_code_for_report(report)
+
+
+if __name__ == "__main__":
+    try:
+        from dotenv import load_dotenv
+        load_dotenv()
+    except ImportError:
+        pass
+    sys.exit(main())

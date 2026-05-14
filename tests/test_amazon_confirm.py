@@ -1,10 +1,14 @@
 """Tests for amazon_confirm.py — changeset loading and summarization."""
+import io
 import json
+import os
+import shutil
 import pytest
 import tempfile
 from pathlib import Path
 from decimal import Decimal
-from amazon_confirm import load_changeset, summarize_changeset, ChangesetSummary
+from unittest.mock import patch, MagicMock
+from amazon_confirm import load_changeset, summarize_changeset, ChangesetSummary, ApplyReport
 
 FIXTURES = Path("data/fixtures")
 
@@ -306,3 +310,175 @@ def test_proposal_to_patch_body_with_all_fixture_proposals():
         if result is not None and "subtransactions" in result:
             total = sum(s["amount"] for s in result["subtransactions"])
             assert total == proposal["parent_ynab_transaction"]["amount"]
+
+
+# Issue #7: CLI entry point
+
+
+@pytest.fixture
+def cli_changeset_path(tmp_path):
+    src = Path("data/fixtures/expected_amazon_changeset.json")
+    dst = tmp_path / "amazon-changeset-test.json"
+    shutil.copy(src, dst)
+    return dst
+
+
+@pytest.fixture
+def fake_client_factory(monkeypatch):
+    """Patch amazon_confirm.YNABClient to return a configurable MagicMock."""
+    instances = []
+
+    def _make(**overrides):
+        mock = MagicMock()
+        mock.sandbox_mode = False
+        mock.resolve_budget_id.return_value = "budget-uuid-123"
+        mock.get_budget.return_value = {"id": "budget-uuid-123", "name": "My Budget"}
+        mock.rate_limit_remaining.return_value = 199
+        mock.update_transaction.return_value = {"id": "txn-1"}
+        for k, v in overrides.items():
+            setattr(mock, k, v)
+        instances.append(mock)
+        return mock
+
+    constructed = []
+
+    def fake_ctor(*args, **kwargs):
+        client = _make()
+        constructed.append(client)
+        return client
+
+    import amazon_confirm
+    monkeypatch.setattr(amazon_confirm, "YNABClient", fake_ctor)
+    monkeypatch.setattr(amazon_confirm.time, "sleep", lambda *_: None)
+
+    return {"make": _make, "constructed": constructed}
+
+
+def _run_main(argv, monkeypatch, stdin_text="", env=None):
+    import amazon_confirm
+    monkeypatch.setattr("sys.argv", ["amazon_confirm.py"] + argv)
+    monkeypatch.setattr("sys.stdin", io.StringIO(stdin_text))
+    if env is not None:
+        for k, v in env.items():
+            if v is None:
+                monkeypatch.delenv(k, raising=False)
+            else:
+                monkeypatch.setenv(k, v)
+    return amazon_confirm.main()
+
+
+def test_cli_dry_run_makes_no_writes(cli_changeset_path, fake_client_factory, monkeypatch):
+    monkeypatch.setenv("YNAB_API_TOKEN", "tok")
+    monkeypatch.setenv("YNAB_DEFAULT_BUDGET", "My Budget")
+    monkeypatch.delenv("YNAB_SANDBOX_MODE", raising=False)
+    code = _run_main([str(cli_changeset_path), "--dry-run", "--yes"], monkeypatch)
+    assert code == 0
+    for client in fake_client_factory["constructed"]:
+        client.update_transaction.assert_not_called()
+
+
+def test_cli_yes_skips_prompt(cli_changeset_path, fake_client_factory, monkeypatch):
+    monkeypatch.setenv("YNAB_API_TOKEN", "tok")
+    monkeypatch.setenv("YNAB_DEFAULT_BUDGET", "My Budget")
+    monkeypatch.delenv("YNAB_SANDBOX_MODE", raising=False)
+    code = _run_main([str(cli_changeset_path), "--yes"], monkeypatch, stdin_text="")
+    assert code == 0
+    called = sum(c.update_transaction.call_count for c in fake_client_factory["constructed"])
+    assert called > 0
+
+
+def test_cli_prompt_n_exits_zero(cli_changeset_path, fake_client_factory, monkeypatch):
+    monkeypatch.setenv("YNAB_API_TOKEN", "tok")
+    monkeypatch.setenv("YNAB_DEFAULT_BUDGET", "My Budget")
+    monkeypatch.delenv("YNAB_SANDBOX_MODE", raising=False)
+    code = _run_main([str(cli_changeset_path)], monkeypatch, stdin_text="n\n")
+    assert code == 0
+    for client in fake_client_factory["constructed"]:
+        client.update_transaction.assert_not_called()
+
+
+def test_cli_prompt_y_proceeds(cli_changeset_path, fake_client_factory, monkeypatch):
+    monkeypatch.setenv("YNAB_API_TOKEN", "tok")
+    monkeypatch.setenv("YNAB_DEFAULT_BUDGET", "My Budget")
+    monkeypatch.delenv("YNAB_SANDBOX_MODE", raising=False)
+    code = _run_main([str(cli_changeset_path)], monkeypatch, stdin_text="y\n")
+    assert code == 0
+    called = sum(c.update_transaction.call_count for c in fake_client_factory["constructed"])
+    assert called > 0
+
+
+def test_cli_sandbox_mode_set_aborts(cli_changeset_path, fake_client_factory, monkeypatch, capsys):
+    monkeypatch.setenv("YNAB_API_TOKEN", "tok")
+    monkeypatch.setenv("YNAB_DEFAULT_BUDGET", "My Budget")
+    monkeypatch.setenv("YNAB_SANDBOX_MODE", "1")
+    code = _run_main([str(cli_changeset_path), "--yes"], monkeypatch)
+    assert code == 2
+    err = capsys.readouterr().err
+    assert "sandbox" in err.lower()
+
+
+def test_cli_missing_changeset_exits_3(tmp_path, fake_client_factory, monkeypatch):
+    monkeypatch.setenv("YNAB_API_TOKEN", "tok")
+    monkeypatch.setenv("YNAB_DEFAULT_BUDGET", "My Budget")
+    monkeypatch.delenv("YNAB_SANDBOX_MODE", raising=False)
+    missing = tmp_path / "does-not-exist.json"
+    code = _run_main([str(missing), "--yes"], monkeypatch)
+    assert code == 3
+
+
+def test_cli_exit_code_reflects_failures(cli_changeset_path, monkeypatch):
+    monkeypatch.setenv("YNAB_API_TOKEN", "tok")
+    monkeypatch.setenv("YNAB_DEFAULT_BUDGET", "My Budget")
+    monkeypatch.delenv("YNAB_SANDBOX_MODE", raising=False)
+
+    import amazon_confirm
+
+    def fake_apply(*args, **kwargs):
+        return ApplyReport(
+            changeset_path=str(cli_changeset_path),
+            completed_at="now",
+            total=3,
+            applied=[],
+            skipped=[],
+            failed=[{"txn_id": "t1", "http_status": 400, "error_id": "x", "error_name": "y", "detail": "z"}],
+            aborted=False,
+            abort_reason=None,
+        )
+
+    fake_client = MagicMock()
+    fake_client.sandbox_mode = False
+    fake_client.resolve_budget_id.return_value = "budget-uuid-123"
+    fake_client.get_budget.return_value = {"id": "budget-uuid-123", "name": "My Budget"}
+    monkeypatch.setattr(amazon_confirm, "YNABClient", lambda *a, **kw: fake_client)
+    monkeypatch.setattr(amazon_confirm, "apply_changeset", fake_apply)
+    code = _run_main([str(cli_changeset_path), "--yes"], monkeypatch)
+    assert code == 1
+
+
+def test_cli_exit_code_reflects_aborted(cli_changeset_path, monkeypatch):
+    monkeypatch.setenv("YNAB_API_TOKEN", "tok")
+    monkeypatch.setenv("YNAB_DEFAULT_BUDGET", "My Budget")
+    monkeypatch.delenv("YNAB_SANDBOX_MODE", raising=False)
+
+    import amazon_confirm
+
+    def fake_apply(*args, **kwargs):
+        return ApplyReport(
+            changeset_path=str(cli_changeset_path),
+            completed_at="now",
+            total=3,
+            applied=[],
+            skipped=[],
+            failed=[],
+            aborted=True,
+            abort_reason="rate limit exceeded",
+        )
+
+    fake_client = MagicMock()
+    fake_client.sandbox_mode = False
+    fake_client.resolve_budget_id.return_value = "budget-uuid-123"
+    fake_client.get_budget.return_value = {"id": "budget-uuid-123", "name": "My Budget"}
+    monkeypatch.setattr(amazon_confirm, "YNABClient", lambda *a, **kw: fake_client)
+    monkeypatch.setattr(amazon_confirm, "apply_changeset", fake_apply)
+    code = _run_main([str(cli_changeset_path), "--yes"], monkeypatch)
+    assert code == 2
