@@ -4,9 +4,15 @@ Provides tools for loading, validating, and summarizing changesets produced by a
 then applying them to YNAB via the update_transaction() write API.
 """
 import json
+import time
 from pathlib import Path
-from dataclasses import dataclass
+from dataclasses import dataclass, asdict
+from datetime import datetime
 from decimal import Decimal
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from ynab_client import YNABClient
 
 
 def load_changeset(path: Path) -> dict:
@@ -178,3 +184,159 @@ def proposal_to_patch_body(proposal: dict) -> dict | None:
         return {"subtransactions": patch_subtxns}
 
     return None
+
+
+@dataclass
+class ApplyReport:
+    """Report from apply_changeset() execution."""
+    changeset_path: str
+    completed_at: str
+    total: int
+    applied: list[dict]
+    skipped: list[dict]
+    failed: list[dict]
+    aborted: bool
+    abort_reason: str | None = None
+
+
+def _json_default(obj):
+    """JSON encoder for Decimal, date, datetime."""
+    if isinstance(obj, Decimal):
+        return str(obj)
+    if isinstance(obj, (datetime,)):
+        return obj.isoformat()
+    raise TypeError(f"Object of type {type(obj).__name__} is not JSON serializable")
+
+
+def apply_changeset(
+    changeset_path: Path,
+    client: "YNABClient",
+    budget_id: str,
+    *,
+    dry_run: bool = False,
+    throttle_seconds: float = 0.5,
+    rate_limit_floor: int = 5,
+) -> ApplyReport:
+    """Apply changeset proposals to YNAB.
+
+    Args:
+        changeset_path: Path to changeset JSON file.
+        client: YNABClient instance (sandbox_mode must be False).
+        budget_id: YNAB budget ID.
+        dry_run: If True, validate but don't apply.
+        throttle_seconds: Delay between YNAB API calls.
+        rate_limit_floor: Abort if remaining requests fall below this.
+
+    Returns:
+        ApplyReport with detailed results.
+
+    Raises:
+        RuntimeError: If client.sandbox_mode=True or on systemic errors.
+    """
+    from ynab_client import (
+        YNABNotFoundError, YNABConflictError, YNABValidationError,
+        YNABRateLimitError, YNABAPIError,
+    )
+
+    if client.sandbox_mode:
+        raise RuntimeError("apply_changeset() requires sandbox_mode=False. PATCH cannot be redirected.")
+
+    bak_path = changeset_path.with_suffix(".json.bak")
+    if not bak_path.exists():
+        bak_path.write_text(changeset_path.read_text())
+
+    changeset = load_changeset(changeset_path)
+    proposals = changeset.get("proposed_splits", [])
+
+    applied = []
+    skipped = []
+    failed = []
+    aborted = False
+    abort_reason = None
+
+    for i, proposal in enumerate(proposals):
+        txn_id = proposal["parent_ynab_transaction_id"]
+
+        if "applied_at" in proposal:
+            skipped.append({"txn_id": txn_id, "reason": f"already applied at {proposal['applied_at']}"})
+            continue
+
+        patch_body = proposal_to_patch_body(proposal)
+        if patch_body is None:
+            skipped.append({"txn_id": txn_id, "reason": "contains uncategorized items"})
+            continue
+
+        if dry_run:
+            skipped.append({"txn_id": txn_id, "reason": "dry run"})
+            continue
+
+        try:
+            client.update_transaction(budget_id, txn_id, patch_body)
+            changeset["proposed_splits"][i]["applied_at"] = datetime.now().isoformat()
+            changeset_path.write_text(json.dumps(changeset, indent=2, default=_json_default))
+
+            subtxn_count = len(patch_body.get("subtransactions", [1]))
+            applied.append({
+                "txn_id": txn_id,
+                "type": "split" if "subtransactions" in patch_body else "flat",
+                "subtxn_count": subtxn_count,
+            })
+        except YNABRateLimitError as e:
+            failed.append({
+                "txn_id": txn_id,
+                "http_status": 429,
+                "error_id": e.id,
+                "error_name": e.name,
+                "detail": e.detail,
+            })
+            aborted = True
+            abort_reason = "rate limit exceeded"
+            break
+        except (YNABValidationError, YNABConflictError, YNABNotFoundError) as e:
+            status = e.status_code or 500
+            failed.append({
+                "txn_id": txn_id,
+                "http_status": status,
+                "error_id": e.id,
+                "error_name": e.name,
+                "detail": e.detail,
+            })
+        except YNABAPIError as e:
+            failed.append({
+                "txn_id": txn_id,
+                "http_status": e.status_code or 500,
+                "error_id": e.id,
+                "error_name": e.name,
+                "detail": e.detail,
+            })
+            aborted = True
+            abort_reason = f"unexpected error: {e.name}"
+            break
+
+        remaining = client.rate_limit_remaining()
+        if remaining is not None and remaining < rate_limit_floor:
+            aborted = True
+            abort_reason = f"rate limit floor breached: only {remaining} requests remaining"
+            break
+
+        time.sleep(throttle_seconds)
+
+    timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+    cache_dir = Path("data/cache")
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    report_path = cache_dir / f"amazon-confirmed-{timestamp}.json"
+
+    report = ApplyReport(
+        changeset_path=str(changeset_path),
+        completed_at=datetime.now().isoformat(),
+        total=len(proposals),
+        applied=applied,
+        skipped=skipped,
+        failed=failed,
+        aborted=aborted,
+        abort_reason=abort_reason,
+    )
+
+    report_path.write_text(json.dumps(asdict(report), indent=2, default=_json_default))
+
+    return report
