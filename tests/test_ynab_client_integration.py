@@ -8,7 +8,9 @@ which redirects all writes to the Sandbox budget/account.
 
 Requires YNAB_API_TOKEN and YNAB_DEFAULT_BUDGET in .env.
 """
+import os
 import pytest
+from ynab_client import YNABClient
 
 pytestmark = pytest.mark.integration
 
