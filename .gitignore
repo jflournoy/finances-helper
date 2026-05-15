@@ -1,6 +1,22 @@
-# Override global gitignore for CLAUDE docs (we want these tracked in this repo)
-!CLAUDE.md
-!CLAUDE_*.md
+# Override global gitignore for top-level CLAUDE docs (tracked in this repo)
+!/CLAUDE.md
+!/CLAUDE_*.md
+
+# Project-shared Claude config: only commands/ and agents/ are tracked.
+# Everything else under .claude/ (CLAUDE.md, settings.json, hooks/,
+# learnings/, metrics.json, locks, agent-generated reports) stays personal.
+!.claude/
+!.claude/commands/
+!.claude/commands/**
+!.claude/agents/
+!.claude/agents/**
+.claude/agents/reports/
+.claude/CLAUDE.md
+.claude/settings.json
+.claude/hooks/
+.claude/learnings/
+.claude/metrics.json
+.claude/scheduled_tasks.lock
 
 # Secrets
 .env
