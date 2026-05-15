@@ -1,0 +1,137 @@
+{
+  "kind": "enrich-changeset",
+  "version": 1,
+  "metadata": {
+    "timestamp": "2026-05-15T14:32:35.000Z",
+    "budget_id": "aaaaaaaa-0000-0000-0000-000000000001",
+    "days_back": 30,
+    "since_date": "2026-04-15",
+    "K": 5,
+    "confidence_threshold": 0.65,
+    "dump_path": "data/fixtures/enrich_changeset_sample.json"
+  },
+  "amazon": {
+    "proposed_splits": [
+      {
+        "transaction_id": "bbbbbbbb-0000-0000-0000-000000000001",
+        "parent_ynab_transaction": {
+          "id": "bbbbbbbb-0000-0000-0000-000000000001",
+          "amount": -50000,
+          "memo": "Order 111-2222222 ($50.00)",
+          "date": "2026-05-10",
+          "payee_name": "Amazon.com",
+          "account_name": "Visa 1"
+        },
+        "subtransactions": [
+          {
+            "item": {
+              "asin": "B0D1111111",
+              "product_name": "Organic Peanut Butter",
+              "quantity": 1
+            },
+            "memo": "Organic Peanut Butter",
+            "allocated_amount": "25.00",
+            "category_id": "cccccccc-0000-0000-0000-000000000001",
+            "category_name": "Groceries",
+            "confidence": 0.92,
+            "rationale": "Matched to Groceries by product name and purchase history"
+          },
+          {
+            "item": {
+              "asin": "B0D2222222",
+              "product_name": "Almond Milk",
+              "quantity": 2
+            },
+            "memo": "Almond Milk (qty 2)",
+            "allocated_amount": "25.00",
+            "category_id": "cccccccc-0000-0000-0000-000000000001",
+            "category_name": "Groceries",
+            "confidence": 0.88,
+            "rationale": "Matched to Groceries by product name"
+          }
+        ]
+      },
+      {
+        "transaction_id": "bbbbbbbb-0000-0000-0000-000000000002",
+        "parent_ynab_transaction": {
+          "id": "bbbbbbbb-0000-0000-0000-000000000002",
+          "amount": -35000,
+          "memo": "Order 111-3333333 ($35.00)",
+          "date": "2026-05-12",
+          "payee_name": "Amazon.com",
+          "account_name": "Visa 1"
+        },
+        "subtransactions": [
+          {
+            "item": {
+              "asin": "B0D3333333",
+              "product_name": "USB-C Cable 6ft",
+              "quantity": 1
+            },
+            "memo": "USB-C Cable 6ft",
+            "allocated_amount": "35.00",
+            "category_id": "cccccccc-0000-0000-0000-000000000002",
+            "category_name": "Electronics",
+            "confidence": 0.95,
+            "rationale": "Clear electronics purchase, exact match in category history"
+          }
+        ]
+      }
+    ],
+    "unmatched_ynab": [
+      {
+        "id": "bbbbbbbb-0000-0000-0000-000000000010",
+        "date": "2026-05-08",
+        "payee_name": "Amazon.com",
+        "amount": -120000,
+        "memo": "Unknown order"
+      }
+    ],
+    "unmatched_shipments": [],
+    "excluded_shipments": [],
+    "parse_errors": []
+  },
+  "non_amazon": {
+    "proposals": [
+      {
+        "transaction_id": "bbbbbbbb-0000-0000-0000-000000000011",
+        "payee_name": "Whole Foods Market",
+        "amount_dollars": "42.50",
+        "existing_memo": "Groceries",
+        "category_id": "cccccccc-0000-0000-0000-000000000001",
+        "category_name": "Groceries",
+        "confidence": 0.88,
+        "rationale": "Payee history confirms Groceries category"
+      },
+      {
+        "transaction_id": "bbbbbbbb-0000-0000-0000-000000000012",
+        "payee_name": "Acme Corp Consulting",
+        "amount_dollars": "150.00",
+        "existing_memo": "Professional Services",
+        "category_id": null,
+        "category_name": null,
+        "confidence": 0.0,
+        "rationale": "No payee history and fuzzy match below threshold; skipped"
+      },
+      {
+        "transaction_id": "bbbbbbbb-0000-0000-0000-000000000013",
+        "payee_name": "CVS Pharmacy",
+        "amount_dollars": null,
+        "existing_memo": "Pharmacy - amount unknown",
+        "category_id": "cccccccc-0000-0000-0000-000000000003",
+        "category_name": "Health",
+        "confidence": 0.75,
+        "rationale": "Payee history, but amount missing from transaction"
+      }
+    ],
+    "skipped_transfers": [
+      {
+        "transaction_id": "bbbbbbbb-0000-0000-0000-000000000014",
+        "from_account": "Checking",
+        "to_account": "Savings",
+        "amount_dollars": "500.00",
+        "reason": "Transfer between internal accounts"
+      }
+    ]
+  }
+}

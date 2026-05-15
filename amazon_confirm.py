@@ -21,22 +21,27 @@ if TYPE_CHECKING:
 
 
 def load_changeset(path: Path) -> dict:
-    """Load and validate a changeset JSON file.
+    """Load and validate an enrich-changeset JSON file.
 
     Validates:
-    - version == 1 (raises ValueError if not)
-    - required top-level keys: version, generated_at, summary, proposed_splits
-    - each proposed_splits[i] has: parent_ynab_transaction_id, parent_ynab_transaction, subtransactions
+    - version == 1
+    - kind == "enrich-changeset"
+    - required top-level keys: version, kind, metadata, amazon, non_amazon
+    - metadata must have: timestamp, budget_id
+    - amazon.proposed_splits must exist (list, may be empty)
+    - non_amazon.proposals must exist (list, may be empty)
+    - each amazon split has: transaction_id, parent_ynab_transaction, subtransactions
+    - each non_amazon flat has: transaction_id, confidence
 
     Args:
-        path: Path to amazon-changeset-*.json
+        path: Path to enrich-changeset-*.json
 
     Returns:
         Parsed changeset dict as-is (no transformation).
 
     Raises:
         FileNotFoundError: If path does not exist.
-        ValueError: If version is not 1, required keys are missing, or per-proposal fields are missing.
+        ValueError: If version != 1, kind != "enrich-changeset", required keys missing, or schema invalid.
                     Error messages are actionable (include the key name and index).
     """
     with open(path) as f:
@@ -47,14 +52,34 @@ def load_changeset(path: Path) -> dict:
             f"unsupported changeset version {changeset.get('version')!r}: only version 1 is supported"
         )
 
-    for key in ("generated_at", "summary", "proposed_splits"):
+    if changeset.get("kind") != "enrich-changeset":
+        raise ValueError(
+            f"changeset kind must be 'enrich-changeset', got: {changeset.get('kind')!r}"
+        )
+
+    for key in ("kind", "version", "metadata", "amazon", "non_amazon"):
         if key not in changeset:
             raise ValueError(f"changeset missing required key: {key!r}")
 
-    for i, proposal in enumerate(changeset["proposed_splits"]):
-        for field in ("parent_ynab_transaction_id", "parent_ynab_transaction", "subtransactions"):
+    metadata = changeset.get("metadata", {})
+    for key in ("timestamp", "budget_id"):
+        if key not in metadata:
+            raise ValueError(f"metadata missing required key: {key!r}")
+
+    if "proposed_splits" not in changeset.get("amazon", {}):
+        raise ValueError("changeset['amazon'] missing required key: 'proposed_splits'")
+    if "proposals" not in changeset.get("non_amazon", {}):
+        raise ValueError("changeset['non_amazon'] missing required key: 'proposals'")
+
+    for i, split in enumerate(changeset["amazon"]["proposed_splits"]):
+        for field in ("transaction_id", "parent_ynab_transaction", "subtransactions"):
+            if field not in split:
+                raise ValueError(f"amazon.proposed_splits[{i}] missing required field: {field!r}")
+
+    for i, proposal in enumerate(changeset["non_amazon"]["proposals"]):
+        for field in ("transaction_id", "confidence"):
             if field not in proposal:
-                raise ValueError(f"proposed_splits[{i}] missing required field: {field!r}")
+                raise ValueError(f"non_amazon.proposals[{i}] missing required field: {field!r}")
 
     return changeset
 
@@ -69,17 +94,18 @@ class ChangesetSummary:
     applied_previously: int
     total_outflow_dollars: Decimal
     by_category: dict[str, Decimal]
+    non_amazon_proposals: int = 0
 
 
 def summarize_changeset(changeset: dict) -> ChangesetSummary:
     """Compute summary statistics from a loaded changeset.
 
-    - total_outflow_dollars: sum abs(proposal['parent_ynab_transaction']['amount']) / 1000
-      using Decimal arithmetic (parent amounts are negative milliunits).
-    - by_category: for each subtransaction with a non-null category_name,
-      add its allocated_amount (Decimal string) to the category bucket.
-    - A proposal counted in skipped_uncategorized is still included in
-      total_outflow_dollars and split/flat counts.
+    Processes both Amazon proposed_splits and non-Amazon flat proposals.
+    - total_outflow_dollars: sum of parent amounts (Amazon) + non-null amount_dollars (non-Amazon)
+      using Decimal arithmetic.
+    - by_category: for each categorized subtransaction (Amazon) or proposal (non-Amazon),
+      add its amount to the category bucket.
+    - A proposal counted in skipped_uncategorized is still included in outflow and counts.
     """
     total_proposals = 0
     split_proposals = 0
@@ -88,8 +114,10 @@ def summarize_changeset(changeset: dict) -> ChangesetSummary:
     applied_previously = 0
     total_outflow = Decimal("0")
     by_category = {}
+    non_amazon_proposals = 0
 
-    for proposal in changeset["proposed_splits"]:
+    # Process Amazon proposed_splits
+    for proposal in changeset.get("amazon", {}).get("proposed_splits", []):
         total_proposals += 1
 
         if "applied_at" in proposal:
@@ -116,6 +144,24 @@ def summarize_changeset(changeset: dict) -> ChangesetSummary:
                 allocated_amount = Decimal(str(subtxn.get("allocated_amount", "0")))
                 by_category[category_name] = by_category.get(category_name, Decimal("0")) + allocated_amount
 
+    # Process non-Amazon flat proposals
+    for proposal in changeset.get("non_amazon", {}).get("proposals", []):
+        non_amazon_proposals += 1
+        total_proposals += 1
+
+        # Only count categorized proposals in outflow
+        if proposal.get("category_id") is not None:
+            flat_proposals += 1
+            amount_dollars = proposal.get("amount_dollars")
+            if amount_dollars is not None:
+                amount_decimal = Decimal(str(amount_dollars))
+                total_outflow += abs(amount_decimal)
+                category_name = proposal.get("category_name")
+                if category_name:
+                    by_category[category_name] = by_category.get(category_name, Decimal("0")) + abs(amount_decimal)
+        else:
+            skipped_uncategorized += 1
+
     return ChangesetSummary(
         total_proposals=total_proposals,
         split_proposals=split_proposals,
@@ -124,6 +170,7 @@ def summarize_changeset(changeset: dict) -> ChangesetSummary:
         applied_previously=applied_previously,
         total_outflow_dollars=total_outflow,
         by_category=by_category,
+        non_amazon_proposals=non_amazon_proposals,
     )
 
 
@@ -171,7 +218,7 @@ def proposal_to_patch_body(proposal: dict) -> dict | None:
             if not isinstance(item, dict):
                 raise ValueError(
                     f"subtransaction missing required 'item' dict in proposal "
-                    f"{proposal['parent_ynab_transaction_id']}"
+                    f"{proposal.get('transaction_id', 'unknown')}"
                 )
             product_name = item["product_name"][:128]
             asin = item["asin"]
@@ -188,13 +235,30 @@ def proposal_to_patch_body(proposal: dict) -> dict | None:
         parent_amount = proposal["parent_ynab_transaction"]["amount"]
         if total_amount != parent_amount:
             raise ValueError(
-                f"Sum invariant violated for txn {proposal['parent_ynab_transaction_id']}: "
+                f"Sum invariant violated for txn {proposal.get('transaction_id', 'unknown')}: "
                 f"subtransactions sum to {total_amount} but parent is {parent_amount}"
             )
 
         return {"subtransactions": patch_subtxns}
 
     return None
+
+
+def flat_proposal_to_patch_body(proposal: dict) -> dict | None:
+    """Convert a non-Amazon flat proposal into a YNAB PATCH body.
+
+    Returns None if the proposal is uncategorized (category_id is None).
+    Otherwise returns a minimal PATCH dict with only category_id.
+
+    Args:
+        proposal: A non_amazon.proposals entry.
+
+    Returns:
+        {"category_id": "..."} if categorized, None if uncategorized.
+    """
+    if proposal.get("category_id") is None:
+        return None
+    return {"category_id": proposal["category_id"]}
 
 
 @dataclass
@@ -260,7 +324,7 @@ def apply_changeset(
         bak_path.write_text(changeset_path.read_text())
 
     changeset = load_changeset(changeset_path)
-    proposals = changeset.get("proposed_splits", [])
+    proposals = changeset.get("amazon", {}).get("proposed_splits", [])
 
     applied = []
     skipped = []
@@ -269,7 +333,7 @@ def apply_changeset(
     abort_reason = None
 
     for i, proposal in enumerate(proposals):
-        txn_id = proposal["parent_ynab_transaction_id"]
+        txn_id = proposal["transaction_id"]
 
         if "applied_at" in proposal:
             skipped.append({"txn_id": txn_id, "reason": f"already applied at {proposal['applied_at']}"})
@@ -286,7 +350,7 @@ def apply_changeset(
 
         try:
             client.update_transaction(budget_id, txn_id, patch_body)
-            changeset["proposed_splits"][i]["applied_at"] = datetime.now().isoformat()
+            changeset["amazon"]["proposed_splits"][i]["applied_at"] = datetime.now().isoformat()
             changeset_path.write_text(json.dumps(changeset, indent=2, default=_json_default))
 
             subtxn_count = len(patch_body.get("subtransactions", [1]))
@@ -356,12 +420,14 @@ def apply_changeset(
 
 
 def _print_summary(changeset: dict, summary: ChangesetSummary, budget_name: str, path: Path) -> None:
+    timestamp = changeset.get("metadata", {}).get("timestamp", changeset.get("generated_at", "?"))
     print(f"Changeset:        {path}")
-    print(f"Generated:        {changeset.get('generated_at', '?')}")
+    print(f"Generated:        {timestamp}")
     print(f"Budget:           {budget_name}")
     print(f"Total proposals:  {summary.total_proposals}")
     print(f"  Splits (>=2):   {summary.split_proposals}")
     print(f"  Flats (1):      {summary.flat_proposals}")
+    print(f"  Non-Amazon:     {summary.non_amazon_proposals}")
     print(f"  Uncategorized:  {summary.skipped_uncategorized}")
     print(f"  Resume (done):  {summary.applied_previously}")
     print(f"Total outflow:    ${summary.total_outflow_dollars:,.2f}")
