@@ -389,6 +389,10 @@ class TestWriteUnifiedChangeset:
         assert _amount_dollars_str({"amount_dollars": "42.50"}) == "42.50"
         with pytest.raises(TypeError, match="precision drift"):
             _amount_dollars_str({"amount_dollars": 0.1 + 0.2})
+        # bool is a subclass of int but must not be treated as milliunits
+        assert _amount_dollars_str({"amount": True}) is None
+        assert _amount_dollars_str({"amount": False}) is None
+        assert _amount_dollars_str({"amount": True, "amount_dollars": "1.00"}) == "1.00"
 
     def test_write_unified_changeset_amount_dollars_is_exact_decimal(self, tmp_path):
         """amount_dollars in written changeset is derived from integer milliunits.

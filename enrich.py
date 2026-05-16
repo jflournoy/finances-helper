@@ -36,7 +36,7 @@ def _amount_dollars_str(txn: dict) -> str | None:
     Returns None only if both keys are absent.
     """
     milliunits = txn.get("amount")
-    if isinstance(milliunits, int):
+    if isinstance(milliunits, int) and not isinstance(milliunits, bool):
         return format(Decimal(milliunits) / Decimal(1000), "f")
     existing = txn.get("amount_dollars")
     if existing is None:

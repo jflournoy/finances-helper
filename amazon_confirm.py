@@ -151,21 +151,23 @@ def summarize_changeset(changeset: dict) -> ChangesetSummary:
         non_amazon_proposals += 1
         total_proposals += 1
 
+        is_categorized = proposal.get("category_id") is not None
+
         if "applied_at" in proposal:
             applied_previously += 1
-        elif proposal.get("category_id") is None:
+        elif not is_categorized:
             skipped_uncategorized += 1
 
-        if proposal.get("category_id") is None:
+        if not is_categorized:
             continue
 
         amount_dollars = proposal.get("amount_dollars")
         if amount_dollars is not None:
-            amount_decimal = Decimal(str(amount_dollars))
-            total_outflow += abs(amount_decimal)
+            amount_decimal = abs(Decimal(amount_dollars))
+            total_outflow += amount_decimal
             category_name = proposal.get("category_name")
             if category_name:
-                by_category[category_name] = by_category.get(category_name, Decimal("0")) + abs(amount_decimal)
+                by_category[category_name] = by_category.get(category_name, Decimal("0")) + amount_decimal
 
     return ChangesetSummary(
         total_proposals=total_proposals,
