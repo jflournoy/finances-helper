@@ -31,7 +31,7 @@ def load_changeset(path: Path) -> dict:
     - amazon.proposed_splits must exist (list, may be empty)
     - non_amazon.proposals must exist (list, may be empty)
     - each amazon split has: transaction_id, parent_ynab_transaction, subtransactions
-    - each non_amazon flat has: transaction_id, confidence
+    - each non_amazon flat has: transaction_id, confidence, tier
 
     Args:
         path: Path to enrich-changeset-*.json
@@ -77,7 +77,7 @@ def load_changeset(path: Path) -> dict:
                 raise ValueError(f"amazon.proposed_splits[{i}] missing required field: {field!r}")
 
     for i, proposal in enumerate(changeset["non_amazon"]["proposals"]):
-        for field in ("transaction_id", "confidence"):
+        for field in ("transaction_id", "confidence", "tier"):
             if field not in proposal:
                 raise ValueError(f"non_amazon.proposals[{i}] missing required field: {field!r}")
 
@@ -101,11 +101,18 @@ def summarize_changeset(changeset: dict) -> ChangesetSummary:
     """Compute summary statistics from a loaded changeset.
 
     Processes both Amazon proposed_splits and non-Amazon flat proposals.
-    - total_outflow_dollars: sum of parent amounts (Amazon) + non-null amount_dollars (non-Amazon)
-      using Decimal arithmetic.
-    - by_category: for each categorized subtransaction (Amazon) or proposal (non-Amazon),
-      add its amount to the category bucket.
-    - A proposal counted in skipped_uncategorized is still included in outflow and counts.
+
+    Counter semantics (mutually exclusive across Amazon entries):
+      - split_proposals: Amazon entries with >=2 subtransactions
+      - flat_proposals: Amazon entries with exactly 1 subtransaction
+      - non_amazon_proposals: total non-Amazon entries (categorized + uncategorized)
+      - skipped_uncategorized: Amazon proposals with any null subtxn category
+        PLUS non-Amazon proposals with category_id=None
+      - applied_previously: any proposal (Amazon or non-Amazon) with applied_at
+
+    total_outflow_dollars uses Decimal arithmetic. Non-Amazon flats with
+    amount_dollars=None are not counted in outflow but are still counted in
+    non_amazon_proposals.
     """
     total_proposals = 0
     split_proposals = 0
@@ -116,26 +123,22 @@ def summarize_changeset(changeset: dict) -> ChangesetSummary:
     by_category = {}
     non_amazon_proposals = 0
 
-    # Process Amazon proposed_splits
-    for proposal in changeset.get("amazon", {}).get("proposed_splits", []):
+    for proposal in changeset["amazon"]["proposed_splits"]:
         total_proposals += 1
-
-        if "applied_at" in proposal:
-            applied_previously += 1
 
         parent = proposal["parent_ynab_transaction"]
         amount_milliunits = parent.get("amount", 0)
-        outflow_dollars = Decimal(str(abs(amount_milliunits) / 1000))
-        total_outflow += outflow_dollars
+        total_outflow += Decimal(abs(amount_milliunits)) / Decimal(1000)
 
-        subtransactions = proposal.get("subtransactions", [])
+        subtransactions = proposal["subtransactions"]
         if len(subtransactions) == 1:
             flat_proposals += 1
         elif len(subtransactions) >= 2:
             split_proposals += 1
 
-        has_null_category = any(s.get("category_id") is None for s in subtransactions)
-        if has_null_category:
+        if "applied_at" in proposal:
+            applied_previously += 1
+        elif any(s.get("category_id") is None for s in subtransactions):
             skipped_uncategorized += 1
 
         for subtxn in subtransactions:
@@ -144,23 +147,25 @@ def summarize_changeset(changeset: dict) -> ChangesetSummary:
                 allocated_amount = Decimal(str(subtxn.get("allocated_amount", "0")))
                 by_category[category_name] = by_category.get(category_name, Decimal("0")) + allocated_amount
 
-    # Process non-Amazon flat proposals
-    for proposal in changeset.get("non_amazon", {}).get("proposals", []):
+    for proposal in changeset["non_amazon"]["proposals"]:
         non_amazon_proposals += 1
         total_proposals += 1
 
-        # Only count categorized proposals in outflow
-        if proposal.get("category_id") is not None:
-            flat_proposals += 1
-            amount_dollars = proposal.get("amount_dollars")
-            if amount_dollars is not None:
-                amount_decimal = Decimal(str(amount_dollars))
-                total_outflow += abs(amount_decimal)
-                category_name = proposal.get("category_name")
-                if category_name:
-                    by_category[category_name] = by_category.get(category_name, Decimal("0")) + abs(amount_decimal)
-        else:
+        if "applied_at" in proposal:
+            applied_previously += 1
+        elif proposal.get("category_id") is None:
             skipped_uncategorized += 1
+
+        if proposal.get("category_id") is None:
+            continue
+
+        amount_dollars = proposal.get("amount_dollars")
+        if amount_dollars is not None:
+            amount_decimal = Decimal(str(amount_dollars))
+            total_outflow += abs(amount_decimal)
+            category_name = proposal.get("category_name")
+            if category_name:
+                by_category[category_name] = by_category.get(category_name, Decimal("0")) + abs(amount_decimal)
 
     return ChangesetSummary(
         total_proposals=total_proposals,
@@ -324,7 +329,8 @@ def apply_changeset(
         bak_path.write_text(changeset_path.read_text())
 
     changeset = load_changeset(changeset_path)
-    proposals = changeset.get("amazon", {}).get("proposed_splits", [])
+    amazon_splits = changeset["amazon"]["proposed_splits"]
+    non_amazon_flats = changeset["non_amazon"]["proposals"]
 
     applied = []
     skipped = []
@@ -332,16 +338,27 @@ def apply_changeset(
     aborted = False
     abort_reason = None
 
-    for i, proposal in enumerate(proposals):
+    work_items = (
+        [("amazon", i, p) for i, p in enumerate(amazon_splits)]
+        + [("non_amazon", j, p) for j, p in enumerate(non_amazon_flats)]
+    )
+
+    for source, idx, proposal in work_items:
         txn_id = proposal["transaction_id"]
 
         if "applied_at" in proposal:
             skipped.append({"txn_id": txn_id, "reason": f"already applied at {proposal['applied_at']}"})
             continue
 
-        patch_body = proposal_to_patch_body(proposal)
+        if source == "amazon":
+            patch_body = proposal_to_patch_body(proposal)
+            uncategorized_reason = "contains uncategorized items"
+        else:
+            patch_body = flat_proposal_to_patch_body(proposal)
+            uncategorized_reason = "uncategorized"
+
         if patch_body is None:
-            skipped.append({"txn_id": txn_id, "reason": "contains uncategorized items"})
+            skipped.append({"txn_id": txn_id, "reason": uncategorized_reason})
             continue
 
         if dry_run:
@@ -350,15 +367,20 @@ def apply_changeset(
 
         try:
             client.update_transaction(budget_id, txn_id, patch_body)
-            changeset["amazon"]["proposed_splits"][i]["applied_at"] = datetime.now().isoformat()
+            if source == "amazon":
+                changeset["amazon"]["proposed_splits"][idx]["applied_at"] = datetime.now().isoformat()
+            else:
+                changeset["non_amazon"]["proposals"][idx]["applied_at"] = datetime.now().isoformat()
             changeset_path.write_text(json.dumps(changeset, indent=2, default=_json_default))
 
-            subtxn_count = len(patch_body.get("subtransactions", [1]))
-            applied.append({
-                "txn_id": txn_id,
-                "type": "split" if "subtransactions" in patch_body else "flat",
-                "subtxn_count": subtxn_count,
-            })
+            if "subtransactions" in patch_body:
+                applied.append({
+                    "txn_id": txn_id,
+                    "type": "split",
+                    "subtxn_count": len(patch_body["subtransactions"]),
+                })
+            else:
+                applied.append({"txn_id": txn_id, "type": "flat", "subtxn_count": 1})
         except YNABRateLimitError as e:
             failed.append({
                 "txn_id": txn_id,
@@ -401,12 +423,12 @@ def apply_changeset(
 
     timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
     report_dir.mkdir(parents=True, exist_ok=True)
-    report_path = report_dir / f"amazon-confirmed-{timestamp}.json"
+    report_path = report_dir / f"enrich-confirmed-{timestamp}.json"
 
     report = ApplyReport(
         changeset_path=str(changeset_path),
         completed_at=datetime.now().isoformat(),
-        total=len(proposals),
+        total=len(amazon_splits) + len(non_amazon_flats),
         applied=applied,
         skipped=skipped,
         failed=failed,
@@ -420,16 +442,16 @@ def apply_changeset(
 
 
 def _print_summary(changeset: dict, summary: ChangesetSummary, budget_name: str, path: Path) -> None:
-    timestamp = changeset.get("metadata", {}).get("timestamp", changeset.get("generated_at", "?"))
+    timestamp = changeset["metadata"]["timestamp"]
     print(f"Changeset:        {path}")
     print(f"Generated:        {timestamp}")
     print(f"Budget:           {budget_name}")
     print(f"Total proposals:  {summary.total_proposals}")
-    print(f"  Splits (>=2):   {summary.split_proposals}")
-    print(f"  Flats (1):      {summary.flat_proposals}")
-    print(f"  Non-Amazon:     {summary.non_amazon_proposals}")
-    print(f"  Uncategorized:  {summary.skipped_uncategorized}")
-    print(f"  Resume (done):  {summary.applied_previously}")
+    print(f"  Amazon splits (>=2):  {summary.split_proposals}")
+    print(f"  Amazon flats (1):     {summary.flat_proposals}")
+    print(f"  Non-Amazon flats:     {summary.non_amazon_proposals}")
+    print(f"  Uncategorized:        {summary.skipped_uncategorized}")
+    print(f"  Resume (done):        {summary.applied_previously}")
     print(f"Total outflow:    ${summary.total_outflow_dollars:,.2f}")
     if summary.by_category:
         print("By category:")
@@ -455,9 +477,9 @@ def main(argv: list[str] | None = None) -> int:
       3 — pre-flight failure (missing file, missing env var, etc.)
     """
     parser = argparse.ArgumentParser(
-        description="Apply an Amazon changeset to YNAB via PATCH /transactions."
+        description="Apply an enrich-changeset to YNAB via PATCH /transactions."
     )
-    parser.add_argument("changeset", type=Path, help="path to amazon-changeset-*.json")
+    parser.add_argument("changeset", type=Path, help="path to enrich-changeset-*.json")
     parser.add_argument("--dry-run", action="store_true", help="show what would change; do not call YNAB")
     parser.add_argument("--yes", action="store_true", help="skip interactive confirmation")
     parser.add_argument("--throttle", type=float, default=0.5, help="seconds between PATCH calls")

@@ -662,15 +662,30 @@ def test_apply_dry_run_makes_no_patch_calls(apply_changeset_path, mock_client, t
     assert any(s.get("reason") == "dry run" for s in report.skipped)
 
 
+def _applyable_count(cs):
+    """Count proposals (Amazon splits + non_amazon flats) that would be PATCHed."""
+    amazon_applyable = sum(
+        1 for p in cs["amazon"]["proposed_splits"]
+        if "applied_at" not in p
+        and all(s.get("category_id") is not None for s in p["subtransactions"])
+    )
+    non_amazon_applyable = sum(
+        1 for p in cs["non_amazon"]["proposals"]
+        if "applied_at" not in p and p.get("category_id") is not None
+    )
+    return amazon_applyable + non_amazon_applyable
+
+
 def test_apply_skips_proposals_with_applied_at(apply_changeset_path, mock_client, tmp_path):
     from amazon_confirm import apply_changeset
     cs = _read_changeset(apply_changeset_path)
     cs["amazon"]["proposed_splits"][0]["applied_at"] = "2026-05-14T10:00:00"
     apply_changeset_path.write_text(json.dumps(cs))
+    expected_calls = _applyable_count(cs)
     report = apply_changeset(apply_changeset_path, mock_client, "budget-1", report_dir=tmp_path)
     skip_reasons = [s["reason"] for s in report.skipped]
     assert any("already applied" in r for r in skip_reasons)
-    assert mock_client.update_transaction.call_count == len(cs["amazon"]["proposed_splits"]) - 1
+    assert mock_client.update_transaction.call_count == expected_calls
 
 
 def test_apply_skips_proposals_with_null_category(apply_changeset_path, mock_client, tmp_path):
@@ -678,9 +693,10 @@ def test_apply_skips_proposals_with_null_category(apply_changeset_path, mock_cli
     cs = _read_changeset(apply_changeset_path)
     cs["amazon"]["proposed_splits"][0]["subtransactions"][0]["category_id"] = None
     apply_changeset_path.write_text(json.dumps(cs))
+    expected_calls = _applyable_count(cs)
     report = apply_changeset(apply_changeset_path, mock_client, "budget-1", report_dir=tmp_path)
     assert any("uncategorized" in s["reason"] for s in report.skipped)
-    assert mock_client.update_transaction.call_count == len(cs["amazon"]["proposed_splits"]) - 1
+    assert mock_client.update_transaction.call_count == expected_calls
 
 
 def test_apply_marks_applied_at_on_success(apply_changeset_path, mock_client, tmp_path):
@@ -730,11 +746,12 @@ def test_apply_continues_after_409(apply_changeset_path, mock_client, tmp_path):
 
     mock_client.update_transaction.side_effect = side_effect
     cs = _read_changeset(apply_changeset_path)
+    expected_applyable = _applyable_count(cs)
     report = apply_changeset(apply_changeset_path, mock_client, "budget-1", report_dir=tmp_path)
     assert len(report.failed) == 1
     assert report.failed[0]["http_status"] == 409
     assert not report.aborted
-    assert len(report.applied) == len(cs["amazon"]["proposed_splits"]) - 1
+    assert len(report.applied) == expected_applyable - 1
 
 
 def test_apply_continues_after_400_locked(apply_changeset_path, mock_client, tmp_path):
@@ -796,16 +813,18 @@ def test_apply_throttle_sleeps_between_calls(apply_changeset_path, mock_client, 
     sleeps = []
     monkeypatch.setattr(amazon_confirm.time, "sleep", lambda s: sleeps.append(s))
     cs = _read_changeset(apply_changeset_path)
+    expected_applyable = _applyable_count(cs)
     apply_changeset(apply_changeset_path, mock_client, "budget-1", throttle_seconds=0.75, report_dir=tmp_path)
     assert all(s == 0.75 for s in sleeps)
-    assert len(sleeps) == len(cs["amazon"]["proposed_splits"])
+    assert len(sleeps) == expected_applyable
 
 
 def test_apply_writes_summary_report(apply_changeset_path, mock_client, tmp_path):
     from amazon_confirm import apply_changeset
     apply_changeset(apply_changeset_path, mock_client, "budget-1", report_dir=tmp_path)
-    reports = list(tmp_path.glob("amazon-confirmed-*.json"))
+    reports = list(tmp_path.glob("enrich-confirmed-*.json"))
     assert len(reports) == 1
+    assert list(tmp_path.glob("amazon-confirmed-*.json")) == []
     body = json.loads(reports[0].read_text())
     assert "applied" in body
     assert "total" in body
@@ -842,11 +861,11 @@ def test_apply_uses_report_dir_not_real_cache(apply_changeset_path, mock_client,
     repo root)."""
     from amazon_confirm import apply_changeset
     repo_root = Path("/home/jflournoy/code/finances-helper")
-    real_cache_before = set((repo_root / "data" / "cache").glob("amazon-confirmed-*.json")) if (repo_root / "data" / "cache").exists() else set()
+    real_cache_before = set((repo_root / "data" / "cache").glob("enrich-confirmed-*.json")) if (repo_root / "data" / "cache").exists() else set()
     apply_changeset(apply_changeset_path, mock_client, "budget-1", report_dir=tmp_path)
-    real_cache_after = set((repo_root / "data" / "cache").glob("amazon-confirmed-*.json")) if (repo_root / "data" / "cache").exists() else set()
+    real_cache_after = set((repo_root / "data" / "cache").glob("enrich-confirmed-*.json")) if (repo_root / "data" / "cache").exists() else set()
     assert real_cache_after == real_cache_before, "apply_changeset must not write to real data/cache when report_dir is provided"
-    assert list(tmp_path.glob("amazon-confirmed-*.json"))
+    assert list(tmp_path.glob("enrich-confirmed-*.json"))
 
 
 def test_apply_propagates_client_side_sum_invariant_error(tmp_path, mock_client):
@@ -1064,3 +1083,134 @@ def test_load_then_summarize_enrich_changeset():
     expected_non_amazon = len(changeset["non_amazon"]["proposals"])
     assert summary.non_amazon_proposals == expected_non_amazon
     assert summary.total_outflow_dollars >= Decimal("0")
+
+
+# Issues #177-#178 + review follow-ups: non_amazon apply path, tier validation, no silent fallbacks
+
+
+def test_load_changeset_non_amazon_proposal_missing_tier(tmp_path):
+    """Non-Amazon proposals must include a 'tier' field."""
+    fixture = load_fixture("enrich_changeset_sample.json")
+    del fixture["non_amazon"]["proposals"][0]["tier"]
+    path = tmp_path / "changeset.json"
+    path.write_text(json.dumps(fixture))
+    with pytest.raises(ValueError, match="tier"):
+        load_changeset(path)
+
+
+def test_print_summary_raises_on_missing_metadata_timestamp(tmp_path):
+    """_print_summary does not silently fall back to '?' when metadata.timestamp is missing.
+
+    Covers both 'metadata key absent' and 'timestamp key absent within metadata'.
+    """
+    from amazon_confirm import _print_summary
+    fake_summary = ChangesetSummary(
+        total_proposals=0, split_proposals=0, flat_proposals=0,
+        skipped_uncategorized=0, applied_previously=0,
+        total_outflow_dollars=Decimal("0"), by_category={},
+        non_amazon_proposals=0,
+    )
+    with pytest.raises(KeyError):
+        _print_summary({}, fake_summary, "My Budget", tmp_path / "x.json")
+    with pytest.raises(KeyError):
+        _print_summary({"metadata": {}}, fake_summary, "My Budget", tmp_path / "x.json")
+
+
+def test_apply_processes_both_amazon_and_non_amazon(apply_changeset_path, mock_client, tmp_path):
+    """apply_changeset PATCHes both Amazon splits and categorized non_amazon flats."""
+    from amazon_confirm import apply_changeset
+    cs = _read_changeset(apply_changeset_path)
+    expected_calls = _applyable_count(cs)
+    report = apply_changeset(apply_changeset_path, mock_client, "budget-1", report_dir=tmp_path)
+    assert mock_client.update_transaction.call_count == expected_calls
+    assert report.total == len(cs["amazon"]["proposed_splits"]) + len(cs["non_amazon"]["proposals"])
+
+
+def test_apply_non_amazon_flat_patch_body_is_category_only(apply_changeset_path, mock_client, tmp_path):
+    """The PATCH body for a non_amazon flat contains exactly {'category_id': ...}."""
+    from amazon_confirm import apply_changeset
+    cs = _read_changeset(apply_changeset_path)
+    non_amazon_categorized_ids = {
+        p["transaction_id"]
+        for p in cs["non_amazon"]["proposals"]
+        if p.get("category_id") is not None
+    }
+    apply_changeset(apply_changeset_path, mock_client, "budget-1", report_dir=tmp_path)
+    flat_patch_calls = [
+        call for call in mock_client.update_transaction.call_args_list
+        if call.args[1] in non_amazon_categorized_ids
+    ]
+    assert len(flat_patch_calls) == len(non_amazon_categorized_ids)
+    for call in flat_patch_calls:
+        body = call.args[2]
+        assert set(body.keys()) == {"category_id"}, f"non_amazon flat body should only contain category_id, got {body}"
+
+
+def test_apply_persists_applied_at_to_non_amazon(apply_changeset_path, mock_client, tmp_path):
+    """applied_at is written to non_amazon.proposals[j] for each successful flat PATCH."""
+    from amazon_confirm import apply_changeset
+    apply_changeset(apply_changeset_path, mock_client, "budget-1", report_dir=tmp_path)
+    cs_after = _read_changeset(apply_changeset_path)
+    for proposal in cs_after["non_amazon"]["proposals"]:
+        if proposal.get("category_id") is not None:
+            assert "applied_at" in proposal, f"categorized non_amazon proposal {proposal['transaction_id']} missing applied_at"
+        else:
+            assert "applied_at" not in proposal, "uncategorized proposal must not be marked applied_at"
+
+
+def test_apply_skips_uncategorized_non_amazon(apply_changeset_path, mock_client, tmp_path):
+    """Uncategorized non_amazon proposals (category_id=None) are skipped, not PATCHed."""
+    from amazon_confirm import apply_changeset
+    cs = _read_changeset(apply_changeset_path)
+    uncategorized_ids = {
+        p["transaction_id"]
+        for p in cs["non_amazon"]["proposals"]
+        if p.get("category_id") is None
+    }
+    assert uncategorized_ids, "fixture must contain at least one uncategorized non_amazon proposal"
+    apply_changeset(apply_changeset_path, mock_client, "budget-1", report_dir=tmp_path)
+    patched_txn_ids = {call.args[1] for call in mock_client.update_transaction.call_args_list}
+    assert uncategorized_ids.isdisjoint(patched_txn_ids)
+
+
+def test_apply_resume_skips_non_amazon_with_applied_at(apply_changeset_path, mock_client, tmp_path):
+    """A non_amazon proposal with applied_at is skipped on re-run."""
+    from amazon_confirm import apply_changeset
+    cs = _read_changeset(apply_changeset_path)
+    for p in cs["non_amazon"]["proposals"]:
+        if p.get("category_id") is not None:
+            p["applied_at"] = "2026-05-14T10:00:00"
+            preapplied_id = p["transaction_id"]
+            break
+    apply_changeset_path.write_text(json.dumps(cs))
+    apply_changeset(apply_changeset_path, mock_client, "budget-1", report_dir=tmp_path)
+    patched_txn_ids = {call.args[1] for call in mock_client.update_transaction.call_args_list}
+    assert preapplied_id not in patched_txn_ids
+
+
+def test_summarize_does_not_double_count_amazon_flat_as_non_amazon():
+    """An Amazon single-subtxn proposal counts in flat_proposals but NOT in non_amazon_proposals."""
+    cs = {
+        "version": 1,
+        "kind": "enrich-changeset",
+        "metadata": {"timestamp": "2026-05-15T00:00:00Z", "budget_id": "b1"},
+        "amazon": {
+            "proposed_splits": [
+                {
+                    "transaction_id": "amzn-1",
+                    "parent_ynab_transaction": {"id": "amzn-1", "amount": -10000, "memo": "x"},
+                    "subtransactions": [
+                        {"item": {"asin": "A", "product_name": "X"}, "allocated_amount": "10.00",
+                         "category_id": "c1", "category_name": "Cat1"},
+                    ],
+                },
+            ],
+        },
+        "non_amazon": {"proposals": []},
+    }
+    summary = summarize_changeset(cs)
+    assert summary.flat_proposals == 1
+    assert summary.non_amazon_proposals == 0
+    assert summary.split_proposals == 0
+
+

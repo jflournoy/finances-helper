@@ -369,6 +369,60 @@ class TestWriteUnifiedChangeset:
             assert label in markdown, f"Missing label: {label}"
 
 
+    def test_amount_dollars_str_exact_from_milliunits(self):
+        """_amount_dollars_str converts int milliunits to exact decimal string.
+
+        Regression test for the float-precision drift bug: a txn whose dollar
+        amount would round to 0.30000000000000004 via float arithmetic must
+        emit exactly '0.30' (or equivalent exact decimal) when derived from
+        milliunits.
+        """
+        from enrich import _amount_dollars_str
+        from decimal import Decimal
+        assert Decimal(_amount_dollars_str({"amount": 300})) == Decimal("0.3")
+        assert Decimal(_amount_dollars_str({"amount": -50000})) == Decimal("-50")
+        assert Decimal(_amount_dollars_str({"amount": 0})) == Decimal(0)
+        s = _amount_dollars_str({"amount": 4250})
+        assert "0000000" not in s
+        assert Decimal(s) == Decimal("4.25")
+        assert _amount_dollars_str({}) is None
+        assert _amount_dollars_str({"amount_dollars": "42.50"}) == "42.50"
+        with pytest.raises(TypeError, match="precision drift"):
+            _amount_dollars_str({"amount_dollars": 0.1 + 0.2})
+
+    def test_write_unified_changeset_amount_dollars_is_exact_decimal(self, tmp_path):
+        """amount_dollars in written changeset is derived from integer milliunits.
+
+        Specifically: a txn with amount=-300 milliunits emits '-0.300', not
+        '-0.30000000000000004'. This catches float-to-decimal drift.
+        """
+        from enrich import write_unified_changeset
+        from datetime import datetime
+        from categorizer import CategoryResult
+
+        result = CategoryResult(
+            transaction_id="t1",
+            category_id="cat1",
+            category_name="X",
+            tier="history",
+            confidence=0.9,
+            rationale="r",
+            prior_strength=1,
+        )
+        source_txns = [
+            {"id": "t1", "payee_name": "P", "amount": -300, "date": "2026-04-01"},
+        ]
+        _, json_path = write_unified_changeset(
+            flat_results=[result], skipped=[], unmatched_amazon=[], split_proposals=[],
+            source_txns=source_txns, budget_id="b", since_date="2026-03-01",
+            days_back=30, K=10, confidence_threshold=0.5, dump_path=None,
+            out_dir=tmp_path, now=datetime(2026, 4, 27, 14, 30, 0),
+        )
+        payload = json.loads(json_path.read_text())
+        amt = payload["non_amazon"]["proposals"][0]["amount_dollars"]
+        assert "0000000" not in amt, f"float-drift artifact in amount_dollars: {amt!r}"
+        assert Decimal(amt) == Decimal("-0.3")
+
     def test_write_unified_changeset_serializes_flat_results(self, tmp_path):
         """flat_results CategoryResult objects are serialized into non_amazon.proposals."""
         from enrich import write_unified_changeset

@@ -25,6 +25,31 @@ from amazon_matcher import (
 logger = logging.getLogger(__name__)
 
 
+def _amount_dollars_str(txn: dict) -> str | None:
+    """Format a txn's amount as an exact decimal-dollar string.
+
+    Prefers integer milliunits (`txn["amount"]`) for exact computation. Falls
+    back to a pre-existing string `amount_dollars` (used in some test inputs).
+    Refuses a float `amount_dollars` — those are the source of the precision
+    bug this helper exists to prevent.
+
+    Returns None only if both keys are absent.
+    """
+    milliunits = txn.get("amount")
+    if isinstance(milliunits, int):
+        return format(Decimal(milliunits) / Decimal(1000), "f")
+    existing = txn.get("amount_dollars")
+    if existing is None:
+        return None
+    if isinstance(existing, str):
+        return existing
+    raise TypeError(
+        f"amount_dollars must be a str or derivable from int milliunits; "
+        f"got {type(existing).__name__}={existing!r}. Float values cause "
+        f"precision drift — fix the producer."
+    )
+
+
 def _print_unified_summary(
     dump_path: Path | None,
     since_date: str,
@@ -156,7 +181,7 @@ def write_unified_changeset(
         proposals.append({
             "transaction_id": result.transaction_id,
             "payee_name": txn.get("payee_name"),
-            "amount_dollars": txn.get("amount_dollars"),
+            "amount_dollars": _amount_dollars_str(txn),
             "date": txn.get("date"),
             "category_id": result.category_id,
             "category_name": result.category_name,
@@ -171,7 +196,7 @@ def write_unified_changeset(
         {
             "id": t.get("id"),
             "payee_name": t.get("payee_name"),
-            "amount_dollars": t.get("amount_dollars"),
+            "amount_dollars": _amount_dollars_str(t),
             "date": t.get("date"),
         }
         for t in skipped
@@ -184,7 +209,7 @@ def write_unified_changeset(
         unmatched_ynab.append({
             "transaction_id": txn.get("id"),
             "payee_name": txn.get("payee_name"),
-            "amount_dollars": txn.get("amount_dollars"),
+            "amount_dollars": _amount_dollars_str(txn),
             "date": txn.get("date"),
             "reason": reason,
         })

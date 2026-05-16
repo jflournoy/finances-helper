@@ -97,40 +97,45 @@
         "transaction_id": "bbbbbbbb-0000-0000-0000-000000000011",
         "payee_name": "Whole Foods Market",
         "amount_dollars": "42.50",
-        "existing_memo": "Groceries",
+        "date": "2026-05-09",
         "category_id": "cccccccc-0000-0000-0000-000000000001",
         "category_name": "Groceries",
+        "tier": "history",
         "confidence": 0.88,
-        "rationale": "Payee history confirms Groceries category"
+        "rationale": "Payee history confirms Groceries category",
+        "prior_strength": 0.92
       },
       {
         "transaction_id": "bbbbbbbb-0000-0000-0000-000000000012",
         "payee_name": "Acme Corp Consulting",
         "amount_dollars": "150.00",
-        "existing_memo": "Professional Services",
+        "date": "2026-05-11",
         "category_id": null,
         "category_name": null,
+        "tier": "claude",
         "confidence": 0.0,
-        "rationale": "No payee history and fuzzy match below threshold; skipped"
+        "rationale": "No payee history and fuzzy match below threshold; skipped",
+        "prior_strength": null
       },
       {
         "transaction_id": "bbbbbbbb-0000-0000-0000-000000000013",
         "payee_name": "CVS Pharmacy",
         "amount_dollars": null,
-        "existing_memo": "Pharmacy - amount unknown",
+        "date": "2026-05-13",
         "category_id": "cccccccc-0000-0000-0000-000000000003",
         "category_name": "Health",
+        "tier": "fuzzy",
         "confidence": 0.75,
-        "rationale": "Payee history, but amount missing from transaction"
+        "rationale": "Payee history, but amount missing from transaction",
+        "prior_strength": 0.65
       }
     ],
     "skipped_transfers": [
       {
-        "transaction_id": "bbbbbbbb-0000-0000-0000-000000000014",
-        "from_account": "Checking",
-        "to_account": "Savings",
+        "id": "bbbbbbbb-0000-0000-0000-000000000014",
+        "payee_name": "Transfer : Savings",
         "amount_dollars": "500.00",
-        "reason": "Transfer between internal accounts"
+        "date": "2026-05-07"
       }
     ]
   }
