@@ -1148,6 +1148,116 @@ def test_flat_proposal_to_patch_body_returns_none_when_uncategorized():
     assert result is None
 
 
+# Auto-approval threshold tests (AUTO_APPROVE_UNDER_DOLLARS = 100)
+
+
+def test_flat_proposal_auto_approved_when_amount_below_threshold():
+    from amazon_confirm import flat_proposal_to_patch_body
+    proposal = {"transaction_id": "t1", "category_id": "cat-1", "amount_dollars": "-42.50"}
+    body = flat_proposal_to_patch_body(proposal)
+    assert body == {"category_id": "cat-1", "approved": True}
+
+
+def test_flat_proposal_not_approved_when_amount_at_threshold():
+    """Exactly $100 must NOT auto-approve (strict less-than gate)."""
+    from amazon_confirm import flat_proposal_to_patch_body
+    proposal = {"transaction_id": "t1", "category_id": "cat-1", "amount_dollars": "-100.00"}
+    body = flat_proposal_to_patch_body(proposal)
+    assert body == {"category_id": "cat-1"}
+
+
+def test_flat_proposal_not_approved_when_amount_above_threshold():
+    from amazon_confirm import flat_proposal_to_patch_body
+    proposal = {"transaction_id": "t1", "category_id": "cat-1", "amount_dollars": "-369"}
+    body = flat_proposal_to_patch_body(proposal)
+    assert body == {"category_id": "cat-1"}
+
+
+def test_flat_proposal_inflow_auto_approved_when_under_threshold():
+    """Positive amounts (inflows) use |amount| so a $0.16 interest deposit auto-approves."""
+    from amazon_confirm import flat_proposal_to_patch_body
+    proposal = {"transaction_id": "t1", "category_id": "cat-1", "amount_dollars": "0.16"}
+    body = flat_proposal_to_patch_body(proposal)
+    assert body == {"category_id": "cat-1", "approved": True}
+
+
+def test_flat_proposal_inflow_not_approved_when_at_or_above_threshold():
+    """A $7500 paycheck deposit (positive) stays unapproved."""
+    from amazon_confirm import flat_proposal_to_patch_body
+    proposal = {"transaction_id": "t1", "category_id": "cat-1", "amount_dollars": "7500"}
+    body = flat_proposal_to_patch_body(proposal)
+    assert body == {"category_id": "cat-1"}
+
+
+def test_flat_proposal_no_amount_dollars_does_not_auto_approve():
+    """Missing/None amount_dollars must fail safe: no approval."""
+    from amazon_confirm import flat_proposal_to_patch_body
+    proposal_missing = {"transaction_id": "t1", "category_id": "cat-1"}
+    assert flat_proposal_to_patch_body(proposal_missing) == {"category_id": "cat-1"}
+    proposal_none = {"transaction_id": "t1", "category_id": "cat-1", "amount_dollars": None}
+    assert flat_proposal_to_patch_body(proposal_none) == {"category_id": "cat-1"}
+
+
+def test_amazon_single_subtxn_auto_approved_when_small():
+    """Amazon proposal with one subtxn (becomes flat patch body): parent amount < $100 → approved."""
+    from amazon_confirm import proposal_to_patch_body
+    proposal = {
+        "transaction_id": "amzn-1",
+        "parent_ynab_transaction": {"id": "amzn-1", "amount": -25000, "memo": "Order ($25)"},
+        "subtransactions": [{"item": {"asin": "A", "product_name": "X"}, "allocated_amount": "25.00",
+                             "category_id": "c1", "category_name": "Cat"}],
+    }
+    body = proposal_to_patch_body(proposal)
+    assert body == {"category_id": "c1", "memo": "Order ($25)", "approved": True}
+
+
+def test_amazon_single_subtxn_not_approved_when_large():
+    from amazon_confirm import proposal_to_patch_body
+    proposal = {
+        "transaction_id": "amzn-1",
+        "parent_ynab_transaction": {"id": "amzn-1", "amount": -250000, "memo": "Order ($250)"},
+        "subtransactions": [{"item": {"asin": "A", "product_name": "X"}, "allocated_amount": "250.00",
+                             "category_id": "c1", "category_name": "Cat"}],
+    }
+    body = proposal_to_patch_body(proposal)
+    assert body == {"category_id": "c1", "memo": "Order ($250)"}
+
+
+def test_amazon_split_auto_approved_when_parent_small():
+    """Multi-subtxn split: gate uses PARENT amount, not max subtxn."""
+    from amazon_confirm import proposal_to_patch_body
+    proposal = {
+        "transaction_id": "amzn-1",
+        "parent_ynab_transaction": {"id": "amzn-1", "amount": -50000, "memo": ""},
+        "subtransactions": [
+            {"item": {"asin": "A", "product_name": "X"}, "allocated_amount": "25.00",
+             "category_id": "c1", "category_name": "Cat1"},
+            {"item": {"asin": "B", "product_name": "Y"}, "allocated_amount": "25.00",
+             "category_id": "c2", "category_name": "Cat2"},
+        ],
+    }
+    body = proposal_to_patch_body(proposal)
+    assert "subtransactions" in body
+    assert body.get("approved") is True
+
+
+def test_amazon_split_not_approved_when_parent_large():
+    from amazon_confirm import proposal_to_patch_body
+    proposal = {
+        "transaction_id": "amzn-1",
+        "parent_ynab_transaction": {"id": "amzn-1", "amount": -150000, "memo": ""},
+        "subtransactions": [
+            {"item": {"asin": "A", "product_name": "X"}, "allocated_amount": "100.00",
+             "category_id": "c1", "category_name": "Cat1"},
+            {"item": {"asin": "B", "product_name": "Y"}, "allocated_amount": "50.00",
+             "category_id": "c2", "category_name": "Cat2"},
+        ],
+    }
+    body = proposal_to_patch_body(proposal)
+    assert "subtransactions" in body
+    assert "approved" not in body
+
+
 def test_load_then_summarize_enrich_changeset():
     """Integration: load fixture → summarize_changeset; verify data flow."""
     changeset = load_changeset(Path("data/fixtures/enrich_changeset_sample.json"))
@@ -1211,8 +1321,8 @@ def test_apply_processes_both_amazon_and_non_amazon(apply_changeset_path, mock_c
 
 
 def test_apply_non_amazon_flat_patch_body_is_category_only(apply_changeset_path, mock_client, tmp_path):
-    """The PATCH body for a non_amazon flat contains exactly {'id', 'category_id'}
-    inside the batch payload."""
+    """The PATCH body for a non_amazon flat contains {'id', 'category_id'} and
+    optionally 'approved' (when |amount| < AUTO_APPROVE_UNDER_DOLLARS) — nothing else."""
     from amazon_confirm import apply_changeset
     cs = _read_changeset(apply_changeset_path)
     non_amazon_categorized_ids = {
@@ -1225,8 +1335,10 @@ def test_apply_non_amazon_flat_patch_body_is_category_only(apply_changeset_path,
     flat_updates = [u for u in sent if u["id"] in non_amazon_categorized_ids]
     assert len(flat_updates) == len(non_amazon_categorized_ids)
     for update in flat_updates:
-        assert set(update.keys()) == {"id", "category_id"}, (
-            f"non_amazon flat batch entry should only contain id+category_id, got {update}"
+        allowed = {"id", "category_id", "approved"}
+        assert set(update.keys()) <= allowed and {"id", "category_id"} <= set(update.keys()), (
+            f"non_amazon flat batch entry keys must be a subset of {allowed} "
+            f"and include id+category_id, got {update}"
         )
 
 

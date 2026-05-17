@@ -22,6 +22,17 @@ if TYPE_CHECKING:
 
 BATCH_SIZE = 200
 
+AUTO_APPROVE_UNDER_DOLLARS = Decimal("100")
+
+
+def _auto_approve(amount_dollars: Decimal) -> bool:
+    """True iff |amount| < AUTO_APPROVE_UNDER_DOLLARS.
+
+    Small-dollar txns flow through approved (no second look in YNAB);
+    larger txns stay unapproved and land in YNAB's green-dot review queue.
+    """
+    return abs(amount_dollars) < AUTO_APPROVE_UNDER_DOLLARS
+
 
 def load_changeset(path: Path) -> dict:
     """Load and validate an enrich-changeset JSON file.
@@ -246,13 +257,18 @@ def proposal_to_patch_body(proposal: dict) -> dict | None:
     if any(s.get("category_id") is None for s in subtransactions):
         return None
 
+    parent_amount_dollars = Decimal(proposal["parent_ynab_transaction"]["amount"]) / 1000
+
     if len(subtransactions) == 1:
         subtxn = subtransactions[0]
         parent_memo = proposal["parent_ynab_transaction"].get("memo", "")
-        return {
+        body = {
             "category_id": subtxn["category_id"],
             "memo": parent_memo,
         }
+        if _auto_approve(parent_amount_dollars):
+            body["approved"] = True
+        return body
 
     if len(subtransactions) >= 2:
         patch_subtxns = []
@@ -287,7 +303,10 @@ def proposal_to_patch_body(proposal: dict) -> dict | None:
                 f"subtransactions sum to {total_amount} but parent is {parent_amount}"
             )
 
-        return {"subtransactions": patch_subtxns}
+        body = {"subtransactions": patch_subtxns}
+        if _auto_approve(parent_amount_dollars):
+            body["approved"] = True
+        return body
 
     return None
 
@@ -296,17 +315,25 @@ def flat_proposal_to_patch_body(proposal: dict) -> dict | None:
     """Convert a non-Amazon flat proposal into a YNAB PATCH body.
 
     Returns None if the proposal is uncategorized (category_id is None).
-    Otherwise returns a minimal PATCH dict with only category_id.
+    Otherwise returns a minimal PATCH dict with the category_id (and
+    "approved": True when |amount| < AUTO_APPROVE_UNDER_DOLLARS).
 
     Args:
         proposal: A non_amazon.proposals entry.
 
     Returns:
-        {"category_id": "..."} if categorized, None if uncategorized.
+        {"category_id": "...", ["approved": True]} if categorized,
+        None if uncategorized.
     """
     if proposal.get("category_id") is None:
         return None
-    return {"category_id": proposal["category_id"]}
+    body = {"category_id": proposal["category_id"]}
+    raw_amount = proposal.get("amount_dollars")
+    if raw_amount is not None:
+        amount = Decimal(str(raw_amount))
+        if _auto_approve(amount):
+            body["approved"] = True
+    return body
 
 
 @dataclass
