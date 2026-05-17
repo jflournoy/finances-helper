@@ -148,3 +148,81 @@ def test_update_transaction_sandbox_real_patch(sandbox_client, patch_client, san
     found = next((t for t in txns if t["id"] == txn_id), None)
     assert found is not None
     assert found["category_id"] == cat_id
+
+
+@pytest.mark.integration
+def test_update_transactions_sandbox_real_patch(sandbox_client, patch_client, sandbox_budget_id, live_budget_id):
+    """Seed 3 real txns in Sandbox via sandbox_client.create_transactions,
+    then batch-PATCH them via patch_client.update_transactions (which has sandbox_mode=False).
+    Verify response order is not guaranteed but all txns are present.
+    """
+    from ynab_client import dollars_to_milliunits
+
+    categories = patch_client.get_categories(sandbox_budget_id)
+    cat_id = None
+    for group in categories:
+        for cat in group.get("categories", []):
+            if not cat.get("hidden"):
+                cat_id = cat["id"]
+                break
+        if cat_id:
+            break
+    assert cat_id, "No visible category found in Sandbox budget"
+
+    txns_to_create = [
+        {
+            "date": "2026-05-10",
+            "amount": dollars_to_milliunits(-15.50),
+            "payee_name": "Test Batch PATCH Target 1",
+            "memo": "PYTEST-BATCH-1",
+            "cleared": "uncleared",
+            "approved": False,
+            "account_id": "will-be-overridden",
+        },
+        {
+            "date": "2026-05-11",
+            "amount": dollars_to_milliunits(-20.00),
+            "payee_name": "Test Batch PATCH Target 2",
+            "memo": "PYTEST-BATCH-2",
+            "cleared": "uncleared",
+            "approved": False,
+            "account_id": "will-be-overridden",
+        },
+        {
+            "date": "2026-05-12",
+            "amount": dollars_to_milliunits(-10.75),
+            "payee_name": "Test Batch PATCH Target 3",
+            "memo": "PYTEST-BATCH-3",
+            "cleared": "uncleared",
+            "approved": False,
+            "account_id": "will-be-overridden",
+        },
+    ]
+    created_result = sandbox_client.create_transactions(live_budget_id, txns_to_create)
+    created_txns = created_result.get("transactions", [])
+    assert len(created_txns) == 3
+    txn_ids = [t["id"] for t in created_txns]
+
+    updates = [
+        {"id": txn_id, "memo": "PYTEST-BATCH-updated"}
+        for txn_id in txn_ids
+    ]
+    response = patch_client.update_transactions(sandbox_budget_id, updates)
+
+    assert "transactions" in response
+    response_txns = response["transactions"]
+    assert len(response_txns) == 3
+
+    response_by_id = {t["id"]: t for t in response_txns}
+    for txn_id in txn_ids:
+        assert txn_id in response_by_id, f"txn {txn_id} not in response"
+        assert response_by_id[txn_id]["memo"] == "PYTEST-BATCH-updated"
+
+    txns, _ = patch_client.get_account_transactions(
+        sandbox_budget_id,
+        sandbox_client._sandbox_account_id,
+    )
+    for txn_id in txn_ids:
+        found = next((t for t in txns if t["id"] == txn_id), None)
+        assert found is not None, f"txn {txn_id} not found in account"
+        assert found["memo"] == "PYTEST-BATCH-updated"
