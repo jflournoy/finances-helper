@@ -20,6 +20,8 @@ from ynab_client import YNABClient
 if TYPE_CHECKING:
     pass
 
+BATCH_SIZE = 200
+
 
 def load_changeset(path: Path) -> dict:
     """Load and validate an enrich-changeset JSON file.
@@ -379,11 +381,21 @@ def apply_changeset(
     aborted = False
     abort_reason = None
 
+    if throttle_seconds != 0:
+        import warnings
+        warnings.warn(
+            "throttle_seconds is ignored in batch mode (apply_changeset now uses "
+            "batch PATCH, reducing total requests from N to N/BATCH_SIZE).",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+
     work_items = (
         [("amazon", i, p) for i, p in enumerate(amazon_splits)]
         + [("non_amazon", j, p) for j, p in enumerate(non_amazon_flats)]
     )
 
+    batch_items = []
     for source, idx, proposal in work_items:
         txn_id = proposal["transaction_id"]
 
@@ -406,25 +418,25 @@ def apply_changeset(
             skipped.append({"txn_id": txn_id, "reason": "dry run"})
             continue
 
-        try:
-            client.update_transaction(budget_id, txn_id, patch_body)
-            if source == "amazon":
-                changeset["amazon"]["proposed_splits"][idx]["applied_at"] = datetime.now().isoformat()
-            else:
-                changeset["non_amazon"]["proposals"][idx]["applied_at"] = datetime.now().isoformat()
-            changeset_path.write_text(json.dumps(changeset, indent=2, default=_json_default))
+        batch_items.append((source, idx, txn_id, patch_body))
 
-            if "subtransactions" in patch_body:
-                applied.append({
-                    "txn_id": txn_id,
-                    "type": "split",
-                    "subtxn_count": len(patch_body["subtransactions"]),
-                })
-            else:
-                applied.append({"txn_id": txn_id, "type": "flat", "subtxn_count": 1})
+    for chunk_start in range(0, len(batch_items), BATCH_SIZE):
+        chunk = batch_items[chunk_start:chunk_start + BATCH_SIZE]
+        chunk_index = chunk_start // BATCH_SIZE
+
+        remaining = client.rate_limit_remaining()
+        if remaining is not None and remaining < rate_limit_floor:
+            aborted = True
+            abort_reason = f"rate limit floor breached: only {remaining} requests remaining"
+            break
+
+        updates = [{"id": txn_id, **patch_body} for (_, _, txn_id, patch_body) in chunk]
+        try:
+            response = client.update_transactions(budget_id, updates)
         except YNABRateLimitError as e:
             failed.append({
-                "txn_id": txn_id,
+                "chunk_index": chunk_index,
+                "chunk_size": len(chunk),
                 "http_status": 429,
                 "error_id": e.id,
                 "error_name": e.name,
@@ -433,34 +445,51 @@ def apply_changeset(
             aborted = True
             abort_reason = "rate limit exceeded"
             break
-        except (YNABValidationError, YNABConflictError, YNABNotFoundError) as e:
-            status = e.status_code or 500
+        except YNABValidationError as e:
             failed.append({
-                "txn_id": txn_id,
-                "http_status": status,
+                "chunk_index": chunk_index,
+                "chunk_size": len(chunk),
+                "http_status": 400,
                 "error_id": e.id,
                 "error_name": e.name,
                 "detail": e.detail,
             })
-        except YNABAPIError as e:
+            aborted = True
+            abort_reason = f"batch validation error: {e.detail}"
+            break
+        except (YNABConflictError, YNABNotFoundError, YNABAPIError) as e:
             failed.append({
-                "txn_id": txn_id,
+                "chunk_index": chunk_index,
+                "chunk_size": len(chunk),
                 "http_status": e.status_code or 500,
                 "error_id": e.id,
                 "error_name": e.name,
                 "detail": e.detail,
             })
             aborted = True
-            abort_reason = f"unexpected error: {e.name}"
+            abort_reason = f"batch error: {e.name}"
             break
 
-        remaining = client.rate_limit_remaining()
-        if remaining is not None and remaining < rate_limit_floor:
-            aborted = True
-            abort_reason = f"rate limit floor breached: only {remaining} requests remaining"
-            break
+        now_iso = datetime.now().isoformat()
+        response_by_id = {t["id"]: t for t in response.get("transactions", [])}
+        for source, idx, txn_id, patch_body in chunk:
+            if txn_id not in response_by_id:
+                raise RuntimeError(
+                    f"YNAB batch response missing transaction id {txn_id!r}. "
+                    f"Chunk applied per HTTP 2xx, but response omitted this id — "
+                    f"data integrity concern; investigate before retrying."
+                )
+            if source == "amazon":
+                changeset["amazon"]["proposed_splits"][idx]["applied_at"] = now_iso
+            else:
+                changeset["non_amazon"]["proposals"][idx]["applied_at"] = now_iso
+            applied.append({
+                "txn_id": txn_id,
+                "type": "split" if "subtransactions" in patch_body else "flat",
+                "subtxn_count": len(patch_body.get("subtransactions", [])) or 1,
+            })
 
-        time.sleep(throttle_seconds)
+        changeset_path.write_text(json.dumps(changeset, indent=2, default=_json_default))
 
     timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
     report_dir.mkdir(parents=True, exist_ok=True)

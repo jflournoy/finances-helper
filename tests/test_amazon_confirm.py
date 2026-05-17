@@ -8,7 +8,7 @@ import tempfile
 from pathlib import Path
 from decimal import Decimal
 from unittest.mock import patch, MagicMock
-from amazon_confirm import load_changeset, summarize_changeset, ChangesetSummary, ApplyReport
+from amazon_confirm import load_changeset, summarize_changeset, ChangesetSummary, ApplyReport, apply_changeset
 
 FIXTURES = Path("data/fixtures")
 
@@ -449,7 +449,7 @@ def test_cli_yes_skips_prompt(cli_changeset_path, fake_client_factory, monkeypat
     monkeypatch.delenv("YNAB_SANDBOX_MODE", raising=False)
     code = _run_main([str(cli_changeset_path), "--yes"], monkeypatch, tmp_path, stdin_text="")
     assert code == 0
-    called = sum(c.update_transaction.call_count for c in fake_client_factory["constructed"])
+    called = sum(c.update_transactions.call_count for c in fake_client_factory["constructed"])
     assert called > 0
 
 
@@ -469,7 +469,7 @@ def test_cli_prompt_y_proceeds(cli_changeset_path, fake_client_factory, monkeypa
     monkeypatch.delenv("YNAB_SANDBOX_MODE", raising=False)
     code = _run_main([str(cli_changeset_path)], monkeypatch, tmp_path, stdin_text="y\n")
     assert code == 0
-    called = sum(c.update_transaction.call_count for c in fake_client_factory["constructed"])
+    called = sum(c.update_transactions.call_count for c in fake_client_factory["constructed"])
     assert called > 0
 
 
@@ -675,7 +675,9 @@ def mock_client():
     client = MagicMock()
     client.sandbox_mode = False
     client.rate_limit_remaining.return_value = 199
-    client.update_transaction.return_value = {"id": "txn-1"}
+    def side_effect_update_transactions(budget_id, updates):
+        return {"transactions": [{"id": u["id"]} for u in updates]}
+    client.update_transactions.side_effect = side_effect_update_transactions
     return client
 
 
@@ -788,7 +790,7 @@ def test_apply_skips_proposals_with_applied_at(apply_changeset_path, mock_client
     report = apply_changeset(apply_changeset_path, mock_client, "budget-1", report_dir=tmp_path)
     skip_reasons = [s["reason"] for s in report.skipped]
     assert any("already applied" in r for r in skip_reasons)
-    assert mock_client.update_transaction.call_count == expected_calls
+    assert mock_client.update_transactions.call_count == expected_calls
 
 
 def test_apply_skips_proposals_with_null_category(apply_changeset_path, mock_client, tmp_path):
@@ -799,7 +801,7 @@ def test_apply_skips_proposals_with_null_category(apply_changeset_path, mock_cli
     expected_calls = _applyable_count(cs)
     report = apply_changeset(apply_changeset_path, mock_client, "budget-1", report_dir=tmp_path)
     assert any("uncategorized" in s["reason"] for s in report.skipped)
-    assert mock_client.update_transaction.call_count == expected_calls
+    assert mock_client.update_transactions.call_count == expected_calls
 
 
 def test_apply_marks_applied_at_on_success(apply_changeset_path, mock_client, tmp_path):
@@ -892,7 +894,7 @@ def test_apply_aborts_on_429(apply_changeset_path, mock_client, tmp_path):
     report = apply_changeset(apply_changeset_path, mock_client, "budget-1", report_dir=tmp_path)
     assert report.aborted
     assert "rate" in (report.abort_reason or "").lower()
-    assert mock_client.update_transaction.call_count == 2
+    assert mock_client.update_transactions.call_count == 2
     assert len(report.applied) == 1
     assert len(cs["amazon"]["proposed_splits"]) >= 2
 
@@ -906,7 +908,7 @@ def test_apply_aborts_when_rate_limit_floor_breached(apply_changeset_path, mock_
     report = apply_changeset(apply_changeset_path, mock_client, "budget-1", rate_limit_floor=5, report_dir=tmp_path)
     assert report.aborted
     assert "rate limit floor" in (report.abort_reason or "").lower()
-    assert mock_client.update_transaction.call_count == 2
+    assert mock_client.update_transactions.call_count == 2
 
 
 def test_apply_throttle_sleeps_between_calls(apply_changeset_path, mock_client, monkeypatch, tmp_path):
@@ -1225,7 +1227,7 @@ def test_apply_processes_both_amazon_and_non_amazon(apply_changeset_path, mock_c
     cs = _read_changeset(apply_changeset_path)
     expected_calls = _applyable_count(cs)
     report = apply_changeset(apply_changeset_path, mock_client, "budget-1", report_dir=tmp_path)
-    assert mock_client.update_transaction.call_count == expected_calls
+    assert mock_client.update_transactions.call_count == expected_calls
     assert report.total == len(cs["amazon"]["proposed_splits"]) + len(cs["non_amazon"]["proposals"])
 
 
@@ -1315,5 +1317,241 @@ def test_summarize_does_not_double_count_amazon_flat_as_non_amazon():
     assert summary.flat_proposals == 1
     assert summary.non_amazon_proposals == 0
     assert summary.split_proposals == 0
+
+
+# Issue #179: Batch PATCH with chunking
+
+
+def _make_changeset_with_flat_proposals(num_proposals, category_id="cat-123"):
+    """Helper to build a changeset with N flat proposals (all uncategorized=False)."""
+    return {
+        "version": 1,
+        "kind": "enrich-changeset",
+        "metadata": {"timestamp": "2026-05-17T00:00:00", "budget_id": "b1"},
+        "amazon": {"proposed_splits": []},
+        "non_amazon": {
+            "proposals": [
+                {
+                    "transaction_id": f"txn-{i}",
+                    "payee_name": f"Payee {i}",
+                    "category_id": category_id,
+                    "confidence": 0.9,
+                    "tier": "history",
+                }
+                for i in range(num_proposals)
+            ]
+        },
+    }
+
+
+def test_apply_batches_chunks_at_200(tmp_path):
+    """344 proposals → 2 calls to update_transactions (200 + 144)."""
+    changeset = _make_changeset_with_flat_proposals(344)
+    cs_path = tmp_path / "changeset.json"
+    cs_path.write_text(json.dumps(changeset))
+
+    client = MagicMock()
+    client.sandbox_mode = False
+    client.rate_limit_remaining.return_value = 150
+
+    def side_effect_update_transactions(budget_id, updates):
+        return {"transactions": [{"id": u["id"]} for u in updates]}
+
+    client.update_transactions.side_effect = side_effect_update_transactions
+
+    report = apply_changeset(cs_path, client, "b1", dry_run=False, throttle_seconds=0)
+
+    assert client.update_transactions.call_count == 2
+    calls = client.update_transactions.call_args_list
+    assert len(calls[0][0][1]) == 200
+    assert len(calls[1][0][1]) == 144
+
+    updated_cs = json.loads(cs_path.read_text())
+    assert len([p for p in updated_cs["non_amazon"]["proposals"] if "applied_at" in p]) == 344
+
+
+def test_apply_response_matched_by_id_not_order(tmp_path):
+    """Response txns in shuffled order; verify all marked applied_at."""
+    changeset = _make_changeset_with_flat_proposals(5)
+    cs_path = tmp_path / "changeset.json"
+    cs_path.write_text(json.dumps(changeset))
+
+    client = MagicMock()
+    client.sandbox_mode = False
+    client.rate_limit_remaining.return_value = 150
+
+    def side_effect_update_transactions(budget_id, updates):
+        response_txns = [{"id": u["id"]} for u in updates]
+        response_txns.reverse()
+        return {"transactions": response_txns}
+
+    client.update_transactions.side_effect = side_effect_update_transactions
+
+    report = apply_changeset(cs_path, client, "b1", dry_run=False, throttle_seconds=0)
+
+    updated_cs = json.loads(cs_path.read_text())
+    assert len([p for p in updated_cs["non_amazon"]["proposals"] if "applied_at" in p]) == 5
+
+
+def test_apply_resumes_at_chunk_boundary_on_rate_limit(tmp_path):
+    """2 chunks; 2nd raises YNABRateLimitError. Verify 1st chunk applied, 2nd not. Resume picks up 2nd."""
+    from ynab_client import YNABRateLimitError
+
+    changeset = _make_changeset_with_flat_proposals(250)
+    cs_path = tmp_path / "changeset.json"
+    cs_path.write_text(json.dumps(changeset))
+
+    client = MagicMock()
+    client.sandbox_mode = False
+    client.rate_limit_remaining.return_value = 150
+
+    call_count = [0]
+
+    def side_effect_update_transactions(budget_id, updates):
+        call_count[0] += 1
+        if call_count[0] == 1:
+            return {"transactions": [{"id": u["id"]} for u in updates]}
+        else:
+            raise YNABRateLimitError(429, detail="Rate limit")
+
+    client.update_transactions.side_effect = side_effect_update_transactions
+
+    report = apply_changeset(cs_path, client, "b1", dry_run=False, throttle_seconds=0)
+
+    assert report.aborted
+    assert report.abort_reason == "rate limit exceeded"
+    assert len(report.applied) == 200
+    assert len(report.failed) == 1
+
+    updated_cs = json.loads(cs_path.read_text())
+    applied_count = len([p for p in updated_cs["non_amazon"]["proposals"] if "applied_at" in p])
+    assert applied_count == 200
+
+    client.reset_mock()
+    call_count[0] = 0
+    client.rate_limit_remaining.return_value = 150
+
+    def side_effect_2nd_run(budget_id, updates):
+        return {"transactions": [{"id": u["id"]} for u in updates]}
+
+    client.update_transactions.side_effect = side_effect_2nd_run
+
+    report2 = apply_changeset(cs_path, client, "b1", dry_run=False, throttle_seconds=0)
+
+    assert client.update_transactions.call_count == 1
+    assert len(client.update_transactions.call_args_list[0][0][1]) == 50
+
+
+def test_apply_aborts_on_batch_validation_error(tmp_path):
+    """Batch raises YNABValidationError. No proposals marked applied."""
+    from ynab_client import YNABValidationError
+
+    changeset = _make_changeset_with_flat_proposals(5)
+    cs_path = tmp_path / "changeset.json"
+    cs_path.write_text(json.dumps(changeset))
+
+    client = MagicMock()
+    client.sandbox_mode = False
+    client.rate_limit_remaining.return_value = 150
+    client.update_transactions.side_effect = YNABValidationError(400, detail="invalid category_id")
+
+    report = apply_changeset(cs_path, client, "b1", dry_run=False, throttle_seconds=0)
+
+    assert report.aborted
+    assert "batch validation error" in report.abort_reason
+    assert "invalid category_id" in report.abort_reason
+    assert len(report.failed) == 1
+
+    updated_cs = json.loads(cs_path.read_text())
+    applied_count = len([p for p in updated_cs["non_amazon"]["proposals"] if "applied_at" in p])
+    assert applied_count == 0
+
+
+def test_apply_raises_on_missing_id_in_response(tmp_path):
+    """Response omits one txn id. Verify RuntimeError raised with missing id named."""
+    changeset = _make_changeset_with_flat_proposals(3)
+    cs_path = tmp_path / "changeset.json"
+    cs_path.write_text(json.dumps(changeset))
+
+    client = MagicMock()
+    client.sandbox_mode = False
+    client.rate_limit_remaining.return_value = 150
+
+    def side_effect_update_transactions(budget_id, updates):
+        return {"transactions": [{"id": u["id"]} for u in updates[:-1]]}
+
+    client.update_transactions.side_effect = side_effect_update_transactions
+
+    with pytest.raises(RuntimeError, match="missing transaction id"):
+        apply_changeset(cs_path, client, "b1", dry_run=False, throttle_seconds=0)
+
+
+def test_apply_persists_changeset_after_each_chunk(tmp_path):
+    """250 proposals (2 chunks); verify write_text called exactly 2 times."""
+    changeset = _make_changeset_with_flat_proposals(250)
+    cs_path = tmp_path / "changeset.json"
+    cs_path.write_text(json.dumps(changeset))
+
+    client = MagicMock()
+    client.sandbox_mode = False
+    client.rate_limit_remaining.return_value = 150
+
+    def side_effect_update_transactions(budget_id, updates):
+        return {"transactions": [{"id": u["id"]} for u in updates]}
+
+    client.update_transactions.side_effect = side_effect_update_transactions
+
+    original_write = cs_path.write_text
+
+    write_calls = []
+
+    def tracked_write(content):
+        write_calls.append(content)
+        original_write(content)
+
+    with patch.object(cs_path, "write_text", side_effect=tracked_write):
+        report = apply_changeset(cs_path, client, "b1", dry_run=False, throttle_seconds=0)
+
+    assert len(write_calls) == 2
+
+
+def test_apply_dry_run_makes_no_batch_calls(tmp_path):
+    """dry_run=True; verify update_transactions never called."""
+    changeset = _make_changeset_with_flat_proposals(5)
+    cs_path = tmp_path / "changeset.json"
+    cs_path.write_text(json.dumps(changeset))
+
+    client = MagicMock()
+    client.sandbox_mode = False
+
+    report = apply_changeset(cs_path, client, "b1", dry_run=True, throttle_seconds=0)
+
+    client.update_transactions.assert_not_called()
+    assert len(report.skipped) == 5
+    assert all(s["reason"] == "dry run" for s in report.skipped)
+
+
+def test_apply_skips_already_applied_before_chunking(tmp_path):
+    """100 with applied_at, 50 without; only 50 in update_transactions call."""
+    changeset = _make_changeset_with_flat_proposals(150)
+    for i in range(100):
+        changeset["non_amazon"]["proposals"][i]["applied_at"] = "2026-05-16T00:00:00"
+    cs_path = tmp_path / "changeset.json"
+    cs_path.write_text(json.dumps(changeset))
+
+    client = MagicMock()
+    client.sandbox_mode = False
+    client.rate_limit_remaining.return_value = 150
+
+    def side_effect_update_transactions(budget_id, updates):
+        return {"transactions": [{"id": u["id"]} for u in updates]}
+
+    client.update_transactions.side_effect = side_effect_update_transactions
+
+    report = apply_changeset(cs_path, client, "b1", dry_run=False, throttle_seconds=0)
+
+    assert client.update_transactions.call_count == 1
+    assert len(client.update_transactions.call_args_list[0][0][1]) == 50
+    assert len(report.skipped) == 100
 
 
