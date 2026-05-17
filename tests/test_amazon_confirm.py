@@ -394,7 +394,6 @@ def fake_client_factory(monkeypatch):
         mock.resolve_budget_id.return_value = "budget-uuid-123"
         mock.get_budget.return_value = {"id": "budget-uuid-123", "name": "My Budget"}
         mock.rate_limit_remaining.return_value = 199
-        mock.update_transaction.return_value = {"id": "txn-1"}
 
         def _default_update_transactions(budget_id, updates):
             return {"transactions": [{"id": u["id"]} for u in updates]}
@@ -445,7 +444,7 @@ def test_cli_dry_run_makes_no_writes(cli_changeset_path, fake_client_factory, mo
     code = _run_main([str(cli_changeset_path), "--dry-run", "--yes"], monkeypatch, tmp_path)
     assert code == 0
     for client in fake_client_factory["constructed"]:
-        client.update_transaction.assert_not_called()
+        client.update_transactions.assert_not_called()
 
 
 def test_cli_yes_skips_prompt(cli_changeset_path, fake_client_factory, monkeypatch, tmp_path):
@@ -465,7 +464,7 @@ def test_cli_prompt_n_exits_zero(cli_changeset_path, fake_client_factory, monkey
     code = _run_main([str(cli_changeset_path)], monkeypatch, tmp_path, stdin_text="n\n")
     assert code == 0
     for client in fake_client_factory["constructed"]:
-        client.update_transaction.assert_not_called()
+        client.update_transactions.assert_not_called()
 
 
 def test_cli_prompt_y_proceeds(cli_changeset_path, fake_client_factory, monkeypatch, tmp_path):
@@ -701,7 +700,7 @@ def test_apply_refuses_sandbox_mode(apply_changeset_path, mock_client, tmp_path)
     mock_client.sandbox_mode = True
     with pytest.raises(RuntimeError, match="sandbox"):
         apply_changeset(apply_changeset_path, mock_client, "budget-1", report_dir=tmp_path)
-    mock_client.update_transaction.assert_not_called()
+    mock_client.update_transactions.assert_not_called()
 
 
 def test_apply_creates_backup(apply_changeset_path, mock_client, tmp_path):
@@ -724,7 +723,7 @@ def test_apply_does_not_duplicate_backup(apply_changeset_path, mock_client, tmp_
 def test_apply_dry_run_makes_no_patch_calls(apply_changeset_path, mock_client, tmp_path):
     from amazon_confirm import apply_changeset
     report = apply_changeset(apply_changeset_path, mock_client, "budget-1", dry_run=True, report_dir=tmp_path)
-    mock_client.update_transaction.assert_not_called()
+    mock_client.update_transactions.assert_not_called()
     assert any(s.get("reason") == "dry run" for s in report.skipped)
 
 
@@ -925,7 +924,7 @@ def test_apply_handles_empty_proposed_splits(tmp_path, mock_client):
     assert report.total == 0
     assert report.applied == []
     assert report.failed == []
-    mock_client.update_transaction.assert_not_called()
+    mock_client.update_transactions.assert_not_called()
 
 
 def test_apply_uses_report_dir_not_real_cache(apply_changeset_path, mock_client, tmp_path, monkeypatch):
@@ -985,7 +984,7 @@ def test_apply_propagates_client_side_sum_invariant_error(tmp_path, mock_client)
     path.write_text(json.dumps(cs))
     with pytest.raises(ValueError, match="invariant"):
         apply_changeset(path, mock_client, "budget-1", report_dir=tmp_path)
-    mock_client.update_transaction.assert_not_called()
+    mock_client.update_transactions.assert_not_called()
 
 
 # Issue #176: enrich-changeset schema support — new tests
@@ -1341,7 +1340,7 @@ def test_apply_batches_chunks_at_200(tmp_path):
 
     client.update_transactions.side_effect = side_effect_update_transactions
 
-    report = apply_changeset(cs_path, client, "b1", dry_run=False, throttle_seconds=0)
+    report = apply_changeset(cs_path, client, "b1", dry_run=False, throttle_seconds=0, report_dir=tmp_path)
 
     assert client.update_transactions.call_count == 2
     calls = client.update_transactions.call_args_list
@@ -1369,7 +1368,7 @@ def test_apply_response_matched_by_id_not_order(tmp_path):
 
     client.update_transactions.side_effect = side_effect_update_transactions
 
-    report = apply_changeset(cs_path, client, "b1", dry_run=False, throttle_seconds=0)
+    report = apply_changeset(cs_path, client, "b1", dry_run=False, throttle_seconds=0, report_dir=tmp_path)
 
     updated_cs = json.loads(cs_path.read_text())
     assert len([p for p in updated_cs["non_amazon"]["proposals"] if "applied_at" in p]) == 5
@@ -1398,7 +1397,7 @@ def test_apply_resumes_at_chunk_boundary_on_rate_limit(tmp_path):
 
     client.update_transactions.side_effect = side_effect_update_transactions
 
-    report = apply_changeset(cs_path, client, "b1", dry_run=False, throttle_seconds=0)
+    report = apply_changeset(cs_path, client, "b1", dry_run=False, throttle_seconds=0, report_dir=tmp_path)
 
     assert report.aborted
     assert report.abort_reason == "rate limit exceeded"
@@ -1418,7 +1417,7 @@ def test_apply_resumes_at_chunk_boundary_on_rate_limit(tmp_path):
 
     client.update_transactions.side_effect = side_effect_2nd_run
 
-    report2 = apply_changeset(cs_path, client, "b1", dry_run=False, throttle_seconds=0)
+    report2 = apply_changeset(cs_path, client, "b1", dry_run=False, throttle_seconds=0, report_dir=tmp_path)
 
     assert client.update_transactions.call_count == 1
     assert len(client.update_transactions.call_args_list[0][0][1]) == 50
@@ -1437,7 +1436,7 @@ def test_apply_aborts_on_batch_validation_error(tmp_path):
     client.rate_limit_remaining.return_value = 150
     client.update_transactions.side_effect = YNABValidationError(400, detail="invalid category_id")
 
-    report = apply_changeset(cs_path, client, "b1", dry_run=False, throttle_seconds=0)
+    report = apply_changeset(cs_path, client, "b1", dry_run=False, throttle_seconds=0, report_dir=tmp_path)
 
     assert report.aborted
     assert "batch validation error" in report.abort_reason
@@ -1465,7 +1464,7 @@ def test_apply_raises_on_missing_id_in_response(tmp_path):
     client.update_transactions.side_effect = side_effect_update_transactions
 
     with pytest.raises(RuntimeError, match="missing transaction id"):
-        apply_changeset(cs_path, client, "b1", dry_run=False, throttle_seconds=0)
+        apply_changeset(cs_path, client, "b1", dry_run=False, throttle_seconds=0, report_dir=tmp_path)
 
 
 def test_apply_persists_changeset_after_each_chunk(tmp_path, monkeypatch):
@@ -1494,7 +1493,7 @@ def test_apply_persists_changeset_after_each_chunk(tmp_path, monkeypatch):
 
     monkeypatch.setattr(Path, "write_text", tracked_write)
 
-    report = apply_changeset(cs_path, client, "b1", dry_run=False, throttle_seconds=0)
+    report = apply_changeset(cs_path, client, "b1", dry_run=False, throttle_seconds=0, report_dir=tmp_path)
 
     assert len(write_calls) == 2
 
@@ -1508,7 +1507,7 @@ def test_apply_dry_run_makes_no_batch_calls(tmp_path):
     client = MagicMock()
     client.sandbox_mode = False
 
-    report = apply_changeset(cs_path, client, "b1", dry_run=True, throttle_seconds=0)
+    report = apply_changeset(cs_path, client, "b1", dry_run=True, throttle_seconds=0, report_dir=tmp_path)
 
     client.update_transactions.assert_not_called()
     assert len(report.skipped) == 5
@@ -1532,7 +1531,7 @@ def test_apply_skips_already_applied_before_chunking(tmp_path):
 
     client.update_transactions.side_effect = side_effect_update_transactions
 
-    report = apply_changeset(cs_path, client, "b1", dry_run=False, throttle_seconds=0)
+    report = apply_changeset(cs_path, client, "b1", dry_run=False, throttle_seconds=0, report_dir=tmp_path)
 
     assert client.update_transactions.call_count == 1
     assert len(client.update_transactions.call_args_list[0][0][1]) == 50
