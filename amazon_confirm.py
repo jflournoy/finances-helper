@@ -337,7 +337,7 @@ def apply_changeset(
     budget_id: str,
     *,
     dry_run: bool = False,
-    throttle_seconds: float = 0.5,
+    throttle_seconds: float = 0,
     rate_limit_floor: int = 5,
     report_dir: Path = Path("data/cache"),
 ) -> ApplyReport:
@@ -348,7 +348,9 @@ def apply_changeset(
         client: YNABClient instance (sandbox_mode must be False).
         budget_id: YNAB budget ID.
         dry_run: If True, validate but don't apply.
-        throttle_seconds: Delay between YNAB API calls.
+        throttle_seconds: Deprecated. Unused in batch mode; passing a non-zero
+            value emits a DeprecationWarning. Retained in the signature only
+            for backwards compatibility with callers that still pass it.
         rate_limit_floor: Abort if remaining requests fall below this.
         report_dir: Directory for the summary report (created if missing).
             Defaults to data/cache; tests should pass tmp_path.
@@ -558,7 +560,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("changeset", type=Path, help="path to enrich-changeset-*.json")
     parser.add_argument("--dry-run", action="store_true", help="show what would change; do not call YNAB")
     parser.add_argument("--yes", action="store_true", help="skip interactive confirmation")
-    parser.add_argument("--throttle", type=float, default=0.5, help="seconds between PATCH calls")
+    parser.add_argument("--throttle", type=float, default=0, help="deprecated: unused in batch mode")
     args = parser.parse_args(argv)
 
     if not args.changeset.exists():

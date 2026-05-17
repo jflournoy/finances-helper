@@ -395,6 +395,11 @@ def fake_client_factory(monkeypatch):
         mock.get_budget.return_value = {"id": "budget-uuid-123", "name": "My Budget"}
         mock.rate_limit_remaining.return_value = 199
         mock.update_transaction.return_value = {"id": "txn-1"}
+
+        def _default_update_transactions(budget_id, updates):
+            return {"transactions": [{"id": u["id"]} for u in updates]}
+        mock.update_transactions.side_effect = _default_update_transactions
+
         for k, v in overrides.items():
             setattr(mock, k, v)
         instances.append(mock)
@@ -786,11 +791,14 @@ def test_apply_skips_proposals_with_applied_at(apply_changeset_path, mock_client
     cs = _read_changeset(apply_changeset_path)
     cs["amazon"]["proposed_splits"][0]["applied_at"] = "2026-05-14T10:00:00"
     apply_changeset_path.write_text(json.dumps(cs))
-    expected_calls = _applyable_count(cs)
+    expected_applyable = _applyable_count(cs)
     report = apply_changeset(apply_changeset_path, mock_client, "budget-1", report_dir=tmp_path)
     skip_reasons = [s["reason"] for s in report.skipped]
     assert any("already applied" in r for r in skip_reasons)
-    assert mock_client.update_transactions.call_count == expected_calls
+    # Batch mode: all applyable items go in one chunk (well under BATCH_SIZE=200)
+    assert mock_client.update_transactions.call_count == 1
+    sent_updates = mock_client.update_transactions.call_args_list[0][0][1]
+    assert len(sent_updates) == expected_applyable
 
 
 def test_apply_skips_proposals_with_null_category(apply_changeset_path, mock_client, tmp_path):
@@ -798,10 +806,12 @@ def test_apply_skips_proposals_with_null_category(apply_changeset_path, mock_cli
     cs = _read_changeset(apply_changeset_path)
     cs["amazon"]["proposed_splits"][0]["subtransactions"][0]["category_id"] = None
     apply_changeset_path.write_text(json.dumps(cs))
-    expected_calls = _applyable_count(cs)
+    expected_applyable = _applyable_count(cs)
     report = apply_changeset(apply_changeset_path, mock_client, "budget-1", report_dir=tmp_path)
     assert any("uncategorized" in s["reason"] for s in report.skipped)
-    assert mock_client.update_transactions.call_count == expected_calls
+    assert mock_client.update_transactions.call_count == 1
+    sent_updates = mock_client.update_transactions.call_args_list[0][0][1]
+    assert len(sent_updates) == expected_applyable
 
 
 def test_apply_marks_applied_at_on_success(apply_changeset_path, mock_client, tmp_path):
@@ -812,116 +822,74 @@ def test_apply_marks_applied_at_on_success(apply_changeset_path, mock_client, tm
         assert "applied_at" in proposal
 
 
-def test_apply_flushes_file_after_each_success(apply_changeset_path, mock_client, tmp_path):
-    from amazon_confirm import apply_changeset
-    from ynab_client import YNABValidationError
-
-    call_count = {"n": 0}
-    flushes_seen_at = []
-
-    def side_effect(*args, **kwargs):
-        call_count["n"] += 1
-        cs_on_disk = _read_changeset(apply_changeset_path)
-        applied_now = sum(1 for p in cs_on_disk["amazon"]["proposed_splits"] if "applied_at" in p)
-        flushes_seen_at.append(applied_now)
-        if call_count["n"] == 3:
-            raise YNABValidationError(400, detail="boom")
-        return {"id": "ok"}
-
-    mock_client.update_transaction.side_effect = side_effect
-    apply_changeset(apply_changeset_path, mock_client, "budget-1", report_dir=tmp_path)
-    # Verify that file is flushed after each success (flushes appear incremental before error)
-    assert flushes_seen_at[0] == 0  # Before first success, nothing applied
-    assert flushes_seen_at[1] == 1  # After first success, 1 applied
-    if len(flushes_seen_at) > 2:
-        assert flushes_seen_at[2] == 2  # After second success, 2 applied
-
-
-def test_apply_continues_after_409(apply_changeset_path, mock_client, tmp_path):
+def test_apply_aborts_on_batch_conflict(apply_changeset_path, mock_client, tmp_path):
+    """Batch mode: a 409 anywhere in the chunk aborts the whole chunk.
+    The pre-batch per-txn 409-continue behavior was deliberately removed
+    when the endpoint moved to batch PATCH (chunks are atomic per YNAB)."""
     from amazon_confirm import apply_changeset
     from ynab_client import YNABConflictError
 
-    call_count = {"n": 0}
-
-    def side_effect(*args, **kwargs):
-        call_count["n"] += 1
-        if call_count["n"] == 1:
-            raise YNABConflictError(409, detail="conflict")
-        return {"id": "ok"}
-
-    mock_client.update_transaction.side_effect = side_effect
-    cs = _read_changeset(apply_changeset_path)
-    expected_applyable = _applyable_count(cs)
+    mock_client.update_transactions.side_effect = YNABConflictError(409, detail="conflict")
     report = apply_changeset(apply_changeset_path, mock_client, "budget-1", report_dir=tmp_path)
-    assert len(report.failed) == 1
-    assert report.failed[0]["http_status"] == 409
-    assert not report.aborted
-    assert len(report.applied) == expected_applyable - 1
+    assert report.aborted
+    assert any(f["http_status"] == 409 for f in report.failed)
+    assert len(report.applied) == 0
 
 
-def test_apply_continues_after_400_locked(apply_changeset_path, mock_client, tmp_path):
+def test_apply_aborts_on_batch_locked_400(apply_changeset_path, mock_client, tmp_path):
+    """A 400 from YNAB (e.g. transaction_locked) aborts the chunk; chunks are
+    atomic so we cannot continue past a validation failure."""
     from amazon_confirm import apply_changeset
     from ynab_client import YNABValidationError
 
-    call_count = {"n": 0}
-
-    def side_effect(*args, **kwargs):
-        call_count["n"] += 1
-        if call_count["n"] == 1:
-            raise YNABValidationError(400, name="transaction_locked", detail="reconciled")
-        return {"id": "ok"}
-
-    mock_client.update_transaction.side_effect = side_effect
+    mock_client.update_transactions.side_effect = YNABValidationError(
+        400, name="transaction_locked", detail="reconciled"
+    )
     report = apply_changeset(apply_changeset_path, mock_client, "budget-1", report_dir=tmp_path)
+    assert report.aborted
     assert any(f["http_status"] == 400 for f in report.failed)
-    assert not report.aborted
+    assert len(report.applied) == 0
 
 
 def test_apply_aborts_on_429(apply_changeset_path, mock_client, tmp_path):
+    """A 429 on the (single) batch call aborts; nothing is applied."""
     from amazon_confirm import apply_changeset
     from ynab_client import YNABRateLimitError
 
-    call_count = {"n": 0}
-
-    def side_effect(*args, **kwargs):
-        call_count["n"] += 1
-        if call_count["n"] == 2:
-            raise YNABRateLimitError(429, detail="too many")
-        return {"id": "ok"}
-
-    mock_client.update_transaction.side_effect = side_effect
-    cs = _read_changeset(apply_changeset_path)
+    mock_client.update_transactions.side_effect = YNABRateLimitError(429, detail="too many")
     report = apply_changeset(apply_changeset_path, mock_client, "budget-1", report_dir=tmp_path)
     assert report.aborted
     assert "rate" in (report.abort_reason or "").lower()
-    assert mock_client.update_transactions.call_count == 2
-    assert len(report.applied) == 1
-    assert len(cs["amazon"]["proposed_splits"]) >= 2
+    assert mock_client.update_transactions.call_count == 1
+    assert len(report.applied) == 0
 
 
 def test_apply_aborts_when_rate_limit_floor_breached(apply_changeset_path, mock_client, tmp_path):
+    """The rate-limit floor check now runs before each chunk. With a fixture
+    that fits in one chunk and a pre-flight `remaining` below the floor, we
+    abort before issuing the batch PATCH."""
     from amazon_confirm import apply_changeset
 
-    remaining_seq = iter([100, 4])
-    mock_client.rate_limit_remaining.side_effect = lambda: next(remaining_seq, 4)
-
-    report = apply_changeset(apply_changeset_path, mock_client, "budget-1", rate_limit_floor=5, report_dir=tmp_path)
+    mock_client.rate_limit_remaining.return_value = 4
+    report = apply_changeset(
+        apply_changeset_path, mock_client, "budget-1", rate_limit_floor=5, report_dir=tmp_path
+    )
     assert report.aborted
     assert "rate limit floor" in (report.abort_reason or "").lower()
-    assert mock_client.update_transactions.call_count == 2
+    assert mock_client.update_transactions.call_count == 0
 
 
-def test_apply_throttle_sleeps_between_calls(apply_changeset_path, mock_client, monkeypatch, tmp_path):
+def test_apply_throttle_seconds_emits_deprecation_warning(apply_changeset_path, mock_client, tmp_path):
+    """`throttle_seconds` is preserved in the signature for backwards compatibility
+    but is unused in batch mode. Non-zero values emit a DeprecationWarning per the
+    refined plan (avoids silent no-op which violates NO SILENT FALLBACKS)."""
     from amazon_confirm import apply_changeset
-    import amazon_confirm
 
-    sleeps = []
-    monkeypatch.setattr(amazon_confirm.time, "sleep", lambda s: sleeps.append(s))
-    cs = _read_changeset(apply_changeset_path)
-    expected_applyable = _applyable_count(cs)
-    apply_changeset(apply_changeset_path, mock_client, "budget-1", throttle_seconds=0.75, report_dir=tmp_path)
-    assert all(s == 0.75 for s in sleeps)
-    assert len(sleeps) == expected_applyable
+    with pytest.warns(DeprecationWarning, match="throttle_seconds"):
+        apply_changeset(
+            apply_changeset_path, mock_client, "budget-1",
+            throttle_seconds=0.75, report_dir=tmp_path,
+        )
 
 
 def test_apply_writes_summary_report(apply_changeset_path, mock_client, tmp_path):
@@ -1221,18 +1189,31 @@ def test_print_summary_raises_on_missing_metadata_timestamp(tmp_path):
         _print_summary({"metadata": {}}, fake_summary, "My Budget", tmp_path / "x.json")
 
 
+def _sent_updates(mock_client):
+    """Flatten all `updates` lists sent across every batch call."""
+    sent = []
+    for call in mock_client.update_transactions.call_args_list:
+        sent.extend(call.args[1])
+    return sent
+
+
 def test_apply_processes_both_amazon_and_non_amazon(apply_changeset_path, mock_client, tmp_path):
-    """apply_changeset PATCHes both Amazon splits and categorized non_amazon flats."""
+    """apply_changeset batches both Amazon splits and categorized non_amazon flats
+    into the batch endpoint."""
     from amazon_confirm import apply_changeset
     cs = _read_changeset(apply_changeset_path)
-    expected_calls = _applyable_count(cs)
+    expected_applyable = _applyable_count(cs)
     report = apply_changeset(apply_changeset_path, mock_client, "budget-1", report_dir=tmp_path)
-    assert mock_client.update_transactions.call_count == expected_calls
+    # All applyable items fit in 1 chunk (well under BATCH_SIZE=200).
+    assert mock_client.update_transactions.call_count == 1
+    sent = _sent_updates(mock_client)
+    assert len(sent) == expected_applyable
     assert report.total == len(cs["amazon"]["proposed_splits"]) + len(cs["non_amazon"]["proposals"])
 
 
 def test_apply_non_amazon_flat_patch_body_is_category_only(apply_changeset_path, mock_client, tmp_path):
-    """The PATCH body for a non_amazon flat contains exactly {'category_id': ...}."""
+    """The PATCH body for a non_amazon flat contains exactly {'id', 'category_id'}
+    inside the batch payload."""
     from amazon_confirm import apply_changeset
     cs = _read_changeset(apply_changeset_path)
     non_amazon_categorized_ids = {
@@ -1241,14 +1222,13 @@ def test_apply_non_amazon_flat_patch_body_is_category_only(apply_changeset_path,
         if p.get("category_id") is not None
     }
     apply_changeset(apply_changeset_path, mock_client, "budget-1", report_dir=tmp_path)
-    flat_patch_calls = [
-        call for call in mock_client.update_transaction.call_args_list
-        if call.args[1] in non_amazon_categorized_ids
-    ]
-    assert len(flat_patch_calls) == len(non_amazon_categorized_ids)
-    for call in flat_patch_calls:
-        body = call.args[2]
-        assert set(body.keys()) == {"category_id"}, f"non_amazon flat body should only contain category_id, got {body}"
+    sent = _sent_updates(mock_client)
+    flat_updates = [u for u in sent if u["id"] in non_amazon_categorized_ids]
+    assert len(flat_updates) == len(non_amazon_categorized_ids)
+    for update in flat_updates:
+        assert set(update.keys()) == {"id", "category_id"}, (
+            f"non_amazon flat batch entry should only contain id+category_id, got {update}"
+        )
 
 
 def test_apply_persists_applied_at_to_non_amazon(apply_changeset_path, mock_client, tmp_path):
@@ -1264,7 +1244,8 @@ def test_apply_persists_applied_at_to_non_amazon(apply_changeset_path, mock_clie
 
 
 def test_apply_skips_uncategorized_non_amazon(apply_changeset_path, mock_client, tmp_path):
-    """Uncategorized non_amazon proposals (category_id=None) are skipped, not PATCHed."""
+    """Uncategorized non_amazon proposals (category_id=None) are excluded from
+    the batch payload, not PATCHed."""
     from amazon_confirm import apply_changeset
     cs = _read_changeset(apply_changeset_path)
     uncategorized_ids = {
@@ -1274,12 +1255,13 @@ def test_apply_skips_uncategorized_non_amazon(apply_changeset_path, mock_client,
     }
     assert uncategorized_ids, "fixture must contain at least one uncategorized non_amazon proposal"
     apply_changeset(apply_changeset_path, mock_client, "budget-1", report_dir=tmp_path)
-    patched_txn_ids = {call.args[1] for call in mock_client.update_transaction.call_args_list}
-    assert uncategorized_ids.isdisjoint(patched_txn_ids)
+    patched_ids = {u["id"] for u in _sent_updates(mock_client)}
+    assert uncategorized_ids.isdisjoint(patched_ids)
 
 
 def test_apply_resume_skips_non_amazon_with_applied_at(apply_changeset_path, mock_client, tmp_path):
-    """A non_amazon proposal with applied_at is skipped on re-run."""
+    """A non_amazon proposal with applied_at is skipped on re-run (not included
+    in the batch payload)."""
     from amazon_confirm import apply_changeset
     cs = _read_changeset(apply_changeset_path)
     for p in cs["non_amazon"]["proposals"]:
@@ -1289,8 +1271,8 @@ def test_apply_resume_skips_non_amazon_with_applied_at(apply_changeset_path, moc
             break
     apply_changeset_path.write_text(json.dumps(cs))
     apply_changeset(apply_changeset_path, mock_client, "budget-1", report_dir=tmp_path)
-    patched_txn_ids = {call.args[1] for call in mock_client.update_transaction.call_args_list}
-    assert preapplied_id not in patched_txn_ids
+    patched_ids = {u["id"] for u in _sent_updates(mock_client)}
+    assert preapplied_id not in patched_ids
 
 
 def test_summarize_does_not_double_count_amazon_flat_as_non_amazon():
@@ -1486,8 +1468,9 @@ def test_apply_raises_on_missing_id_in_response(tmp_path):
         apply_changeset(cs_path, client, "b1", dry_run=False, throttle_seconds=0)
 
 
-def test_apply_persists_changeset_after_each_chunk(tmp_path):
-    """250 proposals (2 chunks); verify write_text called exactly 2 times."""
+def test_apply_persists_changeset_after_each_chunk(tmp_path, monkeypatch):
+    """250 proposals (2 chunks); verify the changeset is persisted exactly 2 times
+    (once per chunk), not 250 times (once per txn)."""
     changeset = _make_changeset_with_flat_proposals(250)
     cs_path = tmp_path / "changeset.json"
     cs_path.write_text(json.dumps(changeset))
@@ -1501,16 +1484,17 @@ def test_apply_persists_changeset_after_each_chunk(tmp_path):
 
     client.update_transactions.side_effect = side_effect_update_transactions
 
-    original_write = cs_path.write_text
-
+    original_write = Path.write_text
     write_calls = []
 
-    def tracked_write(content):
-        write_calls.append(content)
-        original_write(content)
+    def tracked_write(self, content, *args, **kwargs):
+        if self == cs_path:
+            write_calls.append(content)
+        return original_write(self, content, *args, **kwargs)
 
-    with patch.object(cs_path, "write_text", side_effect=tracked_write):
-        report = apply_changeset(cs_path, client, "b1", dry_run=False, throttle_seconds=0)
+    monkeypatch.setattr(Path, "write_text", tracked_write)
+
+    report = apply_changeset(cs_path, client, "b1", dry_run=False, throttle_seconds=0)
 
     assert len(write_calls) == 2
 
