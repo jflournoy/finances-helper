@@ -15,6 +15,9 @@ dependencies = [
     "scikit-learn>=1.8.0",
     "diptest>=0.11.0",
     "bokeh>=3.9.0",
+    "arviz-stats>=0.8.0",
+    "arviz-base>=0.8.2",
+    "markdown>=3.6",
 ]
 
 [project.optional-dependencies]

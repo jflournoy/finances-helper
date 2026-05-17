@@ -187,6 +187,26 @@ def filter_categories_by_usage(category_groups: list[dict], transactions: list[d
     return filtered
 
 
+def _find_category_id(category_groups: list[dict], name: str) -> str:
+    """Look up a category id by exact name across all non-deleted groups.
+
+    Raises a loud error if the name is not found — no silent fallback (the
+    Amazon WF short-circuit depends on this category existing).
+    """
+    for group in category_groups:
+        if group.get("deleted"):
+            continue
+        for cat in group.get("categories", []):
+            if cat.get("deleted"):
+                continue
+            if cat.get("name") == name:
+                return cat["id"]
+    raise RuntimeError(
+        f"Category {name!r} not found in YNAB category list — required for "
+        "Whole Foods Amazon short-circuit. Add or rename the category in YNAB."
+    )
+
+
 def compute_confidence_threshold(K: int, min_observations: int = MIN_OBSERVATIONS) -> float:
     """Derive a confidence threshold from K and a minimum observation count.
 
@@ -1104,6 +1124,21 @@ def categorize_transactions(
             raise RuntimeError(
                 f"matcher invariant violated: Txn {txn_id} not in matcher.matched or matcher.unmatched_ynab"
             )
+
+        # Whole Foods / Amazon Fresh deliveries: skip the split — every item is
+        # groceries, so a 39-row subtransaction list adds no signal. Emit a flat
+        # parent-level Groceries categorization instead.
+        if match.shipment.is_wf:
+            groceries_id = _find_category_id(categories, "Groceries")
+            results.append(CategoryResult(
+                transaction_id=txn_id,
+                category_id=groceries_id,
+                category_name="Groceries",
+                confidence=1.0,
+                rationale=f"Whole Foods / Amazon Fresh delivery (order {match.shipment.order_id})",
+                tier="amazon-wf",
+            ))
+            continue
 
         # Found a match; allocate and categorize items
         try:

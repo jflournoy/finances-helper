@@ -369,6 +369,43 @@ class YNABClient:
         response_data = self._patch(path, payload)
         return response_data.get("transaction", response_data)
 
+    def update_transactions(self, budget_id: str, updates: list[dict]) -> dict:
+        """PATCH multiple transactions in one request.
+
+        Args:
+            budget_id: YNAB budget ID.
+            updates: list of {"id": "...", <patch fields>} dicts. Each entry MUST
+                include "id" (the YNAB transaction id). Other keys are patch
+                fields (category_id, memo, subtransactions, etc.). Subtransaction
+                amounts must already be in milliunits.
+
+        Returns:
+            Full YNAB response data dict. Contains:
+              - transactions: list of fully-updated transaction objects.
+                **Order is not guaranteed** — callers must match by id.
+              - duplicate_import_ids: typically empty for PATCH
+              - server_knowledge: int
+
+        Raises:
+            ValueError: updates is empty, or any entry lacks "id".
+            NotImplementedError: if self.sandbox_mode (PATCH cannot be redirected).
+            YNABValidationError on 400, YNABRateLimitError on 429,
+            YNABNotFoundError on 404, YNABConflictError on 409, YNABAPIError otherwise.
+        """
+        if self.sandbox_mode:
+            raise NotImplementedError(
+                "update_transactions() does not support YNAB_SANDBOX_MODE redirect. "
+                "Use create_transactions() to seed sandbox test transactions, then PATCH those by their real IDs."
+            )
+        if not updates:
+            raise ValueError("updates must not be empty")
+        for i, u in enumerate(updates):
+            if "id" not in u:
+                raise ValueError(f"updates[{i}] missing required 'id' field")
+
+        path = f"/budgets/{budget_id}/transactions"
+        return self._patch(path, {"transactions": updates})
+
     def get_budgets(self) -> list:
         """Get all budgets."""
         data = self._get("/budgets")

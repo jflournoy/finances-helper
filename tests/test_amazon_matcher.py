@@ -398,6 +398,62 @@ class TestAmazonShipment:
         assert shipment.is_matchable is False
 
 
+class TestIsWF:
+    """Test AmazonShipment.is_wf detection.
+
+    Canonical rule (kept aligned with scripts/inflation_config.py):
+    - Website in {"PrimeNow-US", "panda01"} → True
+    - Website == "Amazon.com" AND carrier contains "RABBIT" → True
+    - otherwise → False
+    """
+
+    def _make(self, *, website: str, carrier: str = "") -> AmazonShipment:
+        return AmazonShipment(
+            order_id="111-0000001-0000001",
+            ship_date=date(2024, 1, 16),
+            payment_method_raw="Visa - 0804",
+            payment_method_last4="0804",
+            is_split_tender=False,
+            currency="USD",
+            item_subtotal=Decimal("10.00"),
+            tax=Decimal("0.00"),
+            shipping=Decimal("0.00"),
+            discounts=Decimal("0.00"),
+            total_amount=Decimal("10.00"),
+            items=[],
+            shipment_status="Shipped",
+            website=website,
+            carrier=carrier,
+        )
+
+    def test_prime_now_us(self):
+        assert self._make(website="PrimeNow-US").is_wf is True
+
+    def test_panda01(self):
+        assert self._make(website="panda01").is_wf is True
+
+    def test_amazon_com_with_rabbit_carrier(self):
+        assert self._make(
+            website="Amazon.com",
+            carrier="RABBIT(spARA3C26rGGDQ) and RABBIT(spARA3C264S57V)",
+        ).is_wf is True
+
+    def test_amazon_com_without_rabbit_is_not_wf(self):
+        assert self._make(
+            website="Amazon.com",
+            carrier="UPS(1Z05R2F81300187585)",
+        ).is_wf is False
+
+    def test_amazon_com_blank_carrier_is_not_wf(self):
+        assert self._make(website="Amazon.com", carrier="").is_wf is False
+
+    def test_audible_is_not_wf(self):
+        assert self._make(website="Audible").is_wf is False
+
+    def test_default_blank_website_is_not_wf(self):
+        assert self._make(website="").is_wf is False
+
+
 class TestParseError:
     """Test ParseError dataclass."""
 
@@ -440,6 +496,18 @@ class TestParseOrderHistory:
         # - Embedded newline (1 row): parsed correctly
         # - Zero price item (1 row): shipment kept but not matchable
         assert len(errors) >= 1  # At least EUR currency error
+
+    def test_parse_captures_website_and_carrier(self):
+        """Website and Carrier columns flow into AmazonShipment when present."""
+        csv_text = """Order ID,Order Date,Ship Date,Order Status,Shipment Status,Payment Method Type,Currency,Unit Price,Unit Price Tax,Shipment Item Subtotal,Shipment Item Subtotal Tax,Shipping Charge,Total Amount,Total Discounts,ASIN,Product Name,Original Quantity,Website,Carrier Name & Tracking Number
+113-5220110-0665003,2026-04-06,2026-04-06,Closed,Shipped,Visa - 0804,USD,7.99,0.00,7.99,0.00,0.00,7.99,0.00,B0C1234567,365 by Whole Foods Market Organic Baby Spinach,1,Amazon.com,RABBIT(spARA3C26rGGDQ)
+"""
+        shipments, _errors = parse_order_history(csv_text)
+        assert len(shipments) == 1
+        s = shipments[0]
+        assert s.website == "Amazon.com"
+        assert "RABBIT" in s.carrier
+        assert s.is_wf is True
 
     def test_parse_cancelled_order_skipped(self):
         """Cancelled orders are silently skipped."""

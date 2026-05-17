@@ -901,3 +901,54 @@ def test_rate_limit_remaining_at_zero():
     client.rate_limit_used = 200
     client.rate_limit_max = 200
     assert client.rate_limit_remaining() == 0
+
+
+# Issue #179: update_transactions() batch PATCH
+
+
+def test_update_transactions_empty_list_raises(client):
+    with pytest.raises(ValueError, match="must not be empty"):
+        client.update_transactions("b1", [])
+
+
+def test_update_transactions_missing_id_raises(client):
+    with pytest.raises(ValueError, match=r"updates\[1\].*missing.*id"):
+        client.update_transactions("b1", [{"id": "t1"}, {"memo": "no-id"}])
+
+
+def test_update_transactions_correct_url(client):
+    with patch.object(client, "_patch", return_value={"transactions": []}) as mock_patch:
+        client.update_transactions("b1", [{"id": "t1"}])
+    call_args = mock_patch.call_args
+    assert call_args[0][0] == "/budgets/b1/transactions"
+
+
+def test_update_transactions_wraps_under_transactions_key(client):
+    updates = [{"id": "t1", "memo": "updated"}, {"id": "t2", "category_id": "cat-456"}]
+    with patch.object(client, "_patch", return_value={"transactions": []}) as mock_patch:
+        client.update_transactions("b1", updates)
+    call_args = mock_patch.call_args
+    assert call_args[0][1] == {"transactions": updates}
+
+
+def test_update_transactions_returns_full_response_data(client):
+    response_data = {
+        "transactions": [{"id": "t1", "memo": "updated"}],
+        "server_knowledge": 42,
+    }
+    with patch.object(client, "_patch", return_value=response_data):
+        result = client.update_transactions("b1", [{"id": "t1", "memo": "updated"}])
+    assert result == response_data
+    assert result["server_knowledge"] == 42
+
+
+def test_update_transactions_sandbox_mode_raises(client):
+    client.sandbox_mode = True
+    with pytest.raises(NotImplementedError, match="create_transactions"):
+        client.update_transactions("b1", [{"id": "t1"}])
+
+
+def test_update_transactions_propagates_rate_limit(client):
+    with patch.object(client, "_patch", side_effect=YNABRateLimitError(429, detail="Rate limit")):
+        with pytest.raises(YNABRateLimitError):
+            client.update_transactions("b1", [{"id": "t1"}])

@@ -163,6 +163,10 @@ class AmazonItem:
     raw_row_index: int  # 1-based CSV row for error reporting
 
 
+WF_SITES = frozenset({"PrimeNow-US", "panda01"})
+WF_AMAZON_CARRIER_TOKEN = "RABBIT"
+
+
 @dataclass
 class AmazonShipment:
     """A shipment (may contain multiple items)."""
@@ -180,6 +184,20 @@ class AmazonShipment:
     total_amount: Decimal
     items: list[AmazonItem]
     shipment_status: str
+    website: str = ""
+    carrier: str = ""
+
+    @property
+    def is_wf(self) -> bool:
+        """True for Whole Foods / Amazon Fresh grocery deliveries.
+
+        Canonical rule (matches scripts/inflation_config.py): site is PrimeNow-US
+        or panda01, OR Amazon.com shipped via the RABBIT fleet.
+        """
+        site = (self.website or "").strip()
+        if site in WF_SITES:
+            return True
+        return site == "Amazon.com" and WF_AMAZON_CARRIER_TOKEN in (self.carrier or "")
 
     @property
     def expected_charge(self) -> Decimal:
@@ -259,6 +277,9 @@ def parse_order_history(csv_text: str) -> tuple[list[AmazonShipment], list[Parse
         "Product Name",
         "Original Quantity",
     }
+    # Website and Carrier Name & Tracking Number are read when present (used to
+    # detect Whole Foods / Amazon Fresh deliveries via AmazonShipment.is_wf).
+    # They're optional so legacy CSV fixtures continue to parse.
 
     if reader.fieldnames is None:
         raise ValueError("CSV is empty or malformed")
@@ -393,6 +414,8 @@ def parse_order_history(csv_text: str) -> tuple[list[AmazonShipment], list[Parse
                 "is_split_tender": is_split_tender,
                 "currency": row["Currency"],
                 "shipment_status": row["Shipment Status"],
+                "website": row.get("Website", ""),
+                "carrier": row.get("Carrier Name & Tracking Number", ""),
             }
 
         rows_by_group[group_key]["rows"].append(item)
@@ -423,6 +446,8 @@ def parse_order_history(csv_text: str) -> tuple[list[AmazonShipment], list[Parse
             total_amount=group_data["total_amount"],
             items=group_data["rows"],
             shipment_status=shipment_status,
+            website=group_data["website"],
+            carrier=group_data["carrier"],
         )
 
         # Check charge math

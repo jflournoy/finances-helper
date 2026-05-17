@@ -14,6 +14,7 @@ from datetime import datetime
 from decimal import Decimal
 from typing import TYPE_CHECKING
 
+from changeset_review import REVIEW_SKIP_SENTINEL_PREFIX, is_review_skip
 from ynab_client import YNABClient
 
 if TYPE_CHECKING:
@@ -86,7 +87,13 @@ def load_changeset(path: Path) -> dict:
 
 @dataclass
 class ChangesetSummary:
-    """Summary statistics for a changeset."""
+    """Summary statistics for a changeset.
+
+    total_outflow_dollars is the gross sum across ALL proposals (including
+    skipped/applied). would_apply_outflow_dollars is the net subset that an
+    apply run would actually PATCH — i.e. excludes applied_previously,
+    skipped_uncategorized, and skipped_by_review.
+    """
     total_proposals: int
     split_proposals: int
     flat_proposals: int
@@ -95,6 +102,8 @@ class ChangesetSummary:
     total_outflow_dollars: Decimal
     by_category: dict[str, Decimal]
     non_amazon_proposals: int = 0
+    skipped_by_review: int = 0
+    would_apply_outflow_dollars: Decimal = Decimal("0")
 
 
 def summarize_changeset(changeset: dict) -> ChangesetSummary:
@@ -108,7 +117,12 @@ def summarize_changeset(changeset: dict) -> ChangesetSummary:
       - non_amazon_proposals: total non-Amazon entries (categorized + uncategorized)
       - skipped_uncategorized: Amazon proposals with any null subtxn category
         PLUS non-Amazon proposals with category_id=None
-      - applied_previously: any proposal (Amazon or non-Amazon) with applied_at
+      - applied_previously: proposals with a real `applied_at` timestamp (a prior
+        PATCH succeeded). Does NOT include skipped-by-review entries.
+      - skipped_by_review: proposals where review.py set
+        applied_at = "skipped-by-review:<reason>". These will still be skipped at
+        apply time, but are reported separately so the user can tell intentional
+        skips apart from resume state.
 
     total_outflow_dollars uses Decimal arithmetic. Non-Amazon flats with
     amount_dollars=None are not counted in outflow but are still counted in
@@ -119,7 +133,9 @@ def summarize_changeset(changeset: dict) -> ChangesetSummary:
     flat_proposals = 0
     skipped_uncategorized = 0
     applied_previously = 0
+    skipped_by_review = 0
     total_outflow = Decimal("0")
+    would_apply_outflow = Decimal("0")
     by_category = {}
     non_amazon_proposals = 0
 
@@ -128,7 +144,8 @@ def summarize_changeset(changeset: dict) -> ChangesetSummary:
 
         parent = proposal["parent_ynab_transaction"]
         amount_milliunits = parent.get("amount", 0)
-        total_outflow += Decimal(abs(amount_milliunits)) / Decimal(1000)
+        proposal_outflow = Decimal(abs(amount_milliunits)) / Decimal(1000)
+        total_outflow += proposal_outflow
 
         subtransactions = proposal["subtransactions"]
         if len(subtransactions) == 1:
@@ -136,10 +153,21 @@ def summarize_changeset(changeset: dict) -> ChangesetSummary:
         elif len(subtransactions) >= 2:
             split_proposals += 1
 
-        if "applied_at" in proposal:
-            applied_previously += 1
-        elif any(s.get("category_id") is None for s in subtransactions):
+        is_uncategorized = any(s.get("category_id") is None for s in subtransactions)
+        applied_at = proposal.get("applied_at")
+        will_apply = False
+        if applied_at is not None:
+            if is_review_skip(applied_at):
+                skipped_by_review += 1
+            else:
+                applied_previously += 1
+        elif is_uncategorized:
             skipped_uncategorized += 1
+        else:
+            will_apply = True
+
+        if will_apply:
+            would_apply_outflow += proposal_outflow
 
         for subtxn in subtransactions:
             category_name = subtxn.get("category_name")
@@ -153,10 +181,17 @@ def summarize_changeset(changeset: dict) -> ChangesetSummary:
 
         is_categorized = proposal.get("category_id") is not None
 
-        if "applied_at" in proposal:
-            applied_previously += 1
+        applied_at = proposal.get("applied_at")
+        will_apply = False
+        if applied_at is not None:
+            if is_review_skip(applied_at):
+                skipped_by_review += 1
+            else:
+                applied_previously += 1
         elif not is_categorized:
             skipped_uncategorized += 1
+        else:
+            will_apply = True
 
         if not is_categorized:
             continue
@@ -165,6 +200,8 @@ def summarize_changeset(changeset: dict) -> ChangesetSummary:
         if amount_dollars is not None:
             amount_decimal = abs(Decimal(amount_dollars))
             total_outflow += amount_decimal
+            if will_apply:
+                would_apply_outflow += amount_decimal
             category_name = proposal.get("category_name")
             if category_name:
                 by_category[category_name] = by_category.get(category_name, Decimal("0")) + amount_decimal
@@ -178,6 +215,8 @@ def summarize_changeset(changeset: dict) -> ChangesetSummary:
         total_outflow_dollars=total_outflow,
         by_category=by_category,
         non_amazon_proposals=non_amazon_proposals,
+        skipped_by_review=skipped_by_review,
+        would_apply_outflow_dollars=would_apply_outflow,
     )
 
 
@@ -454,7 +493,13 @@ def _print_summary(changeset: dict, summary: ChangesetSummary, budget_name: str,
     print(f"  Non-Amazon flats:     {summary.non_amazon_proposals}")
     print(f"  Uncategorized:        {summary.skipped_uncategorized}")
     print(f"  Resume (done):        {summary.applied_previously}")
-    print(f"Total outflow:    ${summary.total_outflow_dollars:,.2f}")
+    if summary.skipped_by_review:
+        print(f"  Skipped by review:    {summary.skipped_by_review}")
+    if summary.would_apply_outflow_dollars != summary.total_outflow_dollars:
+        print(f"Total outflow:    ${summary.total_outflow_dollars:,.2f} (all proposals)")
+        print(f"Would-apply:      ${summary.would_apply_outflow_dollars:,.2f} (net of skipped/applied)")
+    else:
+        print(f"Total outflow:    ${summary.total_outflow_dollars:,.2f}")
     if summary.by_category:
         print("By category:")
         for name, amount in sorted(summary.by_category.items(), key=lambda kv: -kv[1]):
@@ -558,6 +603,7 @@ def main(argv: list[str] | None = None) -> int:
             summary.total_proposals
             - summary.applied_previously
             - summary.skipped_uncategorized
+            - summary.skipped_by_review
         )
         prompt = f"\nApply {applyable} proposals to budget '{budget_name}'? [y/N]: "
         try:

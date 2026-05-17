@@ -50,6 +50,44 @@ def _amount_dollars_str(txn: dict) -> str | None:
     )
 
 
+def _summarize_split_items(subs: list) -> str:
+    """Format an Amazon split proposal's subtransactions for the markdown report.
+
+    Groups subtransactions by category and shows the first item's product name
+    per group, with a count when more than one. Example output:
+
+        Groceries ×24 (Whole Foods Market Organic Decaf Ground Coffee...),
+        Household supplies ×2 (365 Recycled Paper Towels)
+    """
+    if not subs:
+        return ""
+
+    by_cat: dict[str, list] = {}
+    order: list[str] = []
+    for sub in subs:
+        cat = getattr(sub, "category_name", None) or "[UNCATEGORIZED]"
+        if cat not in by_cat:
+            by_cat[cat] = []
+            order.append(cat)
+        by_cat[cat].append(sub)
+
+    parts = []
+    for cat in order:
+        members = by_cat[cat]
+        first_item = getattr(members[0], "item", None)
+        first_name = (getattr(first_item, "product_name", None) or "").strip() if first_item else ""
+        if len(first_name) > 60:
+            first_name = first_name[:57] + "..."
+        count = len(members)
+        cat_md = _md_escape(cat)
+        if first_name:
+            name_md = _md_escape(first_name)
+            parts.append(f"{cat_md} ×{count} ({name_md})" if count > 1 else f"{cat_md} ({name_md})")
+        else:
+            parts.append(f"{cat_md} ×{count}" if count > 1 else cat_md)
+    return ", ".join(parts)
+
+
 def _print_unified_summary(
     dump_path: Path | None,
     since_date: str,
@@ -397,8 +435,8 @@ def write_unified_changeset(
     if split_proposals:
         markdown_lines.extend([
             f"## Amazon splits ({len(split_proposals)} proposed)",
-            "| Date | Order ID | Ship Date | Items | Categories |",
-            "|------|----------|-----------|-------|------------|",
+            "| Date | Order ID | Ship Date | Items by category |",
+            "|------|----------|-----------|-------------------|",
         ])
         for proposal in sorted(
             split_proposals,
@@ -412,12 +450,8 @@ def write_unified_changeset(
             order_id = getattr(ship, "order_id", "") if ship is not None else ""
             ship_date = str(getattr(ship, "ship_date", "")) if ship is not None and getattr(ship, "ship_date", None) else ""
             subs = getattr(proposal, "subtransactions", []) or []
-            item_count = len(subs)
-            categories = ", ".join(
-                _md_escape(getattr(s, "category_name", None) or "[UNCATEGORIZED]")
-                for s in subs
-            )
-            markdown_lines.append(f"| {parent_date} | {order_id} | {ship_date} | {item_count} | {categories} |")
+            items_summary = _summarize_split_items(subs)
+            markdown_lines.append(f"| {parent_date} | {order_id} | {ship_date} | {items_summary} |")
         markdown_lines.append("")
 
     if proposals:

@@ -1322,6 +1322,66 @@ class TestWriteUnifiedChangeset:
         assert sub_out["item"]["quantity"] == 1
 
 
+class TestSummarizeSplitItems:
+    """Items-by-category formatter used in the Amazon splits markdown table."""
+
+    def _sub(self, category_name, product_name):
+        from amazon_matcher import AmazonItem
+        from categorizer import ItemCategoryResult
+
+        item = AmazonItem(
+            order_id="111-0000001-0000001",
+            ship_date=None,
+            asin="B0TEST",
+            product_name=product_name,
+            quantity=1,
+            unit_price=Decimal("5.00"),
+            unit_price_tax=Decimal("0"),
+            raw_row_index=2,
+        )
+        return ItemCategoryResult(
+            ynab_transaction_id="t",
+            item=item,
+            allocated_amount=Decimal("5.00"),
+            category_id="cid",
+            category_name=category_name,
+            confidence=0.9,
+            rationale="r",
+        )
+
+    def test_single_sub_shows_category_and_first_item(self):
+        from enrich import _summarize_split_items
+
+        out = _summarize_split_items([self._sub("Computer", "Logitech MX Mouse")])
+        assert out == "Computer (Logitech MX Mouse)"
+
+    def test_groups_by_category_with_count_and_first_item(self):
+        from enrich import _summarize_split_items
+
+        subs = [
+            self._sub("Groceries", "Organic Spinach"),
+            self._sub("Groceries", "Whole Foods Coffee"),
+            self._sub("Groceries", "Sliced Turkey"),
+            self._sub("Household supplies", "Paper Towels"),
+            self._sub("Household supplies", "Dish Soap"),
+        ]
+        out = _summarize_split_items(subs)
+        assert out == "Groceries ×3 (Organic Spinach), Household supplies ×2 (Paper Towels)"
+
+    def test_long_product_name_is_truncated(self):
+        from enrich import _summarize_split_items
+
+        long_name = "X" * 100
+        out = _summarize_split_items([self._sub("Groceries", long_name)])
+        assert long_name not in out
+        assert "..." in out
+
+    def test_empty_subs_returns_empty_string(self):
+        from enrich import _summarize_split_items
+
+        assert _summarize_split_items([]) == ""
+
+
 class TestDumpFreshnessWarning:
     """Test _dump_freshness_warning function."""
 

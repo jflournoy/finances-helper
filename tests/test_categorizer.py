@@ -2235,6 +2235,99 @@ def test_categorize_transactions_amazon_multi_item_goes_to_proposals():
     assert split_proposals[0].total_allocated() == Decimal("30.00")
 
 
+def test_categorize_transactions_amazon_wf_short_circuits_to_groceries():
+    """Whole Foods/Fresh shipments skip the split and emit a flat Groceries result.
+
+    No Claude call should be made (verify by raising if the mock is invoked).
+    """
+    from amazon_matcher import AmazonShipment, MatchCandidate
+
+    wf_categories = [{
+        "id": "grp1", "name": "Everyday",
+        "categories": [
+            {"id": "groc-id", "name": "Groceries"},
+            {"id": "ship-id", "name": "Shopping"},
+        ],
+    }]
+
+    items = [
+        _make_item(asin="WF1", product_name="365 by Whole Foods Market Organic Spinach"),
+        _make_item(asin="WF2", product_name="Whole Foods Market Organic Coffee"),
+    ]
+    shipment = AmazonShipment(
+        order_id="113-5220110-0665003", ship_date=date(2026, 1, 15),
+        payment_method_raw="Visa - 1234", payment_method_last4="1234",
+        is_split_tender=False, currency="USD",
+        item_subtotal=Decimal("20.00"), tax=Decimal("0"),
+        shipping=Decimal("0"), discounts=Decimal("0"),
+        total_amount=Decimal("20.00"), items=items,
+        shipment_status="Shipped",
+        website="Amazon.com",
+        carrier="RABBIT(spARA3C26rGGDQ) and RABBIT(spARA3C264S57V)",
+    )
+    assert shipment.is_wf
+
+    amazon_txn = {"id": "amz-wf", "payee_name": "Amazon", "amount": -20000,
+                  "date": "2026-01-15", "account_name": "Visa"}
+    match = MatchCandidate(ynab_txn=amazon_txn, shipment=shipment, date_delta_days=0)
+    match_result = MatchResult(
+        matched=[match], unmatched_ynab=[], unmatched_shipments=[],
+        excluded_shipments=[], parse_errors=[],
+    )
+
+    with patch("categorizer.anthropic.Anthropic") as mock_cls:
+        mock_cls.return_value.messages.create.side_effect = AssertionError(
+            "Claude must not be called for WF Amazon shipments"
+        )
+        results, _skipped, unmatched_amazon, split_proposals = categorize_transactions(
+            [amazon_txn], {}, wf_categories, "key", amazon_matches=match_result
+        )
+
+    assert split_proposals == []
+    assert unmatched_amazon == []
+    assert len(results) == 1
+    r = results[0]
+    assert r.transaction_id == "amz-wf"
+    assert r.category_name == "Groceries"
+    assert r.category_id == "groc-id"
+    assert r.tier == "amazon-wf"
+
+
+def test_categorize_transactions_amazon_wf_missing_groceries_category_raises():
+    """If 'Groceries' doesn't exist in YNAB, the WF short-circuit fails loudly."""
+    from amazon_matcher import AmazonShipment, MatchCandidate
+
+    categories_without_groceries = [{
+        "id": "grp1", "name": "Everyday",
+        "categories": [{"id": "ship-id", "name": "Shopping"}],
+    }]
+
+    item = _make_item(product_name="365 by Whole Foods Market Organic Spinach")
+    shipment = AmazonShipment(
+        order_id="113-5220110-0665003", ship_date=date(2026, 1, 15),
+        payment_method_raw="Visa - 1234", payment_method_last4="1234",
+        is_split_tender=False, currency="USD",
+        item_subtotal=Decimal("10.00"), tax=Decimal("0"),
+        shipping=Decimal("0"), discounts=Decimal("0"),
+        total_amount=Decimal("10.00"), items=[item],
+        shipment_status="Shipped",
+        website="PrimeNow-US",
+    )
+    amazon_txn = {"id": "amz-wf", "payee_name": "Amazon", "amount": -10000,
+                  "date": "2026-01-15", "account_name": "Visa"}
+    match = MatchCandidate(ynab_txn=amazon_txn, shipment=shipment, date_delta_days=0)
+    match_result = MatchResult(
+        matched=[match], unmatched_ynab=[], unmatched_shipments=[],
+        excluded_shipments=[], parse_errors=[],
+    )
+
+    with pytest.raises(RuntimeError, match="Groceries"):
+        categorize_transactions(
+            [amazon_txn], {}, categories_without_groceries, "key",
+            amazon_matches=match_result,
+        )
+
+
 def test_categorize_transactions_cache_untouched_for_amazon():
     """Amazon txns must NOT modify the payee cache."""
     from amazon_matcher import AmazonShipment, MatchCandidate

@@ -155,6 +155,65 @@ def test_summarize_counts_previously_applied():
     changeset["amazon"]["proposed_splits"][0]["applied_at"] = "2026-05-14T10:00:00"
     summary = summarize_changeset(changeset)
     assert summary.applied_previously == 1
+    assert summary.skipped_by_review == 0
+
+
+def test_summarize_review_skip_sentinel_counted_separately():
+    """A `skipped-by-review:` applied_at should NOT count as applied_previously."""
+    changeset = load_changeset(Path("data/fixtures/enrich_changeset_sample.json"))
+    changeset["amazon"]["proposed_splits"][0]["applied_at"] = "skipped-by-review:user"
+    changeset["non_amazon"]["proposals"][0]["applied_at"] = "skipped-by-review:user-after-edit"
+    summary = summarize_changeset(changeset)
+    assert summary.skipped_by_review == 2
+    assert summary.applied_previously == 0
+
+
+def test_summarize_mixed_skip_and_applied():
+    """Real applied_at and review-skip sentinel should be counted independently."""
+    changeset = load_changeset(Path("data/fixtures/enrich_changeset_sample.json"))
+    splits = changeset["amazon"]["proposed_splits"]
+    assert len(splits) >= 2, "fixture must have >=2 splits for this test"
+    splits[0]["applied_at"] = "2026-05-14T10:00:00"
+    splits[1]["applied_at"] = "skipped-by-review:user"
+    summary = summarize_changeset(changeset)
+    assert summary.applied_previously == 1
+    assert summary.skipped_by_review == 1
+
+
+def test_would_apply_outflow_equals_total_on_clean_changeset():
+    changeset = load_changeset(Path("data/fixtures/enrich_changeset_sample.json"))
+    summary = summarize_changeset(changeset)
+    assert summary.would_apply_outflow_dollars == summary.total_outflow_dollars
+
+
+def test_would_apply_outflow_excludes_review_skipped():
+    """Skipping a proposal via review sentinel must subtract from would-apply outflow."""
+    changeset = load_changeset(Path("data/fixtures/enrich_changeset_sample.json"))
+    split = changeset["amazon"]["proposed_splits"][0]
+    parent_amount_dollars = Decimal(abs(split["parent_ynab_transaction"]["amount"])) / Decimal(1000)
+
+    baseline = summarize_changeset(changeset).would_apply_outflow_dollars
+
+    split["applied_at"] = "skipped-by-review:user"
+    after = summarize_changeset(changeset).would_apply_outflow_dollars
+
+    assert after == baseline - parent_amount_dollars
+
+
+def test_would_apply_outflow_excludes_previously_applied():
+    """A real applied_at timestamp must subtract from would-apply outflow."""
+    changeset = load_changeset(Path("data/fixtures/enrich_changeset_sample.json"))
+    split = changeset["amazon"]["proposed_splits"][0]
+    parent_amount_dollars = Decimal(abs(split["parent_ynab_transaction"]["amount"])) / Decimal(1000)
+
+    baseline = summarize_changeset(changeset).would_apply_outflow_dollars
+
+    split["applied_at"] = "2026-05-14T10:00:00"
+    after = summarize_changeset(changeset).would_apply_outflow_dollars
+
+    assert after == baseline - parent_amount_dollars
+    # total_outflow_dollars stays unchanged — it reflects the gross proposal set
+    assert summarize_changeset(changeset).total_outflow_dollars > after
 
 
 def test_load_and_summarize_real_fixture():
@@ -660,6 +719,50 @@ def test_apply_dry_run_makes_no_patch_calls(apply_changeset_path, mock_client, t
     report = apply_changeset(apply_changeset_path, mock_client, "budget-1", dry_run=True, report_dir=tmp_path)
     mock_client.update_transaction.assert_not_called()
     assert any(s.get("reason") == "dry run" for s in report.skipped)
+
+
+def test_applyable_math_matches_dry_run_skip_count(apply_changeset_path, mock_client, tmp_path):
+    """The y/N prompt math (total - applied - uncategorized - skipped_by_review)
+    MUST equal the count of "dry run" skips emitted by apply_changeset.
+
+    If this drifts, the user sees one number at the confirmation prompt and a
+    different number actually gets PATCHed. Locks down B1/Y3 invariant.
+    """
+    from amazon_confirm import apply_changeset, load_changeset, summarize_changeset
+
+    cs = load_changeset(apply_changeset_path)
+    splits = cs["amazon"]["proposed_splits"]
+    non_amazon = cs["non_amazon"]["proposals"]
+    assert len(splits) >= 2 and len(non_amazon) >= 2, "fixture needs >=2 of each"
+
+    splits[0]["applied_at"] = "skipped-by-review:user"
+    splits[1]["applied_at"] = "2026-05-14T10:00:00"
+    non_amazon[0]["applied_at"] = "skipped-by-review:user-after-edit"
+    non_amazon[1]["category_id"] = None
+    # apply_changeset re-reads the file, so persist the in-memory mutations.
+    apply_changeset_path.write_text(json.dumps(cs, default=str))
+
+    cs_reloaded = load_changeset(apply_changeset_path)
+    summary = summarize_changeset(cs_reloaded)
+    prompt_applyable = (
+        summary.total_proposals
+        - summary.applied_previously
+        - summary.skipped_uncategorized
+        - summary.skipped_by_review
+    )
+
+    report = apply_changeset(
+        apply_changeset_path, mock_client, "budget-1", dry_run=True, report_dir=tmp_path
+    )
+    dry_run_skips = sum(1 for s in report.skipped if s.get("reason") == "dry run")
+
+    assert prompt_applyable == dry_run_skips, (
+        f"y/N prompt would say 'Apply {prompt_applyable} proposals' but apply_changeset "
+        f"reports {dry_run_skips} would-PATCH items. Numbers must agree."
+    )
+    assert summary.skipped_by_review == 2
+    assert summary.applied_previously == 1
+    assert summary.skipped_uncategorized == 1
 
 
 def _applyable_count(cs):
