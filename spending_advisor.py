@@ -321,7 +321,8 @@ def analyze_subscriptions(
 
     for payee, txns in payee_txns.items():
         # Skip food categories
-        category = txns[0].get("category_name", "").lower() if txns else ""
+        category_name = txns[0].get("category_name") if txns else None
+        category = (category_name or "").lower()
         if any(word in category for word in ["dining", "restaurant", "food"]):
             continue
 
