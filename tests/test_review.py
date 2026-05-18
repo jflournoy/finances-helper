@@ -155,3 +155,127 @@ def test_save_and_reload_roundtrip(tmp_path):
     review._save_reviewed(changeset, path)
     loaded = json.loads(path.read_text())
     assert loaded == changeset
+
+
+# ============================================================================
+# Cache-boost prompt (#43)
+# ============================================================================
+
+
+def _stub_input(monkeypatch, responses):
+    it = iter(responses)
+    monkeypatch.setattr("builtins.input", lambda *_args, **_kw: next(it))
+
+
+def test_maybe_prompt_boost_disabled_is_noop(monkeypatch):
+    p = _make_proposal()
+    review._mark_accepted(p)
+    monkeypatch.setattr("builtins.input", lambda *_a, **_k: pytest.fail("input was called"))
+    review._maybe_prompt_boost(p, enabled=False)
+    assert "boost" not in p["review"]
+
+
+def test_maybe_prompt_boost_skip_is_noop(monkeypatch):
+    p = _make_proposal()
+    review._mark_skipped(p)
+    monkeypatch.setattr("builtins.input", lambda *_a, **_k: pytest.fail("input was called"))
+    review._maybe_prompt_boost(p, enabled=True)
+    assert "boost" not in p["review"]
+
+
+def test_maybe_prompt_boost_no_response_does_not_record(monkeypatch):
+    p = _make_proposal()
+    review._mark_accepted(p)
+    _stub_input(monkeypatch, [""])
+    review._maybe_prompt_boost(p, enabled=True)
+    assert "boost" not in p["review"]
+
+
+def test_maybe_prompt_boost_yes_records_normal_strength(monkeypatch):
+    p = _make_proposal()
+    review._mark_accepted(p)
+    _stub_input(monkeypatch, ["y"])
+    review._maybe_prompt_boost(p, enabled=True)
+    assert p["review"]["boost"] == {"strength": review.BOOST_STRENGTH_NORMAL}
+
+
+def test_maybe_prompt_boost_strong_records_strong_strength(monkeypatch):
+    p = _make_proposal()
+    review._mark_recategorized(p, {"id": "cat-2", "name": "Dining Out"})
+    _stub_input(monkeypatch, ["s"])
+    review._maybe_prompt_boost(p, enabled=True)
+    assert p["review"]["boost"] == {"strength": review.BOOST_STRENGTH_STRONG}
+
+
+def test_maybe_prompt_boost_reprompts_on_invalid(monkeypatch):
+    p = _make_proposal()
+    review._mark_accepted(p)
+    _stub_input(monkeypatch, ["bogus", "n"])
+    review._maybe_prompt_boost(p, enabled=True)
+    assert "boost" not in p["review"]
+
+
+def test_maybe_prompt_boost_skips_when_payee_missing(monkeypatch):
+    p = _make_proposal(payee_name="")
+    review._mark_accepted(p)
+    monkeypatch.setattr("builtins.input", lambda *_a, **_k: pytest.fail("input was called"))
+    review._maybe_prompt_boost(p, enabled=True)
+    assert "boost" not in p["review"]
+
+
+def test_apply_boosts_to_cache_writes_records(tmp_path):
+    cache_path = tmp_path / "payee_lookup.json"
+    cache_path.write_text("{}")
+    p = _make_proposal(payee_name="Starbucks", category_id="cat-dining",
+                       category_name="Dining Out")
+    review._mark_accepted(p)
+    p["review"]["boost"] = {"strength": review.BOOST_STRENGTH_STRONG}
+    changeset = {
+        "amazon": {"proposed_splits": []},
+        "non_amazon": {"proposals": [p]},
+    }
+
+    n = review._apply_boosts_to_cache(changeset, cache_path=str(cache_path))
+
+    assert n == 1
+    saved = json.loads(cache_path.read_text())
+    entry = saved["starbucks"]
+    assert entry["total"] == review.BOOST_STRENGTH_STRONG
+    assert entry["categories"]["cat-dining"]["count"] == review.BOOST_STRENGTH_STRONG
+    assert entry["categories"]["cat-dining"]["name"] == "Dining Out"
+
+
+def test_apply_boosts_to_cache_no_pending_does_not_touch_disk(tmp_path):
+    cache_path = tmp_path / "payee_lookup.json"
+    changeset = {
+        "amazon": {"proposed_splits": []},
+        "non_amazon": {"proposals": [_make_proposal()]},
+    }
+    n = review._apply_boosts_to_cache(changeset, cache_path=str(cache_path))
+    assert n == 0
+    assert not cache_path.exists()
+
+
+def test_apply_boosts_accumulates_on_existing_entry(tmp_path):
+    cache_path = tmp_path / "payee_lookup.json"
+    cache_path.write_text(json.dumps({
+        "_version": 2,
+        "starbucks": {
+            "total": 3,
+            "categories": {"cat-dining": {"name": "Dining Out", "count": 3}},
+        }
+    }))
+    p = _make_proposal(payee_name="Starbucks", category_id="cat-dining",
+                       category_name="Dining Out")
+    review._mark_accepted(p)
+    p["review"]["boost"] = {"strength": review.BOOST_STRENGTH_NORMAL}
+    changeset = {
+        "amazon": {"proposed_splits": []},
+        "non_amazon": {"proposals": [p]},
+    }
+
+    review._apply_boosts_to_cache(changeset, cache_path=str(cache_path))
+
+    saved = json.loads(cache_path.read_text())
+    assert saved["starbucks"]["total"] == 3 + review.BOOST_STRENGTH_NORMAL
+    assert saved["starbucks"]["categories"]["cat-dining"]["count"] == 3 + review.BOOST_STRENGTH_NORMAL

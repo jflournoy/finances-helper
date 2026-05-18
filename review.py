@@ -26,6 +26,7 @@ from pathlib import Path
 from dotenv import load_dotenv
 from thefuzz import process as fuzz_process
 
+from categorizer import load_payee_cache, record_categorization, save_payee_cache
 from changeset_review import REVIEW_SKIP_SENTINEL_PREFIX, is_review_skip
 from view_changeset import render_and_open
 from ynab_client import YNABClient
@@ -171,10 +172,91 @@ def _mark_skipped(proposal: dict, reason: str = "user") -> None:
     proposal["applied_at"] = f"{SKIP_SENTINEL_PREFIX}:{reason}"
 
 
+BOOST_STRENGTH_NORMAL = 10
+BOOST_STRENGTH_STRONG = 20
+
+
+def _maybe_prompt_boost(proposal: dict, *, enabled: bool) -> None:
+    """Optionally stash a cache-boost intent on a freshly-accepted/recategorized
+    proposal. Only meaningful for non-Amazon proposals whose decision pins a
+    single category to a payee. Skip proposals never reach this code path.
+
+    The intent is stashed on `proposal["review"]["boost"]`. Boosts are applied
+    to the payee cache only at the end of a successful review (not on mid-review
+    quit), so partial reviews never corrupt the cache.
+    """
+    if not enabled:
+        return
+    review = proposal.get("review")
+    if review is None or review.get("decision") not in ("accept", "recategorize"):
+        return
+    cat_name = proposal.get("category_name") or "[UNCATEGORIZED]"
+    payee = proposal.get("payee_name") or ""
+    if not payee:
+        return
+    prompt = (
+        f"  boost cache for {payee!r} -> {cat_name!r}? "
+        f"[n=no / y=+{BOOST_STRENGTH_NORMAL} / s=+{BOOST_STRENGTH_STRONG} (lock-in)]: "
+    )
+    while True:
+        resp = input(prompt).strip().lower()
+        if resp in ("", "n", "no"):
+            return
+        if resp in ("y", "yes"):
+            strength = BOOST_STRENGTH_NORMAL
+            break
+        if resp in ("s", "strong"):
+            strength = BOOST_STRENGTH_STRONG
+            break
+        print("  invalid; expected n / y / s (or empty for no)")
+    review["boost"] = {"strength": strength}
+
+
+def _apply_boosts_to_cache(changeset: dict, *, cache_path: str | None = None) -> int:
+    """Apply any pending boost intents from the changeset to the payee cache.
+
+    Walks both Amazon splits and non-Amazon proposals for `review.boost`
+    entries. (Amazon splits never get boost intents under current UX, but the
+    walker is defensive.) Returns the number of boosts applied. Caller is
+    responsible for displaying the count.
+    """
+    pending: list[tuple[str, str, str, int]] = []
+    for p in changeset.get("non_amazon", {}).get("proposals", []):
+        boost = (p.get("review") or {}).get("boost")
+        if not boost:
+            continue
+        cat_id = p.get("category_id")
+        cat_name = p.get("category_name")
+        payee = p.get("payee_name")
+        if not (cat_id and cat_name and payee):
+            continue
+        pending.append((payee, cat_id, cat_name, int(boost["strength"])))
+
+    if not pending:
+        return 0
+
+    if cache_path is None:
+        cache = load_payee_cache()
+    else:
+        cache = load_payee_cache(cache_path)
+    for payee, cat_id, cat_name, strength in pending:
+        record_categorization(
+            cache, payee, cat_id, cat_name,
+            source="user", prior_strength=strength,
+        )
+    if cache_path is None:
+        save_payee_cache(cache)
+    else:
+        save_payee_cache(cache, cache_path)
+    return len(pending)
+
+
 def _walk_non_amazon(
     proposals: list[dict],
     label: str,
     categories: list[dict],
+    *,
+    boost_enabled: bool = False,
 ) -> str | None:
     """Walk a list of non-Amazon proposals interactively. Returns 'quit' if the
     user quits, else None.
@@ -200,6 +282,7 @@ def _walk_non_amazon(
             return "quit"
         if choice == "a":
             _mark_accepted(p)
+            _maybe_prompt_boost(p, enabled=boost_enabled)
         elif choice == "s":
             _mark_skipped(p)
         elif choice == "r":
@@ -209,6 +292,7 @@ def _walk_non_amazon(
                 continue
             _mark_recategorized(p, new_cat)
             print(f"  → {new_cat['name']}")
+            _maybe_prompt_boost(p, enabled=boost_enabled)
     return None
 
 
@@ -339,7 +423,12 @@ def _print_summary(changeset: dict) -> None:
     print(f"  undecided:      {undecided}")
 
 
-def run_review(changeset_path: Path, *, no_browser: bool = False) -> int:
+def run_review(
+    changeset_path: Path,
+    *,
+    no_browser: bool = False,
+    boost_enabled: bool = True,
+) -> int:
     load_dotenv()
 
     if not changeset_path.exists():
@@ -391,13 +480,17 @@ def run_review(changeset_path: Path, *, no_browser: bool = False) -> int:
         print("aborted; no changes written")
         return 0
 
-    for bucket_fn, bucket_args in (
-        (_walk_amazon_splits, (splits, categories)),
-        (_walk_non_amazon, (claude, "Claude-tier (novel payees)", categories)),
-        (_walk_non_amazon, (fuzzy, "Fuzzy-tier (payee variants)", categories)),
-        (_walk_non_amazon, (other, "Other-tier (amazon-wf, etc.)", categories)),
-    ):
-        result = bucket_fn(*bucket_args)
+    walks = (
+        (_walk_amazon_splits, (splits, categories), {}),
+        (_walk_non_amazon, (claude, "Claude-tier (novel payees)", categories),
+            {"boost_enabled": boost_enabled}),
+        (_walk_non_amazon, (fuzzy, "Fuzzy-tier (payee variants)", categories),
+            {"boost_enabled": boost_enabled}),
+        (_walk_non_amazon, (other, "Other-tier (amazon-wf, etc.)", categories),
+            {"boost_enabled": boost_enabled}),
+    )
+    for bucket_fn, bucket_args, bucket_kwargs in walks:
+        result = bucket_fn(*bucket_args, **bucket_kwargs)
         if result == "quit":
             print("\nQuitting mid-review; partial state saved.")
             _save_reviewed(changeset, sidecar_path)
@@ -422,11 +515,19 @@ def run_review(changeset_path: Path, *, no_browser: bool = False) -> int:
             n = _bulk_accept_history(history)
             print(f"  accepted {n} history-tier proposals")
         elif choice == "w":
-            result = _walk_non_amazon(history, "History-tier (walk-through)", categories)
+            result = _walk_non_amazon(
+                history, "History-tier (walk-through)", categories,
+                boost_enabled=boost_enabled,
+            )
             if result == "quit":
                 _save_reviewed(changeset, sidecar_path)
                 print(f"Saved partial state to {sidecar_path}")
                 return 0
+
+    n_boosts = _apply_boosts_to_cache(changeset)
+    if n_boosts:
+        print(f"Applied {n_boosts} cache boost{'s' if n_boosts != 1 else ''} "
+              f"to data/cache/payee_lookup.json")
 
     _save_reviewed(changeset, sidecar_path)
     _print_summary(changeset)
@@ -451,6 +552,11 @@ def main() -> int:
         action="store_true",
         help="Skip the HTML viewer launch.",
     )
+    parser.add_argument(
+        "--no-boost",
+        action="store_true",
+        help="Suppress the cache-boost prompt after accept/recategorize.",
+    )
     args = parser.parse_args()
 
     try:
@@ -459,7 +565,11 @@ def main() -> int:
         print(f"error: {e}", file=sys.stderr)
         return 1
 
-    return run_review(changeset_path, no_browser=args.no_browser)
+    return run_review(
+        changeset_path,
+        no_browser=args.no_browser,
+        boost_enabled=not args.no_boost,
+    )
 
 
 if __name__ == "__main__":
