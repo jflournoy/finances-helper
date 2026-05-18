@@ -28,9 +28,8 @@ def live_budget_id(live_client):
 def sandbox_client():
     """YNABClient with sandbox mode enforced — safe for write tests."""
     load_dotenv()
-    assert os.environ.get("YNAB_SANDBOX_MODE") == "1", (
-        "YNAB_SANDBOX_MODE=1 must be set in .env before running write integration tests"
-    )
+    if os.environ.get("YNAB_SANDBOX_MODE") != "1":
+        pytest.skip("YNAB_SANDBOX_MODE=1 required in .env for write integration tests")
     return YNABClient()
 
 

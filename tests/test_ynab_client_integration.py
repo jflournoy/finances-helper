@@ -8,7 +8,6 @@ which redirects all writes to the Sandbox budget/account.
 
 Requires YNAB_API_TOKEN and YNAB_DEFAULT_BUDGET in .env.
 """
-import os
 import pytest
 from ynab_client import YNABClient
 
@@ -89,11 +88,9 @@ def test_create_transactions_sandbox_rejects_empty(sandbox_client, live_budget_i
         sandbox_client.create_transactions(live_budget_id, [])
 
 
-def test_sandbox_client_construction_makes_no_api_calls():
+def test_sandbox_client_construction_makes_no_api_calls(monkeypatch):
     """Construction with YNAB_SANDBOX_MODE=1 must make zero API calls (lazy init)."""
-    from dotenv import load_dotenv
-    load_dotenv()
-    assert os.environ.get("YNAB_SANDBOX_MODE") == "1", "requires YNAB_SANDBOX_MODE=1 in .env"
+    monkeypatch.setenv("YNAB_SANDBOX_MODE", "1")
     client = YNABClient()
     assert client.sandbox_mode is True
     assert client._sandbox_budget_id is None
