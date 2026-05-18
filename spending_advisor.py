@@ -66,9 +66,11 @@ def join_category_names(
     """Return transactions with category_name injected.
 
     For transactions with no category_id, category_name is None.
-    For transactions with unknown category_id, raises ValueError.
+    For transactions with unknown category_id (deleted/orphaned), category_name is None.
+    Returns tuple (result_transactions, unknown_count) to allow caller to warn.
     """
     result = []
+    unknown_count = 0
     for txn in transactions:
         t = txn.copy()
         cat_id = t.get("category_id")
@@ -76,13 +78,14 @@ def join_category_names(
         if cat_id is None:
             t["category_name"] = None
         elif cat_id not in flat_categories:
-            raise ValueError(f"Unknown category ID: {cat_id}")
+            t["category_name"] = None
+            unknown_count += 1
         else:
             t["category_name"] = flat_categories[cat_id]
 
         result.append(t)
 
-    return result
+    return result, unknown_count
 
 
 def collect_spending_data(transactions: list[dict]) -> SpendingContext:

@@ -159,8 +159,15 @@ def main() -> int:
     flat_categories = _flatten_categories(categories)
 
     # Process transactions
-    filtered_txns = filter_advisory_transactions(txns)
-    joined_txns = join_category_names(filtered_txns, flat_categories)
+    # Filter to outflows only (spending, where amount_dollars < 0)
+    outflow_txns = [t for t in txns if t.get("amount_dollars", 0) < 0]
+    filtered_txns = filter_advisory_transactions(outflow_txns)
+    joined_txns, unknown_cat_count = join_category_names(filtered_txns, flat_categories)
+    if unknown_cat_count > 0:
+        print(
+            f"Warning: {unknown_cat_count} transaction(s) have orphaned/deleted category IDs (will be excluded from category analysis)",
+            file=sys.stderr,
+        )
     context = collect_spending_data(joined_txns)
 
     # Run analyzers

@@ -84,9 +84,10 @@ def test_filter_advisory_transactions_keeps_cleared(advisory_txns):
 def test_join_category_names_injects_name(advisory_txns):
     txns, cats = advisory_txns
     filtered = filter_advisory_transactions(txns)
-    joined = join_category_names(filtered, cats)
+    joined, unknown_count = join_category_names(filtered, cats)
 
     assert all("category_name" in t for t in joined)
+    assert unknown_count == 0
     doordash = [t for t in joined if "DOORDASH" in t["payee_name"].upper()][0]
     assert doordash["category_name"] == "Food Delivery"
 
@@ -97,18 +98,20 @@ def test_join_category_names_none_when_no_category_id(advisory_txns):
     txn_no_cat = filtered[0].copy()
     txn_no_cat["category_id"] = None
 
-    joined = join_category_names([txn_no_cat], cats)
+    joined, unknown_count = join_category_names([txn_no_cat], cats)
     assert joined[0]["category_name"] is None
+    assert unknown_count == 0
 
 
-def test_join_category_names_raises_on_unknown_category_id(advisory_txns):
+def test_join_category_names_handles_unknown_category_id(advisory_txns):
     txns, cats = advisory_txns
     filtered = filter_advisory_transactions(txns)
     txn_bad_cat = filtered[0].copy()
     txn_bad_cat["category_id"] = "unknown_cat_xyz"
 
-    with pytest.raises(ValueError, match="Unknown category"):
-        join_category_names([txn_bad_cat], cats)
+    joined, unknown_count = join_category_names([txn_bad_cat], cats)
+    assert unknown_count == 1
+    assert joined[0]["category_name"] is None
 
 
 # ============================================================================
@@ -118,7 +121,7 @@ def test_join_category_names_raises_on_unknown_category_id(advisory_txns):
 def test_collect_spending_data_totals_are_positive(advisory_txns):
     txns, cats = advisory_txns
     filtered = filter_advisory_transactions(txns)
-    joined = join_category_names(filtered, cats)
+    joined, _ = join_category_names(filtered, cats)
 
     context = collect_spending_data(joined)
     assert context.total_spend_dollars > 0, "Total spend should be positive"
@@ -130,7 +133,7 @@ def test_collect_spending_data_totals_are_positive(advisory_txns):
 def test_collect_spending_data_excludes_current_partial_month_from_monthly(advisory_txns):
     txns, cats = advisory_txns
     filtered = filter_advisory_transactions(txns)
-    joined = join_category_names(filtered, cats)
+    joined, _ = join_category_names(filtered, cats)
 
     context = collect_spending_data(joined)
 
@@ -142,7 +145,7 @@ def test_collect_spending_data_excludes_current_partial_month_from_monthly(advis
 def test_collect_spending_data_payee_groups_normalized_lowercase(advisory_txns):
     txns, cats = advisory_txns
     filtered = filter_advisory_transactions(txns)
-    joined = join_category_names(filtered, cats)
+    joined, _ = join_category_names(filtered, cats)
 
     context = collect_spending_data(joined)
 
@@ -156,7 +159,7 @@ def test_collect_spending_data_raises_on_income_transaction(advisory_txns):
     filtered = filter_advisory_transactions(txns)
     txn_income = filtered[0].copy()
     txn_income["amount_dollars"] = 100.0
-    joined = join_category_names([txn_income], cats)
+    joined, _ = join_category_names([txn_income], cats)
 
     with pytest.raises(ValueError, match="income"):
         collect_spending_data(joined)
@@ -165,7 +168,7 @@ def test_collect_spending_data_raises_on_income_transaction(advisory_txns):
 def test_collect_spending_data_computes_payee_groups(advisory_txns):
     txns, cats = advisory_txns
     filtered = filter_advisory_transactions(txns)
-    joined = join_category_names(filtered, cats)
+    joined, _ = join_category_names(filtered, cats)
 
     context = collect_spending_data(joined)
 
@@ -180,7 +183,7 @@ def test_collect_spending_data_computes_payee_groups(advisory_txns):
 def test_analyze_delivery_premium_identifies_doordash_and_uber_eats(advisory_txns):
     txns, cats = advisory_txns
     filtered = filter_advisory_transactions(txns)
-    joined = join_category_names(filtered, cats)
+    joined, _ = join_category_names(filtered, cats)
     context = collect_spending_data(joined)
 
     insights = analyze_delivery_premium(context.payee_groups, context.period_months_complete)
@@ -191,7 +194,7 @@ def test_analyze_delivery_premium_identifies_doordash_and_uber_eats(advisory_txn
 def test_analyze_delivery_premium_computes_overpay_correctly(advisory_txns):
     txns, cats = advisory_txns
     filtered = filter_advisory_transactions(txns)
-    joined = join_category_names(filtered, cats)
+    joined, _ = join_category_names(filtered, cats)
     context = collect_spending_data(joined)
 
     insights = analyze_delivery_premium(context.payee_groups, context.period_months_complete)
@@ -223,7 +226,7 @@ def test_analyze_delivery_premium_returns_empty_if_no_delivery_apps():
 def test_analyze_convenience_markup_fires_above_threshold(advisory_txns):
     txns, cats = advisory_txns
     filtered = filter_advisory_transactions(txns)
-    joined = join_category_names(filtered, cats)
+    joined, _ = join_category_names(filtered, cats)
     context = collect_spending_data(joined)
 
     insights = analyze_convenience_markup(context.payee_groups, context.period_months_complete)
@@ -248,7 +251,7 @@ def test_analyze_convenience_markup_silent_below_50_dollars():
 def test_analyze_subscriptions_detects_spotify_monthly(advisory_txns):
     txns, cats = advisory_txns
     filtered = filter_advisory_transactions(txns)
-    joined = join_category_names(filtered, cats)
+    joined, _ = join_category_names(filtered, cats)
 
     insights = analyze_subscriptions(joined, 3)
     assert any("spotify" in i.title.lower() for i in insights), "Should detect Spotify subscription"
@@ -257,7 +260,7 @@ def test_analyze_subscriptions_detects_spotify_monthly(advisory_txns):
 def test_analyze_subscriptions_tolerates_2_dollar_variance(advisory_txns):
     txns, cats = advisory_txns
     filtered = filter_advisory_transactions(txns)
-    joined = join_category_names(filtered, cats)
+    joined, _ = join_category_names(filtered, cats)
 
     insights = analyze_subscriptions(joined, 3)
     netflix_insights = [i for i in insights if "netflix" in i.title.lower()]
@@ -286,7 +289,7 @@ def test_analyze_subscriptions_excludes_food_category_payees(advisory_txns):
     assert len(chipotle_txns) > 0
 
     filtered = filter_advisory_transactions(txns)
-    joined = join_category_names(filtered, cats)
+    joined, _ = join_category_names(filtered, cats)
 
     insights = analyze_subscriptions(joined, 3)
     chipotle_insights = [i for i in insights if "chipotle" in i.title.lower()]
@@ -300,7 +303,7 @@ def test_analyze_subscriptions_excludes_food_category_payees(advisory_txns):
 def test_analyze_frequent_small_charges_flags_chipotle(advisory_txns):
     txns, cats = advisory_txns
     filtered = filter_advisory_transactions(txns)
-    joined = join_category_names(filtered, cats)
+    joined, _ = join_category_names(filtered, cats)
     context = collect_spending_data(joined)
 
     insights = analyze_frequent_small_charges(
@@ -345,7 +348,7 @@ def test_analyze_frequent_small_charges_ignores_large_amounts():
 def test_analyze_trends_requires_two_complete_months(advisory_txns):
     txns, cats = advisory_txns
     filtered = filter_advisory_transactions(txns)
-    joined = join_category_names(filtered, cats)
+    joined, _ = join_category_names(filtered, cats)
     context = collect_spending_data(joined)
 
     assert context.period_months_complete >= 2, "Fixture should have at least 2 complete months"
@@ -354,7 +357,7 @@ def test_analyze_trends_requires_two_complete_months(advisory_txns):
 def test_analyze_trends_flags_accelerating_category(advisory_txns):
     txns, cats = advisory_txns
     filtered = filter_advisory_transactions(txns)
-    joined = join_category_names(filtered, cats)
+    joined, _ = join_category_names(filtered, cats)
     context = collect_spending_data(joined)
 
     trends = analyze_trends(context.monthly_by_category)
@@ -390,7 +393,7 @@ def test_analyze_trends_ignores_small_categories():
 def test_spending_insight_has_required_fields(advisory_txns):
     txns, cats = advisory_txns
     filtered = filter_advisory_transactions(txns)
-    joined = join_category_names(filtered, cats)
+    joined, _ = join_category_names(filtered, cats)
     context = collect_spending_data(joined)
 
     insights = analyze_delivery_premium(context.payee_groups, context.period_months_complete)
@@ -412,7 +415,7 @@ def test_spending_insight_has_required_fields(advisory_txns):
 def test_spending_context_has_all_fields(advisory_txns):
     txns, cats = advisory_txns
     filtered = filter_advisory_transactions(txns)
-    joined = join_category_names(filtered, cats)
+    joined, _ = join_category_names(filtered, cats)
 
     context = collect_spending_data(joined)
 
@@ -566,7 +569,7 @@ def test_synthesize_advisory_includes_system_prompt():
 def test_synthesize_advisory_returns_prose_string(advisory_txns):
     txns, cats = advisory_txns
     filtered = filter_advisory_transactions(txns)
-    joined = join_category_names(filtered, cats)
+    joined, _ = join_category_names(filtered, cats)
     context = collect_spending_data(joined)
 
     with patch("anthropic.Anthropic") as mock_client_cls:
