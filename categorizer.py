@@ -13,6 +13,7 @@ from pathlib import Path
 from thefuzz import fuzz, process
 import anthropic
 from ynab_client import milliunits_to_dollars
+from payee_resolver import resolve_batch, shortlist_candidates
 from amazon_matcher import (
     AmazonItem,
     AmazonShipment,
@@ -366,27 +367,42 @@ def update_cache_from_claude_results(cache: dict, source_txns: list[dict], flat_
     by_id = {t["id"]: t for t in source_txns}
 
     for result in flat_results:
-        # Skip non-CategoryResult types (ItemCategoryResult, etc.)
-        if not hasattr(result, "tier") or result.tier != "claude":
+        if not hasattr(result, "tier"):
             continue
 
         txn = by_id.get(result.transaction_id)
         if not txn:
             continue
 
-        # Collect import names
-        import_names = [
-            txn[f] for f in ("import_payee_name", "import_payee_name_original")
-            if txn.get(f)
-        ]
-
-        record_categorization(
-            cache, txn["payee_name"],
-            result.category_id, result.category_name,
-            source="claude",
-            prior_strength=result.prior_strength or 1,
-            import_names=import_names or None,
-        )
+        if result.tier == "claude":
+            import_names = [
+                txn[f] for f in ("import_payee_name", "import_payee_name_original")
+                if txn.get(f)
+            ]
+            record_categorization(
+                cache, txn["payee_name"],
+                result.category_id, result.category_name,
+                source="claude",
+                prior_strength=result.prior_strength or 1,
+                import_names=import_names or None,
+            )
+        elif result.tier == "resolved":
+            # Extract the canonical payee from the rationale ("Resolved to '<canonical>': ...")
+            import re as _re
+            m = _re.match(r"Resolved to '([^']+)'", result.rationale)
+            if m:
+                canonical = m.group(1)
+                raw_payee = txn["payee_name"]
+                normalized_raw = normalize_payee(raw_payee)
+                normalized_canonical = normalize_payee(canonical)
+                if normalized_raw != normalized_canonical:
+                    if normalized_canonical in cache:
+                        entry = cache[normalized_canonical]
+                        if "aliases" not in entry:
+                            entry["aliases"] = []
+                        if normalized_raw not in entry["aliases"]:
+                            entry["aliases"].append(normalized_raw)
+                    cache[normalized_raw] = {"alias_of": normalized_canonical}
 
 
 def _resolve_alias(cache: dict, key: str) -> str:
@@ -1013,6 +1029,7 @@ def categorize_transactions(
     K: int | None = None,
     confidence_threshold: float = DEFAULT_CONFIDENCE_THRESHOLD,
     amazon_matches: "MatchResult | None" = None,
+    resolve_payees: bool = False,
 ) -> tuple[list[CategoryResult], list[dict], list[tuple[dict, str]], list[AmazonSplitProposal]]:
     """Orchestrate the three-tier categorization for a list of transactions.
 
@@ -1082,12 +1099,46 @@ def categorize_transactions(
                 import_payee_name_original=import_payee_orig,
             )
         if result is None:
-            # Queue for tier 3
+            # Queue for tier 2.5 (resolution) or tier 3
             tier3_pending.append(txn)
             continue
 
         result.transaction_id = txn["id"]
         results.append(result)
+
+    # Tier 2.5: Resolution — runs when resolve_payees=True, before Claude tier
+    if resolve_payees and tier3_pending:
+        canonical_keys = [
+            k for k, v in cache.items()
+            if isinstance(v, dict) and "alias_of" not in v and v.get("categories")
+        ]
+        resolution_inputs = []
+        for txn in tier3_pending:
+            raw = txn["payee_name"]
+            shortlist = shortlist_candidates(raw, canonical_keys)
+            resolution_inputs.append((raw, shortlist))
+
+        resolution_results = resolve_batch(resolution_inputs, api_key=api_key)
+
+        still_pending = []
+        for txn, res_result in zip(tier3_pending, resolution_results):
+            if res_result.resolution is not None and res_result.resolution.confidence >= 0.85:
+                canonical = res_result.resolution.candidate_canonical
+                entry = cache.get(canonical, {})
+                if entry.get("categories"):
+                    cat_id, cat_name = _dominant_category(entry)
+                    result = CategoryResult(
+                        transaction_id=txn["id"],
+                        category_id=cat_id,
+                        category_name=cat_name,
+                        confidence=res_result.resolution.confidence,
+                        rationale=f"Resolved to '{canonical}': {res_result.resolution.rationale}",
+                        tier="resolved",
+                    )
+                    results.append(result)
+                    continue
+            still_pending.append(txn)
+        tier3_pending = still_pending
 
     # Batch tier 3 Claude calls in chunks of CLAUDE_BATCH_SIZE
     if tier3_pending:
