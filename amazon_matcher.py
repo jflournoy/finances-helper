@@ -490,6 +490,76 @@ class MatchResult:
     parse_errors: list[ParseError]
 
 
+def collect_dump_status_values(csv_text: str) -> tuple[set[str], set[str]]:
+    """Scan a dump CSV and return the distinct Order Status and Shipment Status values.
+
+    Cheap O(rows) pass used by the schema-drift canary. Does not validate header
+    columns — caller should have already invoked parse_order_history (which
+    raises on missing required columns). Empty string values are skipped because
+    parse_order_history already emits ParseErrors for empty-status rows.
+
+    Returns:
+        (order_statuses, shipment_statuses) — sets of non-empty distinct values.
+    """
+    reader = csv.DictReader(csv_text.splitlines())
+    order_statuses: set[str] = set()
+    shipment_statuses: set[str] = set()
+    for row in reader:
+        o = row.get("Order Status", "")
+        s = row.get("Shipment Status", "")
+        if o:
+            order_statuses.add(o)
+        if s:
+            shipment_statuses.add(s)
+    return order_statuses, shipment_statuses
+
+
+def check_dump_schema_drift(
+    csv_text: str,
+    baseline_path: Path,
+) -> tuple[set[str], set[str]]:
+    """Compare a dump's status values to the learned baseline and update it.
+
+    On first run (no baseline file): seeds the baseline silently and returns
+    empty drift sets — there is no prior knowledge to compare against, so
+    everything is "known" by definition.
+
+    On subsequent runs: returns the set of Order Status / Shipment Status
+    values not present in the baseline, then writes the union back so each
+    value is only flagged once across runs.
+
+    Args:
+        csv_text: Raw CSV contents (same string passed to parse_order_history).
+        baseline_path: JSON file at data/cache/amazon_known_statuses.json (or
+            equivalent). Parent directory must already exist.
+
+    Returns:
+        (new_order_statuses, new_shipment_statuses) — empty sets if no drift.
+    """
+    current_order, current_shipment = collect_dump_status_values(csv_text)
+
+    first_run = not baseline_path.exists()
+    if first_run:
+        known_order: set[str] = set()
+        known_shipment: set[str] = set()
+    else:
+        baseline = json.loads(baseline_path.read_text())
+        known_order = set(baseline.get("order_statuses", []))
+        known_shipment = set(baseline.get("shipment_statuses", []))
+
+    new_order = set() if first_run else current_order - known_order
+    new_shipment = set() if first_run else current_shipment - known_shipment
+
+    if first_run or new_order or new_shipment:
+        merged = {
+            "order_statuses": sorted(known_order | current_order),
+            "shipment_statuses": sorted(known_shipment | current_shipment),
+        }
+        baseline_path.write_text(json.dumps(merged, indent=2) + "\n")
+
+    return new_order, new_shipment
+
+
 def filter_shipments_to_window(
     shipments: list[AmazonShipment],
     since_date: date,

@@ -19,6 +19,7 @@ from categorizer import (
 from amazon_matcher import (
     is_amazon_payee, is_whole_foods_payee, find_latest_dump, extract_order_history_csv,
     parse_order_history, match_shipments_to_transactions, filter_shipments_to_window,
+    check_dump_schema_drift,
     _json_default, _md_escape, _next_free_path,
 )
 
@@ -606,6 +607,24 @@ def main(argv=None):
 
         csv_text = extract_order_history_csv(dump_path)
         shipments, parse_errors_list = parse_order_history(csv_text)
+
+        baseline_path = Path("data/cache/amazon_known_statuses.json")
+        baseline_path.parent.mkdir(parents=True, exist_ok=True)
+        new_order_st, new_ship_st = check_dump_schema_drift(csv_text, baseline_path)
+        if new_order_st or new_ship_st:
+            parts = []
+            if new_order_st:
+                parts.append(f"Order Status: {sorted(new_order_st)}")
+            if new_ship_st:
+                parts.append(f"Shipment Status: {sorted(new_ship_st)}")
+            msg = (
+                f"Unknown Amazon status values detected (possible dump-format drift) — "
+                + "; ".join(parts)
+                + f". Recorded in {baseline_path.name}; will not warn again."
+            )
+            print(f"Warning: {msg}")
+            logger.warning(msg)
+
         amazon_writable = [t for t in writable if is_amazon_payee(t.get("payee_name"))]
         date_window_days = config.get("amazon", {}).get("date_window_days", 3)
 

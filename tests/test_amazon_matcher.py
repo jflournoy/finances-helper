@@ -16,6 +16,8 @@ from amazon_matcher import (
     ParseError,
     _money,
     allocate_shipment_to_items,
+    check_dump_schema_drift,
+    collect_dump_status_values,
     extract_order_history_csv,
     filter_amazon_transactions,
     find_latest_dump,
@@ -750,6 +752,119 @@ class TestIntegrationParseOrderHistory:
 
             # Should have errors (EUR currency)
             assert len(errors) > 0
+
+
+# ============================================================================
+# Schema Drift Canary
+# ============================================================================
+
+
+_DUMP_HEADER = (
+    "Order ID,Order Date,Ship Date,Order Status,Shipment Status,"
+    "Payment Method Type,Currency,Unit Price,Unit Price Tax,"
+    "Shipment Item Subtotal,Shipment Item Subtotal Tax,Shipping Charge,"
+    "Total Amount,Total Discounts,ASIN,Product Name,Original Quantity"
+)
+
+
+def _dump_row(order_status: str = "Closed", shipment_status: str = "Shipped",
+              order_id: str = "111-0000001-0000001") -> str:
+    return (
+        f"{order_id},2024-01-15,2024-01-16,{order_status},{shipment_status},"
+        f"Visa - 0804,USD,29.99,2.10,29.99,2.10,5.00,37.09,0.00,B0C1234567,Widget,1"
+    )
+
+
+def _dump_csv(*rows: str) -> str:
+    return _DUMP_HEADER + "\n" + "\n".join(rows) + "\n"
+
+
+class TestCollectDumpStatusValues:
+    """Test the cheap status-value scan used by the schema-drift canary."""
+
+    def test_collects_distinct_statuses(self):
+        csv_text = _dump_csv(
+            _dump_row("Closed", "Shipped", "111-0000001-0000001"),
+            _dump_row("Closed", "Shipped", "111-0000001-0000002"),
+            _dump_row("Cancelled", "Not Available", "111-0000001-0000003"),
+        )
+        order, shipment = collect_dump_status_values(csv_text)
+        assert order == {"Closed", "Cancelled"}
+        assert shipment == {"Shipped", "Not Available"}
+
+    def test_skips_empty_status_values(self):
+        csv_text = _dump_csv(
+            _dump_row("Closed", "Shipped", "111-0000001-0000001"),
+            _dump_row("", "", "111-0000001-0000002"),
+        )
+        order, shipment = collect_dump_status_values(csv_text)
+        assert order == {"Closed"}
+        assert shipment == {"Shipped"}
+
+    def test_empty_dump_returns_empty_sets(self):
+        order, shipment = collect_dump_status_values(_DUMP_HEADER + "\n")
+        assert order == set()
+        assert shipment == set()
+
+
+class TestCheckDumpSchemaDrift:
+    """Test the learn-baseline drift check."""
+
+    def test_first_run_seeds_baseline_no_drift(self, tmp_path):
+        baseline = tmp_path / "amazon_known_statuses.json"
+        csv_text = _dump_csv(_dump_row("Closed", "Shipped"))
+
+        new_order, new_ship = check_dump_schema_drift(csv_text, baseline)
+
+        assert new_order == set()
+        assert new_ship == set()
+        assert baseline.exists()
+        data = json.loads(baseline.read_text())
+        assert data["order_statuses"] == ["Closed"]
+        assert data["shipment_statuses"] == ["Shipped"]
+
+    def test_second_run_with_same_values_no_drift(self, tmp_path):
+        baseline = tmp_path / "amazon_known_statuses.json"
+        csv_text = _dump_csv(_dump_row("Closed", "Shipped"))
+        check_dump_schema_drift(csv_text, baseline)
+
+        new_order, new_ship = check_dump_schema_drift(csv_text, baseline)
+
+        assert new_order == set()
+        assert new_ship == set()
+
+    def test_unknown_order_status_flagged_then_remembered(self, tmp_path):
+        baseline = tmp_path / "amazon_known_statuses.json"
+        baseline.write_text(json.dumps({
+            "order_statuses": ["Closed"],
+            "shipment_statuses": ["Shipped"],
+        }))
+        csv_text = _dump_csv(
+            _dump_row("Closed", "Shipped", "111-0000001-0000001"),
+            _dump_row("Pending", "Shipped", "111-0000001-0000002"),
+        )
+
+        new_order, new_ship = check_dump_schema_drift(csv_text, baseline)
+
+        assert new_order == {"Pending"}
+        assert new_ship == set()
+
+        new_order2, new_ship2 = check_dump_schema_drift(csv_text, baseline)
+        assert new_order2 == set()
+        assert new_ship2 == set()
+
+    def test_unknown_shipment_status_flagged(self, tmp_path):
+        baseline = tmp_path / "amazon_known_statuses.json"
+        baseline.write_text(json.dumps({
+            "order_statuses": ["Closed"],
+            "shipment_statuses": ["Shipped"],
+        }))
+        csv_text = _dump_csv(_dump_row("Closed", "Refunded"))
+
+        new_order, new_ship = check_dump_schema_drift(csv_text, baseline)
+
+        assert new_order == set()
+        assert new_ship == {"Refunded"}
 
 
 # ============================================================================
