@@ -18,6 +18,8 @@ from spending_advisor import (
     analyze_subscriptions,
     analyze_frequent_small_charges,
     analyze_trends,
+    synthesize_advisory,
+    ADVISOR_SYSTEM_PROMPT,
 )
 
 
@@ -422,3 +424,225 @@ def test_spending_context_has_all_fields(advisory_txns):
     assert hasattr(context, "payee_groups")
     assert hasattr(context, "insights")
     assert hasattr(context, "trends")
+
+
+# ============================================================================
+# analyze_trends (Issue B) tests
+# ============================================================================
+
+def test_analyze_trends_returns_empty_if_fewer_than_2_months():
+    monthly_by_category = {
+        "Dining Out": {"2025-05": 100.0},  # only 1 month
+    }
+    trends = analyze_trends(monthly_by_category)
+    assert len(trends) == 0, "Should return empty if fewer than 2 complete months"
+
+
+def test_analyze_trends_flags_category_trending_up():
+    monthly_by_category = {
+        "Dining Out": {"2025-01": 100.0, "2025-02": 130.0, "2025-03": 170.0},
+    }
+    trends = analyze_trends(monthly_by_category, min_monthly_spend=50.0)
+
+    assert len(trends) > 0, "Should flag category trending up"
+    assert trends[0].category_name == "Dining Out"
+    assert trends[0].direction == "up"
+
+
+def test_analyze_trends_flags_category_trending_down():
+    monthly_by_category = {
+        "Groceries": {"2025-01": 400.0, "2025-02": 350.0, "2025-03": 250.0},
+    }
+    trends = analyze_trends(monthly_by_category, min_monthly_spend=50.0)
+
+    assert len(trends) > 0, "Should flag category trending down"
+    assert trends[0].direction == "down"
+
+
+def test_analyze_trends_flat_when_change_below_threshold():
+    monthly_by_category = {
+        "Utilities": {"2025-01": 100.0, "2025-02": 102.0, "2025-03": 101.0},
+    }
+    trends = analyze_trends(monthly_by_category, min_monthly_spend=50.0)
+
+    # Flat trend should not be included (only significant changes)
+    assert all(t.direction != "flat" for t in trends), "Should not include flat trends"
+
+
+def test_analyze_trends_ignores_categories_below_min_monthly_spend():
+    monthly_by_category = {
+        "Small Category": {"2025-01": 10.0, "2025-02": 20.0, "2025-03": 30.0},
+        "Large Category": {"2025-01": 200.0, "2025-02": 250.0, "2025-03": 300.0},
+    }
+    trends = analyze_trends(monthly_by_category, min_monthly_spend=100.0)
+
+    assert all(
+        t.category_name != "Small Category" for t in trends
+    ), "Should filter out categories below min_monthly_spend"
+
+
+def test_analyze_trends_sorted_by_abs_pct_change_desc():
+    monthly_by_category = {
+        "Dining": {"2025-01": 100.0, "2025-02": 110.0, "2025-03": 180.0},  # big change
+        "Groceries": {"2025-01": 500.0, "2025-02": 520.0, "2025-03": 600.0},  # bigger change
+    }
+    trends = analyze_trends(monthly_by_category, min_monthly_spend=50.0)
+
+    if len(trends) > 1:
+        pct_changes = [abs(t.pct_change_recent) for t in trends]
+        assert pct_changes == sorted(pct_changes, reverse=True), "Should be sorted by abs pct change DESC"
+
+
+# ============================================================================
+# synthesize_advisory (Issue B) tests
+# ============================================================================
+
+def test_synthesize_advisory_calls_claude_with_correct_model():
+    context = SpendingContext(
+        period_days=90,
+        period_months_complete=3,
+        total_spend_dollars=1000.0,
+        spend_by_category={"Dining": 400.0, "Groceries": 600.0},
+        monthly_by_category={},
+        payee_groups={},
+        insights=[
+            SpendingInsight(
+                pattern_type="test",
+                title="Test insight",
+                estimated_monthly_savings_dollars=50.0,
+                payees_involved=["Test"],
+                evidence="test",
+                suggested_action="test",
+            )
+        ],
+        trends=[],
+    )
+
+    with patch("anthropic.Anthropic") as mock_client_cls:
+        mock_client = Mock()
+        mock_client_cls.return_value = mock_client
+        mock_response = Mock()
+        mock_response.stop_reason = "end_turn"
+        mock_response.content = [Mock(text="Test advisory response")]
+        mock_client.messages.create.return_value = mock_response
+
+        result = synthesize_advisory(context, "test-key", model="claude-sonnet-4-6")
+
+        assert result == "Test advisory response"
+        mock_client_cls.assert_called_once_with(api_key="test-key")
+        call_kwargs = mock_client.messages.create.call_args.kwargs
+        assert call_kwargs["model"] == "claude-sonnet-4-6"
+        assert call_kwargs["max_tokens"] == 1024
+
+
+def test_synthesize_advisory_includes_system_prompt():
+    context = SpendingContext(
+        period_days=90,
+        period_months_complete=3,
+        total_spend_dollars=1000.0,
+        spend_by_category={"Dining": 400.0},
+        monthly_by_category={},
+        payee_groups={},
+        insights=[],
+        trends=[],
+    )
+
+    with patch("anthropic.Anthropic") as mock_client_cls:
+        mock_client = Mock()
+        mock_client_cls.return_value = mock_client
+        mock_response = Mock()
+        mock_response.stop_reason = "end_turn"
+        mock_response.content = [Mock(text="Response")]
+        mock_client.messages.create.return_value = mock_response
+
+        synthesize_advisory(context, "test-key")
+
+        call_kwargs = mock_client.messages.create.call_args.kwargs
+        system_prompt = call_kwargs["system"]
+        assert "personal finance advisor" in system_prompt.lower()
+        assert "behavioral change" in system_prompt.lower()
+
+
+def test_synthesize_advisory_returns_prose_string(advisory_txns):
+    txns, cats = advisory_txns
+    filtered = filter_advisory_transactions(txns)
+    joined = join_category_names(filtered, cats)
+    context = collect_spending_data(joined)
+
+    with patch("anthropic.Anthropic") as mock_client_cls:
+        mock_client = Mock()
+        mock_client_cls.return_value = mock_client
+        mock_response = Mock()
+        mock_response.stop_reason = "end_turn"
+        mock_response.content = [Mock(text="Test prose response")]
+        mock_client.messages.create.return_value = mock_response
+
+        result = synthesize_advisory(context, "test-key")
+
+        assert isinstance(result, str)
+        assert len(result) > 0
+        assert "Test prose response" == result
+
+
+def test_synthesize_advisory_raises_on_empty_response():
+    context = SpendingContext(
+        period_days=90,
+        period_months_complete=3,
+        total_spend_dollars=1000.0,
+        spend_by_category={},
+        monthly_by_category={},
+        payee_groups={},
+        insights=[],
+        trends=[],
+    )
+
+    with patch("anthropic.Anthropic") as mock_client_cls:
+        mock_client = Mock()
+        mock_client_cls.return_value = mock_client
+        mock_response = Mock()
+        mock_response.stop_reason = "end_turn"
+        mock_response.content = []
+        mock_client.messages.create.return_value = mock_response
+
+        with pytest.raises(ValueError, match="empty"):
+            synthesize_advisory(context, "test-key")
+
+
+def test_synthesize_advisory_raises_on_max_tokens():
+    context = SpendingContext(
+        period_days=90,
+        period_months_complete=3,
+        total_spend_dollars=1000.0,
+        spend_by_category={},
+        monthly_by_category={},
+        payee_groups={},
+        insights=[],
+        trends=[],
+    )
+
+    with patch("anthropic.Anthropic") as mock_client_cls:
+        mock_client = Mock()
+        mock_client_cls.return_value = mock_client
+        mock_response = Mock()
+        mock_response.stop_reason = "max_tokens"
+        mock_response.content = [Mock(text="Truncated response")]
+        mock_client.messages.create.return_value = mock_response
+
+        with pytest.raises(ValueError, match="truncated"):
+            synthesize_advisory(context, "test-key")
+
+
+def test_synthesize_advisory_raises_on_missing_api_key():
+    context = SpendingContext(
+        period_days=90,
+        period_months_complete=3,
+        total_spend_dollars=1000.0,
+        spend_by_category={},
+        monthly_by_category={},
+        payee_groups={},
+        insights=[],
+        trends=[],
+    )
+
+    with pytest.raises(ValueError, match="api_key"):
+        synthesize_advisory(context, "")

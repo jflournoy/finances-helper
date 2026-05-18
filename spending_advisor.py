@@ -2,6 +2,7 @@
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Optional
+import anthropic
 
 
 @dataclass
@@ -492,3 +493,93 @@ def analyze_trends(
             )
 
     return sorted(trends, key=lambda t: abs(t.pct_change_recent), reverse=True)
+
+
+ADVISOR_SYSTEM_PROMPT = """You are a personal finance advisor. The user wants to reduce their spending.
+You have been given a structured summary of their spending patterns for the last {period_months} months.
+Your job is to write a plain-English advisory report.
+
+Rules:
+- Lead with the 1-2 highest-impact behavioral changes (by estimated dollar savings).
+- Be specific: name the payees, dollar amounts, frequency.
+- Be direct: "You spent $X on DoorDash" not "Some charges may indicate delivery usage."
+- Estimate total potential monthly savings if the user makes the suggested changes.
+- Acknowledge uncertainty where it exists (e.g., convenience store visits may include pharmacy).
+- Do NOT lecture about budgeting generally. Focus on what they can change.
+- Keep it under 400 words.
+"""
+
+
+def synthesize_advisory(
+    context: SpendingContext,
+    api_key: str,
+    model: str = "claude-sonnet-4-6",
+) -> str:
+    """Call Claude Sonnet with spending context; return prose advisory string.
+
+    Builds a user message summarizing period, total spend, top insights, and trends.
+    Returns raw prose text (not JSON). Raises ValueError on empty response or
+    max_tokens, RuntimeError on API error.
+    """
+    if not api_key:
+        raise ValueError("api_key is required for synthesis")
+
+    # Sort insights by estimated savings (descending)
+    sorted_insights = sorted(
+        context.insights,
+        key=lambda i: i.estimated_monthly_savings_dollars,
+        reverse=True,
+    )
+
+    # Build insights section
+    insights_text = "\n".join(
+        f"- {i.title}: ${i.estimated_monthly_savings_dollars:.2f}/month possible savings\n"
+        f"  Evidence: {i.evidence}\n"
+        f"  Action: {i.suggested_action}"
+        for i in sorted_insights
+    )
+
+    # Build trends section
+    trends_text = ""
+    if context.trends:
+        trends_text = "\n\nSpending Trends (complete months):\n"
+        for trend in context.trends:
+            trends_text += (
+                f"- {trend.category_name}: {trend.direction.upper()} "
+                f"({trend.pct_change_recent:+.1f}%)\n"
+            )
+
+    # Build user message
+    user_message = f"""Period: {context.period_days} days ({context.period_months_complete} complete months)
+Total Spending: ${context.total_spend_dollars:.2f}
+
+Spending by Category:
+{chr(10).join(f"- {cat}: ${total:.2f}" for cat, total in sorted(context.spend_by_category.items(), key=lambda x: -x[1]))}
+
+Key Insights (ranked by potential monthly savings):
+{insights_text}{trends_text}
+"""
+
+    system_prompt = ADVISOR_SYSTEM_PROMPT.format(
+        period_months=context.period_months_complete
+    )
+
+    client = anthropic.Anthropic(api_key=api_key)
+
+    response = client.messages.create(
+        model=model,
+        max_tokens=1024,
+        system=system_prompt,
+        messages=[{"role": "user", "content": user_message}],
+    )
+
+    # Validate response
+    if response.stop_reason == "max_tokens":
+        raise ValueError(
+            "Advisory response was truncated (max_tokens). Increase max_tokens."
+        )
+
+    if not response.content or not response.content[0].text:
+        raise ValueError("Claude returned empty advisory response")
+
+    return response.content[0].text
