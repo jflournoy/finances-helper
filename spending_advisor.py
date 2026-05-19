@@ -2,7 +2,15 @@
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Optional
+from pathlib import Path
 import anthropic
+from subscription_classifier import (
+    classify_billing_period,
+    infer_monthly_cost,
+    load_subscription_cache,
+    save_subscription_cache,
+    update_subscription_cache,
+)
 
 
 @dataclass
@@ -299,19 +307,35 @@ def analyze_convenience_markup(
 def analyze_subscriptions(
     transactions: list[dict],
     period_months: int,
+    cache_path: Path | None = None,
 ) -> list[SpendingInsight]:
-    """Identify likely recurring charges.
+    """Identify likely recurring charges with billing period classification.
 
-    Heuristic: payee appears >= (period_months - 1) times with
-    amounts within ±$2 of each other, charges >=25 days apart.
-    Excludes food/dining categories.
+    Detects recurring patterns (monthly, quarterly, annual, etc.) and uses
+    cached billing period info to accurately estimate monthly costs.
+
+    Heuristic: payee appears >= (period_months - 1) times with amounts within
+    ±$2 of each other, charges >=25 days apart. Excludes food/dining categories.
+
+    Args:
+        transactions: List of transactions
+        period_months: Number of complete months in observation period
+        cache_path: Path to subscriptions cache; if None, no caching
+
+    Returns:
+        List with single aggregated SpendingInsight or empty list
     """
     if period_months == 0:
         return []
 
+    if cache_path is None:
+        cache_path = Path(__file__).parent / "data" / "cache" / "subscriptions.json"
+
+    cache = load_subscription_cache(cache_path)
+
     payee_txns = {}
     for txn in transactions:
-        payee = txn.get("payee_name", "").lower().strip()
+        payee = (txn.get("payee_name") or "").lower().strip()
         if payee:
             if payee not in payee_txns:
                 payee_txns[payee] = []
@@ -326,44 +350,71 @@ def analyze_subscriptions(
         if any(word in category for word in ["dining", "restaurant", "food"]):
             continue
 
-        if len(txns) < max(2, period_months - 1):
-            continue
-
-        # Sort by date
         sorted_txns = sorted(txns, key=lambda t: t["date"])
-
-        # Check amount consistency
         amounts = [abs(t["amount_dollars"]) for t in sorted_txns]
+
+        # Check amount consistency (±$2)
         min_amt = min(amounts)
         max_amt = max(amounts)
 
         if max_amt - min_amt > 2.0:
             continue
 
-        # Check 25-day gap between consecutive charges
-        valid = True
-        for i in range(len(sorted_txns) - 1):
-            date1 = datetime.fromisoformat(sorted_txns[i]["date"])
-            date2 = datetime.fromisoformat(sorted_txns[i + 1]["date"])
-            gap_days = (date2 - date1).days
+        # Determine if this is a recurring subscription:
+        # 1. Direct detection: 2+ charges with >=25-day gaps
+        # 2. Cache hit: already classified in historical data
+        period = None
+        avg_gap = 0
+        min_gap = 0
+        max_gap = 0
 
-            if gap_days < 25:
-                valid = False
-                break
+        # Try direct detection first
+        if len(txns) >= max(2, period_months - 1):
+            valid = True
+            for i in range(len(sorted_txns) - 1):
+                date1 = datetime.fromisoformat(sorted_txns[i]["date"])
+                date2 = datetime.fromisoformat(sorted_txns[i + 1]["date"])
+                gap_days = (date2 - date1).days
 
-        if not valid:
+                if gap_days < 25:
+                    valid = False
+                    break
+
+            if valid:
+                # Classify billing period
+                period, avg_gap, min_gap, max_gap = classify_billing_period(
+                    payee, sorted_txns
+                )
+
+        # If not detected directly, check cache for billing period hint
+        # Only trust cache if the current observation amount matches historical pattern
+        if period is None and payee in cache:
+            cached = cache[payee]
+            # Verify the amount is consistent with historical data (±$3)
+            if abs(min_amt - cached.amount_usd) <= 3.0:
+                period = cached.billing_period
+                avg_gap = cached.avg_gap_days
+                min_gap = cached.min_gap_days
+                max_gap = cached.max_gap_days
+
+        # Skip if still not classified
+        if period is None:
             continue
 
-        monthly_cost = min_amt
+        # Compute monthly cost
         total_cost = sum(amounts)
-        monthly_avg = total_cost / period_months
+        monthly_cost = infer_monthly_cost(total_cost, period, period_months)
 
-        evidence = f"{len(sorted_txns)} charges at ${min_amt:.2f} (±$2.00 variance) over {period_months} months"
+        # Update cache only if we detected it directly (multiple transactions with gaps)
+        if len(txns) >= max(2, period_months - 1):
+            update_subscription_cache(cache, payee, sorted_txns)
+
+        evidence = f"{len(sorted_txns)} charges at ${min_amt:.2f} ({period}, {avg_gap:.0f}d gap) over {period_months} months"
 
         subscriptions.append(
             SpendingInsight(
                 pattern_type="subscription",
-                title=f"{payee.title()} (recurring)",
+                title=f"{payee.title()} ({period})",
                 estimated_monthly_savings_dollars=monthly_cost,
                 payees_involved=[payee],
                 evidence=evidence,
@@ -372,7 +423,11 @@ def analyze_subscriptions(
         )
 
     if not subscriptions:
+        save_subscription_cache(cache, cache_path)
         return []
+
+    # Save cache before returning
+    save_subscription_cache(cache, cache_path)
 
     # Aggregate into single insight
     total_monthly = sum(s.estimated_monthly_savings_dollars for s in subscriptions)
