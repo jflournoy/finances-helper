@@ -182,11 +182,11 @@ def ask_mixed_details():
 def main():
     """Main interactive review loop."""
     results_file = (
-        Path(__file__).parent.parent / "data" / "cache" / "subscriptions-full-history-all.json"
+        Path(__file__).parent.parent / "data" / "cache" / "subscriptions-full-history-v8-current.json"
     )
 
     if not results_file.exists():
-        print("Error: subscriptions-full-history-all.json not found")
+        print("Error: subscriptions-full-history-v8-current.json not found")
         sys.exit(1)
 
     with open(results_file) as f:
