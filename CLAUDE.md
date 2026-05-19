@@ -12,6 +12,17 @@
 
 Doing so makes it hard to approve or deny commands in settings.json
 
+### ALWAYS write Python/shell code to a file before running it
+
+Never use `python -c "..."`, `python3 -c "..."`, `uv run python -c "..."`, `bash -c "..."`, or heredoc-piped scripts (`python <<EOF ... EOF`) for anything beyond a single trivial expression. Even quick diagnostics, sanity checks, and one-off data peeks must be written to a file first and then executed.
+
+**Why**: inline `-c` invocations and heredocs cannot be allowlisted in `settings.json` — each one prompts the user for approval individually. Writing to a file (e.g. `scripts/scratch_check_tags.py`) lets the user pre-approve `uv run python scripts/*.py` once and run as many checks as needed without re-prompting.
+
+**How to apply**:
+- For ad-hoc diagnostics, write to `scripts/scratch_*.py` (already gitignored by convention or short-lived enough to delete after).
+- For reusable utilities, write to `scripts/<descriptive_name>.py`.
+- Only acceptable inline use: a single literal command with no logic, e.g. `python3 -c "import sys; print(sys.version)"`. Anything with a loop, import chain, or multi-line body goes in a file.
+
 ### NO SILENT FALLBACKS — THIS IS A HARD RULE
 
 Silent fallbacks are among the most dangerous patterns in software. They mask bugs, produce incorrect results quietly, and make debugging nearly impossible.
