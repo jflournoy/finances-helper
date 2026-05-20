@@ -311,11 +311,8 @@ def analyze_subscriptions(
 ) -> list[SpendingInsight]:
     """Identify likely recurring charges with billing period classification.
 
-    Detects recurring patterns (monthly, quarterly, annual, etc.) and uses
-    cached billing period info to accurately estimate monthly costs.
-
-    Heuristic: payee appears >= (period_months - 1) times with amounts within
-    ±$2 of each other, charges >=25 days apart. Excludes food/dining categories.
+    Uses manual subscription list for accuracy instead of temporal pattern matching.
+    Falls back to heuristic detection for any subscriptions not in the manual list.
 
     Args:
         transactions: List of transactions
@@ -327,6 +324,20 @@ def analyze_subscriptions(
     """
     if period_months == 0:
         return []
+
+    # Try to load manual subscription list first
+    manual_subs_path = Path(__file__).parent / "data" / "cache" / "subscriptions-manual.json"
+    manual_subs = {}
+    if manual_subs_path.exists():
+        import json
+        try:
+            with open(manual_subs_path) as f:
+                manual_data = json.load(f)
+                for sub in manual_data.get('active', []):
+                    payee_normalized = (sub.get('payee') or '').lower().strip()
+                    manual_subs[payee_normalized] = sub
+        except Exception:
+            pass
 
     if cache_path is None:
         cache_path = Path(__file__).parent / "data" / "cache" / "subscriptions.json"
@@ -353,63 +364,60 @@ def analyze_subscriptions(
         sorted_txns = sorted(txns, key=lambda t: t["date"])
         amounts = [abs(t["amount_dollars"]) for t in sorted_txns]
 
-        # Check amount consistency (±$2)
-        min_amt = min(amounts)
-        max_amt = max(amounts)
-
-        if max_amt - min_amt > 2.0:
-            continue
-
-        # Determine if this is a recurring subscription:
-        # 1. Direct detection: 2+ charges with >=25-day gaps
-        # 2. Cache hit: already classified in historical data
         period = None
-        avg_gap = 0
-        min_gap = 0
-        max_gap = 0
+        monthly_cost = 0
+        evidence = ""
 
-        # Try direct detection first
-        if len(txns) >= max(2, period_months - 1):
-            valid = True
-            for i in range(len(sorted_txns) - 1):
-                date1 = datetime.fromisoformat(sorted_txns[i]["date"])
-                date2 = datetime.fromisoformat(sorted_txns[i + 1]["date"])
-                gap_days = (date2 - date1).days
+        # First, check manual subscription list
+        if payee in manual_subs:
+            manual_sub = manual_subs[payee]
+            monthly_cost = abs(manual_sub.get('monthly_equivalent', 0))
+            period = manual_sub.get('frequency', 'unknown')
+            evidence = f"Verified subscription ({period}): {manual_sub.get('notes', '')}"
+        else:
+            # Fall back to heuristic detection
+            # Check amount consistency (±$2)
+            min_amt = min(amounts)
+            max_amt = max(amounts)
 
-                if gap_days < 25:
-                    valid = False
-                    break
+            if max_amt - min_amt > 2.0:
+                continue
 
-            if valid:
-                # Classify billing period
-                period, avg_gap, min_gap, max_gap = classify_billing_period(
-                    payee, sorted_txns
-                )
+            # Try direct detection: 2+ charges with >=25-day gaps
+            if len(txns) >= max(2, period_months - 1):
+                valid = True
+                for i in range(len(sorted_txns) - 1):
+                    date1 = datetime.fromisoformat(sorted_txns[i]["date"])
+                    date2 = datetime.fromisoformat(sorted_txns[i + 1]["date"])
+                    gap_days = (date2 - date1).days
 
-        # If not detected directly, check cache for billing period hint
-        # Only trust cache if the current observation amount matches historical pattern
-        if period is None and payee in cache:
-            cached = cache[payee]
-            # Verify the amount is consistent with historical data (±$3)
-            if abs(min_amt - cached.amount_usd) <= 3.0:
-                period = cached.billing_period
-                avg_gap = cached.avg_gap_days
-                min_gap = cached.min_gap_days
-                max_gap = cached.max_gap_days
+                    if gap_days < 25:
+                        valid = False
+                        break
 
-        # Skip if still not classified
-        if period is None:
-            continue
+                if valid:
+                    # Classify billing period
+                    period, avg_gap, min_gap, max_gap = classify_billing_period(
+                        payee, sorted_txns
+                    )
+                    total_cost = sum(amounts)
+                    monthly_cost = infer_monthly_cost(total_cost, period, period_months)
+                    evidence = f"{len(sorted_txns)} charges at ${min_amt:.2f} ({period}, {avg_gap:.0f}d gap) over {period_months} months"
 
-        # Compute monthly cost
-        total_cost = sum(amounts)
-        monthly_cost = infer_monthly_cost(total_cost, period, period_months)
+            # If not detected directly, check cache for billing period hint
+            if period is None and payee in cache:
+                cached = cache[payee]
+                min_amt = min(amounts)
+                # Verify the amount is consistent with historical data (±$3)
+                if abs(min_amt - cached.amount_usd) <= 3.0:
+                    period = cached.billing_period
+                    total_cost = sum(amounts)
+                    monthly_cost = infer_monthly_cost(total_cost, period, period_months)
+                    evidence = f"Detected in cache: {len(sorted_txns)} charges at ${min_amt:.2f} ({period})"
 
-        # Update cache only if we detected it directly (multiple transactions with gaps)
-        if len(txns) >= max(2, period_months - 1):
-            update_subscription_cache(cache, payee, sorted_txns)
-
-        evidence = f"{len(sorted_txns)} charges at ${min_amt:.2f} ({period}, {avg_gap:.0f}d gap) over {period_months} months"
+            # Skip if still not classified
+            if period is None:
+                continue
 
         subscriptions.append(
             SpendingInsight(
