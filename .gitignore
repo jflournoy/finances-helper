@@ -66,3 +66,8 @@ scripts/inflation_model
 scripts/inflation_model.hpp
 scripts/inflation_model_time_varying
 scripts/inflation_model_time_varying.hpp
+models/bvarima
+models/*.hpp
+
+# Scratch diagnostics (throwaway, per CLAUDE.md convention)
+scripts/scratch_*.py
