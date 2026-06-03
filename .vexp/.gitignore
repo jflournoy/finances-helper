@@ -8,6 +8,7 @@ daemon.log
 daemon.sock
 daemon.pid
 daemon.pipe
+mcp.token
 mcp.port
 healthy
 parent_workspace.json
