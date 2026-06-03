@@ -932,7 +932,7 @@ def test_apply_uses_report_dir_not_real_cache(apply_changeset_path, mock_client,
     data/cache/ directory must not receive any files (even if cwd is at the
     repo root)."""
     from amazon_confirm import apply_changeset
-    repo_root = Path("/home/jflournoy/code/finances-helper")
+    repo_root = Path(__file__).resolve().parent.parent
     real_cache_before = set((repo_root / "data" / "cache").glob("enrich-confirmed-*.json")) if (repo_root / "data" / "cache").exists() else set()
     apply_changeset(apply_changeset_path, mock_client, "budget-1", report_dir=tmp_path)
     real_cache_after = set((repo_root / "data" / "cache").glob("enrich-confirmed-*.json")) if (repo_root / "data" / "cache").exists() else set()
