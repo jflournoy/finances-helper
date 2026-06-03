@@ -18,7 +18,6 @@ from spending_advisor import (
     collect_spending_data,
     analyze_delivery_premium,
     analyze_convenience_markup,
-    analyze_subscriptions,
     analyze_frequent_small_charges,
     analyze_trends,
     synthesize_advisory,
@@ -178,7 +177,6 @@ def main() -> int:
     insights += analyze_convenience_markup(
         context.payee_groups, context.period_months_complete
     )
-    insights += analyze_subscriptions(joined_txns, context.period_months_complete)
 
     # Frequent small charges for dining/food categories
     for cat_name in context.spend_by_category:

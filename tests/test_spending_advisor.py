@@ -15,7 +15,6 @@ from spending_advisor import (
     collect_spending_data,
     analyze_delivery_premium,
     analyze_convenience_markup,
-    analyze_subscriptions,
     analyze_frequent_small_charges,
     analyze_trends,
     synthesize_advisory,
@@ -242,58 +241,6 @@ def test_analyze_convenience_markup_silent_below_50_dollars():
     }
     insights = analyze_convenience_markup(payee_groups, 3)
     assert len(insights) == 0, "Should not fire below $50 threshold"
-
-
-# ============================================================================
-# analyze_subscriptions tests
-# ============================================================================
-
-def test_analyze_subscriptions_detects_spotify_monthly(advisory_txns):
-    txns, cats = advisory_txns
-    filtered = filter_advisory_transactions(txns)
-    joined, _ = join_category_names(filtered, cats)
-
-    insights = analyze_subscriptions(joined, 3)
-    assert any("spotify" in i.title.lower() for i in insights), "Should detect Spotify subscription"
-
-
-def test_analyze_subscriptions_tolerates_2_dollar_variance(advisory_txns):
-    txns, cats = advisory_txns
-    filtered = filter_advisory_transactions(txns)
-    joined, _ = join_category_names(filtered, cats)
-
-    insights = analyze_subscriptions(joined, 3)
-    netflix_insights = [i for i in insights if "netflix" in i.title.lower()]
-    assert len(netflix_insights) > 0, "Netflix with $15.49 charges should be detected (within $2 variance)"
-
-
-def test_analyze_subscriptions_requires_25_day_gap():
-    daily_txns = [
-        {
-            "date": f"2025-01-{i:02d}",
-            "amount_dollars": -15.0,
-            "payee_name": "Daily Service",
-            "category_name": "Subscriptions",
-        }
-        for i in range(1, 10)
-    ]
-
-    insights = analyze_subscriptions(daily_txns, 1)
-    daily_insights = [i for i in insights if "daily" in i.title.lower()]
-    assert len(daily_insights) == 0, "Daily charges should not be flagged as subscription"
-
-
-def test_analyze_subscriptions_excludes_food_category_payees(advisory_txns):
-    txns, cats = advisory_txns
-    chipotle_txns = [t for t in txns if "chipotle" in t["payee_name"].lower()]
-    assert len(chipotle_txns) > 0
-
-    filtered = filter_advisory_transactions(txns)
-    joined, _ = join_category_names(filtered, cats)
-
-    insights = analyze_subscriptions(joined, 3)
-    chipotle_insights = [i for i in insights if "chipotle" in i.title.lower()]
-    assert len(chipotle_insights) == 0, "Chipotle in Dining category should be excluded"
 
 
 # ============================================================================
