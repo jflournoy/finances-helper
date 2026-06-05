@@ -22,6 +22,11 @@ from amazon_matcher import (
     check_dump_schema_drift,
     _json_default, _md_escape, _next_free_path,
 )
+from category_profiles import (
+    load_profiles, save_profiles, build_merchant_map_from_cache,
+    sync_merchants_into_profiles, backfill_from_ynab_subtransactions,
+    regenerate_stale,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -513,6 +518,46 @@ def write_unified_changeset(
     return md_path, json_path
 
 
+def build_profiles(cache, history_txns, anthropic_key, force_rebuild=False):
+    """Load and refresh the category profile store.
+
+    1. Load existing profiles (empty on first run).
+    2. Refresh per-category merchant lists from the payee cache.
+    3. Backfill item exemplars from already-split Amazon transactions in history.
+    4. Regenerate stale descriptions via Claude (all of them if force_rebuild).
+
+    Args:
+        cache: Payee frequency cache (source of per-category merchants).
+        history_txns: Broad transaction list (for exemplar backfill).
+        anthropic_key: Anthropic API key (for description generation).
+        force_rebuild: If True, mark every category dirty so all descriptions
+                      regenerate.
+
+    Returns:
+        The refreshed profiles dict (already saved to disk).
+    """
+    profiles = load_profiles()
+
+    merchant_map = build_merchant_map_from_cache(cache)
+    sync_merchants_into_profiles(profiles, merchant_map)
+
+    n_backfilled = backfill_from_ynab_subtransactions(profiles, history_txns)
+    if n_backfilled:
+        logger.info("Backfilled %d item exemplars from split Amazon history", n_backfilled)
+
+    if force_rebuild:
+        for cat in profiles["categories"].values():
+            cat["dirty"] = True
+            cat["description"] = ""
+
+    regenerated = regenerate_stale(profiles, anthropic_key)
+    if regenerated:
+        print(f"Generated category descriptions for {len(regenerated)} categories.")
+
+    save_profiles(profiles)
+    return profiles
+
+
 def main(argv=None):
     """Main entry point for enrich.py.
 
@@ -528,6 +573,12 @@ def main(argv=None):
     parser.add_argument("--days", type=int, required=True, help="Working window in days back from today")
     parser.add_argument("--dump", type=Path, default=None, help="Override path to Amazon order history zip/dir")
     parser.add_argument("--out-dir", type=Path, default=Path("data/cache"), help="Output directory for changeset files")
+    parser.add_argument(
+        "--rebuild-profiles",
+        action="store_true",
+        help="Force-regenerate ALL category profile descriptions from current "
+             "merchants/exemplars, then exit without categorizing.",
+    )
 
     args = parser.parse_args(argv)
 
@@ -580,11 +631,20 @@ def main(argv=None):
     recent_categories = filter_categories_by_usage(categories, k_txns)
 
     # Cache load (and bootstrap if needed) — BEFORE early return
+    all_txns = None
     cache = load_payee_cache()
     if not cache or cache.get("_migrated_from_v1"):
         all_txns, _ = client.get_transactions(budget_id)  # bootstrap-only fetch (call #5)
         cache = build_cache_from_transactions(all_txns)
         save_payee_cache(cache)
+
+    # --rebuild-profiles: regenerate every category description, then exit.
+    if args.rebuild_profiles:
+        if all_txns is None:
+            all_txns, _ = client.get_transactions(budget_id)
+        build_profiles(cache, all_txns, anthropic_key, force_rebuild=True)
+        print("Category profiles rebuilt.")
+        return 0
 
     # Filter writable uncategorized
     writable = filter_uncategorized_writable(txns_window)
@@ -594,11 +654,22 @@ def main(argv=None):
         print("No uncategorized writable transactions found.")
         return 0
 
+    has_amazon = any(is_amazon_payee(t.get("payee_name")) for t in writable)
+
+    # Category profiles teach Claude what each category means; they only affect
+    # Amazon item-level categorization, so build them only when Amazon work is
+    # present. This also avoids spending tokens on description generation on
+    # runs that never reach the Amazon item tier.
+    profiles = None
+    if has_amazon:
+        profile_history = all_txns if all_txns is not None else k_txns
+        profiles = build_profiles(cache, profile_history, anthropic_key)
+
     # Amazon dump (conditional on Amazon payees present)
     match_result = None
     dump_path = None
     shipments = []
-    if any(is_amazon_payee(t.get("payee_name")) for t in writable):
+    if has_amazon:
         try:
             dump_path = args.dump or find_latest_dump()
         except FileNotFoundError:
@@ -652,6 +723,7 @@ def main(argv=None):
         writable, cache, recent_categories, anthropic_key,
         K=K, confidence_threshold=confidence_threshold,
         amazon_matches=match_result,
+        profiles=profiles,
     )
 
     # Update cache with Claude-tier results
