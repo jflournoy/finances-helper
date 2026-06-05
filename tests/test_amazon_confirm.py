@@ -821,6 +821,85 @@ def test_apply_marks_applied_at_on_success(apply_changeset_path, mock_client, tm
         assert "applied_at" in proposal
 
 
+def test_apply_records_confirmed_items_into_profiles(apply_changeset_path, mock_client, tmp_path):
+    """Phase 4: applying Amazon splits teaches the category profile store.
+
+    The fixture maps "USB-C Cable 6ft" -> Electronics; after apply, the profiles
+    file must record that as the dominant category for that item.
+    """
+    from amazon_confirm import apply_changeset
+    from category_profiles import load_profiles, dominant_item_category
+
+    prof_path = tmp_path / "category_profiles.json"
+    apply_changeset(
+        apply_changeset_path, mock_client, "budget-1",
+        report_dir=tmp_path, profiles_path=prof_path,
+    )
+
+    assert prof_path.exists()
+    profiles = load_profiles(str(prof_path))
+    cat_id, cat_name = dominant_item_category(profiles, "USB-C Cable 6ft")
+    assert cat_name == "Electronics"
+    pb_id, pb_name = dominant_item_category(profiles, "Organic Peanut Butter")
+    assert pb_name == "Groceries"
+
+
+def test_apply_dry_run_records_nothing(apply_changeset_path, mock_client, tmp_path):
+    """Dry runs apply nothing, so they must learn nothing."""
+    from amazon_confirm import apply_changeset
+
+    prof_path = tmp_path / "category_profiles.json"
+    apply_changeset(
+        apply_changeset_path, mock_client, "budget-1",
+        dry_run=True, report_dir=tmp_path, profiles_path=prof_path,
+    )
+    assert not prof_path.exists()
+
+
+def test_apply_does_not_record_already_applied_or_review_skipped(apply_changeset_path, mock_client, tmp_path):
+    """Splits skipped this run (already-applied / review-skip) are not learned from."""
+    from amazon_confirm import apply_changeset
+    from category_profiles import load_profiles, dominant_item_category
+
+    cs = _read_changeset(apply_changeset_path)
+    # Mark the USB-C cable split as already applied and the groceries split as review-skipped.
+    for p in cs["amazon"]["proposed_splits"]:
+        names = [s.get("item", {}).get("product_name") for s in p["subtransactions"]]
+        if "USB-C Cable 6ft" in names:
+            p["applied_at"] = "2026-05-14T10:00:00"
+        if "Organic Peanut Butter" in names:
+            p["applied_at"] = "skipped-by-review:user"
+    apply_changeset_path.write_text(json.dumps(cs))
+
+    prof_path = tmp_path / "category_profiles.json"
+    apply_changeset(
+        apply_changeset_path, mock_client, "budget-1",
+        report_dir=tmp_path, profiles_path=prof_path,
+    )
+
+    if prof_path.exists():
+        profiles = load_profiles(str(prof_path))
+        assert dominant_item_category(profiles, "USB-C Cable 6ft") == (None, None)
+        assert dominant_item_category(profiles, "Organic Peanut Butter") == (None, None)
+
+
+def test_apply_learning_failure_does_not_crash_apply(apply_changeset_path, mock_client, tmp_path, caplog):
+    """A profile-learning failure must never mask a successful YNAB apply."""
+    import logging
+    from amazon_confirm import apply_changeset
+
+    with patch("category_profiles.record_confirmed_splits", side_effect=RuntimeError("boom")):
+        with caplog.at_level(logging.WARNING, logger="amazon_confirm"):
+            report = apply_changeset(
+                apply_changeset_path, mock_client, "budget-1",
+                report_dir=tmp_path, profiles_path=tmp_path / "category_profiles.json",
+            )
+
+    assert len(report.applied) >= 1
+    assert not report.aborted
+    assert any("profile learning skipped" in r.getMessage() for r in caplog.records)
+
+
 def test_apply_aborts_on_batch_conflict(apply_changeset_path, mock_client, tmp_path):
     """Batch mode: a 409 anywhere in the chunk aborts the whole chunk.
     The pre-batch per-txn 409-continue behavior was deliberately removed

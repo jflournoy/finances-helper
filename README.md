@@ -61,6 +61,12 @@ to your order-history dump, and categorizes everything via three tiers:
 2. **Fuzzy match** — catches payee name variations like store numbers (free)
 3. **Claude (Haiku, batched)** — only genuinely novel payees, batched into one API call
 
+For Amazon **item-level** splits, Claude is also told what each budget category
+*means* in your budget — a learned **category profile** (`data/cache/category_profiles.json`)
+built from the merchants you file under each category and refined by the item splits
+you confirm. This is what keeps "USB cable" landing in Home Goods rather than Computer.
+Rebuild the descriptions any time with `enrich.py --rebuild-profiles`.
+
 This **does not write to YNAB**. It produces a reviewable changeset under
 `data/cache/enrich-changeset-*.json` (+ a Markdown summary).
 
@@ -84,6 +90,9 @@ uv run python amazon_confirm.py data/cache/enrich-changeset-<timestamp>-reviewed
 
 Writes the reviewed changeset back to YNAB. Run `--dry-run` first to validate.
 Set `YNAB_SANDBOX_MODE=1` to target a test budget while you experiment.
+
+Applying Amazon splits also records each confirmed item→category into the category
+profile store, so your reviewed decisions sharpen future item categorization.
 
 ### Spending advice  (`/spend-advice`)
 
@@ -125,6 +134,7 @@ finances-helper/
 ├── ynab_client.py          # YNAB API wrapper (milliunits, dates, budget resolution)
 ├── amazon_matcher.py       # Match Amazon orders → YNAB transactions
 ├── categorizer.py          # Three-tier transaction categorization
+├── category_profiles.py    # Learned per-category meaning for Amazon item splits
 ├── payee_resolver.py       # Payee normalization / lookup
 ├── spending_advisor.py     # Behavioral spending insights
 ├── audit.py                # Read-only categorization audit
