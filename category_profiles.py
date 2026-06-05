@@ -1,0 +1,585 @@
+"""Learned category profiles for item-level Amazon categorization.
+
+Problem this solves
+-------------------
+When Claude categorizes individual Amazon items, it historically saw only the
+*names* of the user's YNAB categories (e.g. "Computer", "Home Goods"). With no
+sense of what those categories mean in this particular budget, it reasons from
+the generic English meaning of the words: "USB cable" sounds computer-ish, so it
+lands in "Computer" — when in this budget accessories belong in "Home Goods" and
+"Computer" is reserved for core components.
+
+A category profile teaches Claude what each category *means* here, at two levels:
+
+1. **Bootstrap descriptions** — for each category, we already know which
+   *merchants* the user files under it (from the payee frequency cache). We ask
+   Claude once to summarize "what kinds of purchases is this?" and cache the
+   one-line description.
+
+2. **Item exemplars** — as Amazon splits are confirmed, we accumulate concrete
+   (item -> category) examples with frequency counts. The dominant category wins
+   (recent confirmations break ties), mirroring the payee frequency cache. These
+   exemplars are injected alongside the description so Claude learns the boundary
+   ("USB cable -> Home Goods, GPU -> Computer").
+
+Refresh policy: descriptions are cached and regenerated only when a category is
+*stale* — it has no description yet, or enough new confirmed items have
+accumulated since it was last generated (STALE_ITEM_THRESHOLD).
+
+This module follows the same conventions as categorizer.py's payee cache:
+versioned JSON, loud errors, NO silent fallbacks.
+"""
+import re
+import json
+import logging
+from pathlib import Path
+
+import anthropic
+
+logger = logging.getLogger(__name__)
+
+PROFILES_VERSION = 1
+DEFAULT_PROFILES_PATH = "data/cache/category_profiles.json"
+
+# A category becomes stale (description worth regenerating) once this many new
+# confirmed item exemplars have accumulated since the last generation.
+STALE_ITEM_THRESHOLD = 5
+
+# How many exemplars per category to surface in the prompt (highest count first).
+MAX_EXEMPLARS_PER_CATEGORY = 8
+
+# Model used for the cheap bootstrap/refresh summarization call.
+_BOOTSTRAP_MODEL = "claude-haiku-4-5-20251001"
+
+
+# ---------------------------------------------------------------------------
+# Item name normalization
+# ---------------------------------------------------------------------------
+
+# Trailing pack/quantity noise that fragments otherwise-identical product names.
+_PACK_NOISE_RE = re.compile(
+    r"\s*\((?:pack of|set of|count of|qty)\s*\d+\)\s*$",
+    re.IGNORECASE,
+)
+
+
+def normalize_item_name(name: str) -> str:
+    """Normalize an Amazon product name into a stable exemplar key.
+
+    Lowercases, collapses whitespace, and strips trailing pack/quantity noise so
+    that "AmazonBasics USB Cable (Pack of 2)" and "(Pack of 6)" share one key.
+
+    Raises ValueError if the name is None, empty, or whitespace-only.
+    """
+    if name is None:
+        raise ValueError("Item name cannot be None")
+
+    name = name.strip()
+    if not name:
+        raise ValueError("Item name cannot be empty or whitespace-only")
+
+    name = name.lower()
+    name = _PACK_NOISE_RE.sub("", name)
+    name = re.sub(r"\s+", " ", name).strip()
+
+    if not name:
+        raise ValueError("Item name is empty after normalization")
+
+    return name
+
+
+# ---------------------------------------------------------------------------
+# Load / save
+# ---------------------------------------------------------------------------
+
+def _empty_profiles() -> dict:
+    return {"_version": PROFILES_VERSION, "categories": {}}
+
+
+def load_profiles(path: str = DEFAULT_PROFILES_PATH) -> dict:
+    """Load the category profile store from disk.
+
+    Returns an empty versioned store if the file doesn't exist (first-run case).
+
+    Raises ValueError if the file exists but contains invalid JSON.
+    """
+    profiles_path = Path(path)
+    if not profiles_path.exists():
+        return _empty_profiles()
+
+    try:
+        profiles = json.loads(profiles_path.read_text())
+    except json.JSONDecodeError as e:
+        raise ValueError(f"Invalid JSON in category profiles file {path}: {e}")
+
+    if profiles.get("_version") != PROFILES_VERSION:
+        raise ValueError(
+            f"Unsupported category profiles version {profiles.get('_version')!r} "
+            f"in {path} (expected {PROFILES_VERSION})"
+        )
+    profiles.setdefault("categories", {})
+    return profiles
+
+
+def save_profiles(profiles: dict, path: str = DEFAULT_PROFILES_PATH) -> None:
+    """Save the category profile store to disk."""
+    profiles_path = Path(path)
+    profiles_path.parent.mkdir(parents=True, exist_ok=True)
+    profiles_path.write_text(json.dumps(profiles, indent=2, sort_keys=True))
+
+
+def _ensure_category(profiles: dict, category_id: str, category_name: str) -> dict:
+    """Return the profile entry for category_id, creating it if absent."""
+    cats = profiles["categories"]
+    if category_id not in cats:
+        cats[category_id] = {
+            "name": category_name,
+            "description": "",
+            "merchants": [],
+            "item_exemplars": {},
+            "items_since_generation": 0,
+            "dirty": False,
+        }
+    elif category_name and not cats[category_id].get("name"):
+        cats[category_id]["name"] = category_name
+    return cats[category_id]
+
+
+# ---------------------------------------------------------------------------
+# Item exemplar learning (frequency-weighted, dominant wins, recent breaks ties)
+# ---------------------------------------------------------------------------
+
+def record_item_categorization(
+    profiles: dict,
+    product_name: str,
+    category_id: str,
+    category_name: str,
+) -> None:
+    """Record one confirmed (item -> category) exemplar.
+
+    Adds a frequency count under the normalized item name, mirroring the payee
+    frequency cache. Marks the category dirty and bumps its since-generation
+    counter so the description can be refreshed once enough new items accrue.
+
+    The exemplar count lives on BOTH the source category (so its description can
+    cite it) and is globally resolvable via dominant_item_category.
+
+    Modifies `profiles` in place.
+    """
+    norm = normalize_item_name(product_name)
+    cat = _ensure_category(profiles, category_id, category_name)
+
+    exemplars = cat["item_exemplars"]
+    if norm not in exemplars:
+        exemplars[norm] = {}
+    if category_id not in exemplars[norm]:
+        exemplars[norm][category_id] = {"name": category_name, "count": 0}
+    exemplars[norm][category_id]["count"] += 1
+
+    cat["items_since_generation"] = cat.get("items_since_generation", 0) + 1
+    cat["dirty"] = True
+
+
+def _all_exemplar_counts(profiles: dict, norm_item: str) -> dict:
+    """Aggregate counts for one item across every category that has it.
+
+    Item exemplars are stored under the category they were filed in, so the same
+    item can appear under multiple categories. This merges them into a single
+    {category_id: {"name", "count"}} view for dominance resolution.
+    """
+    merged: dict = {}
+    for cat in profiles["categories"].values():
+        entry = cat.get("item_exemplars", {}).get(norm_item)
+        if not entry:
+            continue
+        for cat_id, info in entry.items():
+            if cat_id not in merged:
+                merged[cat_id] = {"name": info["name"], "count": 0}
+            merged[cat_id]["count"] += info["count"]
+    return merged
+
+
+def dominant_item_category(profiles: dict, product_name: str) -> tuple:
+    """Return (category_id, category_name) for an item's dominant category.
+
+    Highest total count wins; ties broken by alphabetical category_id (matching
+    _dominant_category in categorizer.py — deterministic, recent confirmations
+    push the count up so the latest consistent signal dominates).
+
+    Returns (None, None) if the item has never been seen.
+    """
+    norm = normalize_item_name(product_name)
+    merged = _all_exemplar_counts(profiles, norm)
+    if not merged:
+        return (None, None)
+
+    max_count = -1
+    dom_id = None
+    dom_name = None
+    for cat_id, info in sorted(merged.items()):
+        if info["count"] > max_count:
+            max_count = info["count"]
+            dom_id = cat_id
+            dom_name = info["name"]
+    return (dom_id, dom_name)
+
+
+def backfill_from_ynab_subtransactions(profiles: dict, transactions: list) -> int:
+    """Seed item exemplars from already-split Amazon transactions in YNAB history.
+
+    For each Amazon transaction that has been split, every subtransaction with a
+    category and a memo (the memo holds the item description this tool writes)
+    becomes one (item -> category) exemplar. These are weak priors: each counts
+    once, so a handful of fresh confirmations outvote a stale historical split,
+    consistent with the "frequency-weighted, latest wins ties" policy.
+
+    Non-Amazon transactions and subtransactions missing a category or memo are
+    skipped.
+
+    Returns the number of exemplars recorded. Modifies `profiles` in place.
+    """
+    # Imported lazily to avoid a hard import cycle at module load.
+    from amazon_matcher import is_amazon_payee
+
+    recorded = 0
+    for txn in transactions:
+        if not is_amazon_payee(txn.get("payee_name")):
+            continue
+        for sub in txn.get("subtransactions") or []:
+            cat_id = sub.get("category_id")
+            cat_name = sub.get("category_name")
+            memo = (sub.get("memo") or "").strip()
+            if not cat_id or not memo:
+                continue
+            record_item_categorization(profiles, memo, cat_id, cat_name or "")
+            recorded += 1
+    return recorded
+
+
+def record_confirmed_splits(profiles: dict, applied_splits: list) -> int:
+    """Learn item exemplars from Amazon splits the user actually applied to YNAB.
+
+    This is the strongest signal available: each subtransaction here was reviewed
+    and written to a real budget, so it carries full frequency weight. As these
+    accumulate they outvote weaker historical/bootstrap priors — this is how a
+    user correction ("USB cable belongs in Home Goods, not Computer") propagates
+    into future categorization.
+
+    Args:
+        applied_splits: Changeset proposed_split dicts that were applied in this
+                       run (each with a "subtransactions" list whose entries carry
+                       item.product_name, category_id, category_name).
+
+    Subtransactions without a category_id are skipped (an uncategorized split is
+    never applied, but we guard defensively).
+
+    Returns the number of exemplars recorded. Modifies `profiles` in place.
+    """
+    recorded = 0
+    for split in applied_splits:
+        for sub in split.get("subtransactions") or []:
+            cat_id = sub.get("category_id")
+            if not cat_id:
+                continue
+            item = sub.get("item") or {}
+            product_name = (item.get("product_name") or "").strip()
+            if not product_name:
+                continue
+            record_item_categorization(
+                profiles, product_name, cat_id, sub.get("category_name") or ""
+            )
+            recorded += 1
+    return recorded
+
+
+def mark_dirty(profiles: dict, category_id: str) -> None:
+    """Flag a category's description as needing regeneration."""
+    cat = profiles["categories"].get(category_id)
+    if cat is None:
+        raise ValueError(f"mark_dirty: unknown category_id {category_id!r}")
+    cat["dirty"] = True
+
+
+def is_stale(cat: dict) -> bool:
+    """True if a category's description should be (re)generated.
+
+    A category is stale when it has no description yet, or it is dirty and has
+    accumulated at least STALE_ITEM_THRESHOLD new exemplars since last generation.
+    """
+    if not cat.get("description"):
+        return True
+    if cat.get("dirty") and cat.get("items_since_generation", 0) >= STALE_ITEM_THRESHOLD:
+        return True
+    return False
+
+
+# ---------------------------------------------------------------------------
+# Merchant map — derive per-category merchants from the payee frequency cache
+# ---------------------------------------------------------------------------
+
+def build_merchant_map_from_cache(payee_cache: dict) -> dict:
+    """Group payees by their dominant category from the payee frequency cache.
+
+    Returns {category_id: {"name": str, "merchants": [payee, ...]}}.
+
+    Alias entries (those with 'alias_of') and the cache's metadata keys are
+    skipped. Merchants are sorted by descending observation count so the most
+    representative ones lead.
+    """
+    by_category: dict = {}
+    scored: dict = {}  # category_id -> list[(count, payee)]
+
+    for key, entry in payee_cache.items():
+        if key.startswith("_"):
+            continue
+        if not isinstance(entry, dict) or "alias_of" in entry:
+            continue
+        categories = entry.get("categories")
+        if not categories:
+            continue
+
+        # Dominant category for this payee (highest count, alpha tiebreak).
+        max_count = -1
+        dom_id = None
+        dom_name = None
+        for cat_id, info in sorted(categories.items()):
+            if info["count"] > max_count:
+                max_count = info["count"]
+                dom_id = cat_id
+                dom_name = info["name"]
+        if dom_id is None:
+            continue
+
+        if dom_id not in by_category:
+            by_category[dom_id] = {"name": dom_name, "merchants": []}
+            scored[dom_id] = []
+        scored[dom_id].append((max_count, key))
+
+    for cat_id, pairs in scored.items():
+        pairs.sort(key=lambda p: (-p[0], p[1]))
+        by_category[cat_id]["merchants"] = [payee for _, payee in pairs]
+
+    return by_category
+
+
+def sync_merchants_into_profiles(profiles: dict, merchant_map: dict) -> None:
+    """Refresh each category's merchant list from a merchant map.
+
+    Creates category entries that don't exist yet. A category whose merchant set
+    changes is marked dirty so its description gets refreshed.
+
+    Modifies `profiles` in place.
+    """
+    for cat_id, info in merchant_map.items():
+        cat = _ensure_category(profiles, cat_id, info["name"])
+        new_merchants = info["merchants"]
+        if cat.get("merchants") != new_merchants:
+            cat["merchants"] = new_merchants
+            cat["dirty"] = True
+
+
+# ---------------------------------------------------------------------------
+# Bootstrap / regenerate descriptions via Claude
+# ---------------------------------------------------------------------------
+
+def _strip_code_fence(text: str) -> str:
+    stripped = text.strip()
+    if stripped.startswith("```"):
+        first_newline = stripped.index("\n")
+        stripped = stripped[first_newline + 1:]
+        if stripped.endswith("```"):
+            stripped = stripped[:-3]
+        stripped = stripped.strip()
+    return stripped
+
+
+def bootstrap_descriptions(profiles: dict, category_ids: list, api_key: str) -> None:
+    """Generate one-line descriptions for the given categories via Claude.
+
+    For each target category we feed Claude the merchants the user files under it
+    (and any item exemplars) and ask what kinds of purchases it represents. The
+    returned descriptions are written back and the categories' dirty flags /
+    counters reset.
+
+    No-op (no API call) if `category_ids` is empty.
+
+    Raises ValueError on a malformed response: bad JSON, truncation, an unknown
+    category_id, or a missing description (NO silent fallback).
+    """
+    if not category_ids:
+        return
+
+    requested = set(category_ids)
+    lines = []
+    for cat_id in category_ids:
+        cat = profiles["categories"].get(cat_id)
+        if cat is None:
+            raise ValueError(f"bootstrap_descriptions: unknown category_id {cat_id!r}")
+        merchants = ", ".join(cat.get("merchants", [])[:20]) or "(no known merchants)"
+        exemplar_names = list(cat.get("item_exemplars", {}).keys())[:15]
+        exemplars = ", ".join(exemplar_names) if exemplar_names else "(none yet)"
+        lines.append(
+            f'- category_id "{cat_id}" | name "{cat["name"]}"\n'
+            f"    merchants: {merchants}\n"
+            f"    example items: {exemplars}"
+        )
+    catalog = "\n".join(lines)
+
+    system_prompt = """You summarize what a personal-budget spending category MEANS,
+based on the merchants and example purchases the user files under it.
+
+For each category, write ONE concise sentence (max ~20 words) describing the
+kinds of purchases that belong in it — concrete enough to disambiguate similar
+categories (e.g. distinguish "Computer" core hardware from "Home Goods"
+accessories). Do not just restate the category name.
+
+Respond with ONLY a JSON array, one object per category, in any order:
+[{"category_id": "<id>", "description": "<one sentence>"}]"""
+
+    user_message = (
+        "Summarize each of these budget categories:\n\n" + catalog
+    )
+
+    max_tokens = max(1024, len(category_ids) * 120)
+    client = anthropic.Anthropic(api_key=api_key)
+    response = client.messages.create(
+        model=_BOOTSTRAP_MODEL,
+        max_tokens=max_tokens,
+        system=system_prompt,
+        messages=[{"role": "user", "content": user_message}],
+    )
+
+    if not response.content:
+        raise ValueError(
+            f"Claude returned empty content for category descriptions. "
+            f"stop_reason={response.stop_reason}"
+        )
+    text = response.content[0].text or ""
+    if not text.strip():
+        raise ValueError(
+            f"Claude returned empty text for category descriptions. "
+            f"stop_reason={response.stop_reason}"
+        )
+    if response.stop_reason == "max_tokens":
+        raise ValueError(
+            f"Claude category-description response truncated (max_tokens={max_tokens}, "
+            f"categories={len(category_ids)}). Last 200 chars: ...{text[-200:]}"
+        )
+
+    text = _strip_code_fence(text)
+    try:
+        data = json.loads(text)
+    except json.JSONDecodeError as e:
+        raise ValueError(
+            f"Claude returned unparseable category-description JSON: {e}. "
+            f"First 500 chars: {text[:500]}"
+        )
+    if not isinstance(data, list):
+        raise ValueError("Claude category-description response is not a JSON array")
+
+    seen = set()
+    for item in data:
+        if not isinstance(item, dict):
+            raise ValueError(f"Category-description entry is not an object: {item!r}")
+        cat_id = item.get("category_id")
+        desc = item.get("description")
+        if cat_id not in requested:
+            raise ValueError(
+                f"Claude returned unknown category_id {cat_id!r} "
+                f"(not among requested categories)"
+            )
+        if not desc or not str(desc).strip():
+            raise ValueError(f"Claude returned empty description for category_id {cat_id!r}")
+
+        cat = profiles["categories"][cat_id]
+        cat["description"] = str(desc).strip()
+        cat["items_since_generation"] = 0
+        cat["dirty"] = False
+        seen.add(cat_id)
+
+    missing = requested - seen
+    if missing:
+        raise ValueError(
+            f"Claude omitted descriptions for category_ids: {sorted(missing)}"
+        )
+
+
+def regenerate_stale(profiles: dict, api_key: str) -> list:
+    """Regenerate descriptions for all stale categories.
+
+    Returns the list of category_ids that were regenerated (empty if none were
+    stale — in which case no Claude call is made).
+    """
+    stale_ids = [
+        cat_id
+        for cat_id, cat in profiles["categories"].items()
+        if is_stale(cat)
+    ]
+    if not stale_ids:
+        return []
+    bootstrap_descriptions(profiles, stale_ids, api_key)
+    return stale_ids
+
+
+# ---------------------------------------------------------------------------
+# Prompt formatting — what Claude sees during item categorization
+# ---------------------------------------------------------------------------
+
+def format_profiles_for_prompt(categories: list, profiles: dict) -> str:
+    """Build the category block for the Amazon item-categorization prompt.
+
+    For each category we emit its name, id, learned description, and the items
+    for which THIS category is the dominant choice (so contradictory weak signals
+    don't leak across categories).
+
+    NO SILENT FALLBACK: a category without a learned description is still listed
+    (so categorization can proceed) but emits a logged warning — an undescribed
+    category is exactly the "USB cable -> Computer" failure mode this module
+    exists to fix, and the user should see that it hasn't been learned yet.
+
+    Args:
+        categories: YNAB category groups (filtered to recently-used).
+        profiles: The category profile store.
+
+    Returns:
+        A formatted multi-line string for inclusion in the system prompt.
+    """
+    cat_profiles = profiles.get("categories", {})
+
+    # Precompute, per category, the exemplar item names where it is dominant.
+    dominant_items: dict = {}
+    for cat in cat_profiles.values():
+        for norm_item in cat.get("item_exemplars", {}):
+            dom_id, _ = dominant_item_category(profiles, norm_item)
+            if dom_id is None:
+                continue
+            counts = _all_exemplar_counts(profiles, norm_item)
+            total = counts[dom_id]["count"]
+            dominant_items.setdefault(dom_id, []).append((total, norm_item))
+
+    out_lines = []
+    for group in categories:
+        for cat in group.get("categories", []):
+            cat_id = cat["id"]
+            name = cat["name"]
+            profile = cat_profiles.get(cat_id)
+            description = profile.get("description") if profile else None
+
+            if not description:
+                logger.warning(
+                    "Category %r (id %s) has no learned profile description; "
+                    "item categorization will rely on the bare name. Run a "
+                    "profile bootstrap to teach Claude what this category means.",
+                    name, cat_id,
+                )
+                out_lines.append(f"- {name} (ID: {cat_id})")
+            else:
+                out_lines.append(f"- {name} (ID: {cat_id}): {description}")
+
+            examples = dominant_items.get(cat_id, [])
+            if examples:
+                examples.sort(key=lambda p: (-p[0], p[1]))
+                top = [n for _, n in examples[:MAX_EXEMPLARS_PER_CATEGORY]]
+                out_lines.append(f"    examples: {', '.join(top)}")
+
+    return "\n".join(out_lines)
