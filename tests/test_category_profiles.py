@@ -25,6 +25,7 @@ from category_profiles import (
     dominant_item_category,
     mark_dirty,
     is_stale,
+    count_stale,
     record_rejection,
     record_rejections_from_applied,
     bootstrap_descriptions,
@@ -162,6 +163,23 @@ def test_is_stale_true_when_description_empty():
     # A category that has merchants but no description yet is always stale.
     cat = {"dirty": False, "description": ""}
     assert is_stale(cat) is True
+
+
+def test_count_stale_splits_undescribed_and_dirty():
+    profiles = _empty()
+    profiles["categories"] = {
+        "a": {"description": "good", "dirty": False},   # fresh
+        "b": {"description": "", "dirty": False},        # undescribed
+        "c": {"description": "had one", "dirty": True},  # dirty from rejection
+        "d": {"description": "", "dirty": True},         # undescribed takes precedence
+    }
+    n_undescribed, n_dirty = count_stale(profiles)
+    assert n_undescribed == 2
+    assert n_dirty == 1
+
+
+def test_count_stale_empty_profiles():
+    assert count_stale(_empty()) == (0, 0)
 
 
 def test_mark_dirty_sets_flag():

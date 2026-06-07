@@ -323,6 +323,73 @@ class TestEnrichMain:
         # profiles threaded into categorize_transactions
         assert mock_cat.call_args.kwargs.get("profiles") is sentinel_profiles
 
+    def test_normal_run_nudges_when_descriptions_stale(self, tmp_path, monkeypatch, capsys):
+        """A normal run prints a refresh nudge when dirty/undescribed categories exist."""
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.setenv("YNAB_API_TOKEN", "token123")
+        monkeypatch.setenv("ANTHROPIC_API_KEY", "key123")
+        monkeypatch.setenv("YNAB_DEFAULT_BUDGET", "b123")
+
+        txn = {
+            "id": "t1", "payee_name": "Some Store", "category_id": None,
+            "cleared": "cleared", "deleted": False, "approved": False,
+        }
+        mock_client = Mock()
+        mock_client.get_transactions.return_value = ([txn], 0)
+        mock_client.get_categories.return_value = []
+        mock_client.get_accounts.return_value = []
+        mock_client.resolve_budget_id.return_value = "b123"
+
+        stale_profiles = {
+            "_version": 1,
+            "categories": {
+                "a": {"name": "A", "description": "old", "dirty": True},
+                "b": {"name": "B", "description": "", "dirty": False},
+            },
+        }
+
+        with patch("enrich.YNABClient", return_value=mock_client):
+            with patch("enrich.load_payee_cache", return_value={"_version": 2}):
+                with patch("enrich.build_profiles", return_value=stale_profiles):
+                    with patch("enrich.categorize_transactions", return_value=([], [], [], [])):
+                        result = main(["--days", "30"])
+
+        assert result == 0
+        out = capsys.readouterr().out
+        assert "--refresh-profiles" in out
+        assert "--rebuild-profiles" in out
+
+    def test_normal_run_no_nudge_when_profiles_fresh(self, tmp_path, monkeypatch, capsys):
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.setenv("YNAB_API_TOKEN", "token123")
+        monkeypatch.setenv("ANTHROPIC_API_KEY", "key123")
+        monkeypatch.setenv("YNAB_DEFAULT_BUDGET", "b123")
+
+        txn = {
+            "id": "t1", "payee_name": "Some Store", "category_id": None,
+            "cleared": "cleared", "deleted": False, "approved": False,
+        }
+        mock_client = Mock()
+        mock_client.get_transactions.return_value = ([txn], 0)
+        mock_client.get_categories.return_value = []
+        mock_client.get_accounts.return_value = []
+        mock_client.resolve_budget_id.return_value = "b123"
+
+        fresh_profiles = {
+            "_version": 1,
+            "categories": {"a": {"name": "A", "description": "good", "dirty": False}},
+        }
+
+        with patch("enrich.YNABClient", return_value=mock_client):
+            with patch("enrich.load_payee_cache", return_value={"_version": 2}):
+                with patch("enrich.build_profiles", return_value=fresh_profiles):
+                    with patch("enrich.categorize_transactions", return_value=([], [], [], [])):
+                        result = main(["--days", "30"])
+
+        assert result == 0
+        out = capsys.readouterr().out
+        assert "--refresh-profiles" not in out
+
 
 class TestWriteUnifiedChangeset:
     """Test write_unified_changeset function."""

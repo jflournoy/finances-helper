@@ -25,7 +25,7 @@ from amazon_matcher import (
 from category_profiles import (
     load_profiles, save_profiles, build_merchant_map_from_cache,
     sync_merchants_into_profiles, backfill_from_ynab_subtransactions,
-    regenerate_stale,
+    regenerate_stale, count_stale,
 )
 
 logger = logging.getLogger(__name__)
@@ -693,6 +693,22 @@ def main(argv=None):
     # exist yet, format_profiles_for_prompt warns and falls back to bare names.
     profile_history = all_txns if all_txns is not None else k_txns
     profiles = build_profiles(cache, profile_history, anthropic_key, regenerate="none")
+
+    # Nudge: a normal run never regenerates descriptions, so stale ones (new
+    # categories, or ones the user overrode during review) silently keep their
+    # old meaning until an explicit refresh. Surface that so corrections don't
+    # pile up unused.
+    n_undescribed, n_dirty = count_stale(profiles)
+    if n_dirty:
+        print(
+            f"Note: {n_dirty} category description(s) are out of date from your "
+            f"prior review corrections. Run `enrich.py --refresh-profiles` to apply them."
+        )
+    if n_undescribed:
+        print(
+            f"Note: {n_undescribed} category(ies) have no learned description yet "
+            f"(using bare names). Run `enrich.py --rebuild-profiles` to generate them."
+        )
 
     # Amazon dump (conditional on Amazon payees present)
     match_result = None

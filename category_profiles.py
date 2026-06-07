@@ -423,6 +423,29 @@ def is_stale(cat: dict) -> bool:
     return bool(cat.get("dirty"))
 
 
+def count_stale(profiles: dict) -> tuple:
+    """Count categories whose descriptions are out of date, split by reason.
+
+    Returns (n_undescribed, n_dirty):
+    - n_undescribed: categories with no learned description yet (never built, or
+      no merchant history to bootstrap from). These fall back to bare names.
+    - n_dirty: categories that HAVE a description but were flagged by a rejection
+      (the user overrode Claude). Their description no longer matches the user's
+      decisions until refreshed.
+
+    A category counts in at most one bucket (undescribed takes precedence).
+    Used to nudge the user toward --refresh-profiles when corrections pile up.
+    """
+    n_undescribed = 0
+    n_dirty = 0
+    for cat in profiles.get("categories", {}).values():
+        if not cat.get("description"):
+            n_undescribed += 1
+        elif cat.get("dirty"):
+            n_dirty += 1
+    return (n_undescribed, n_dirty)
+
+
 # ---------------------------------------------------------------------------
 # Merchant map — derive per-category merchants from the payee frequency cache
 # ---------------------------------------------------------------------------
