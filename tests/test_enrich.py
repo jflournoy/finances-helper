@@ -235,7 +235,7 @@ class TestEnrichMain:
         assert result == 0
 
     def test_rebuild_profiles_flag_rebuilds_and_exits(self, tmp_path, monkeypatch):
-        """--rebuild-profiles force-rebuilds profiles, then exits 0 without categorizing."""
+        """--rebuild-profiles regenerates all descriptions (regenerate='all'), then exits 0 without categorizing."""
         monkeypatch.chdir(tmp_path)
         monkeypatch.setenv("YNAB_API_TOKEN", "token123")
         monkeypatch.setenv("ANTHROPIC_API_KEY", "key123")
@@ -251,26 +251,60 @@ class TestEnrichMain:
             with patch("enrich.load_payee_cache", return_value={"_version": 2}):
                 with patch("enrich.build_profiles") as mock_build:
                     with patch("enrich.categorize_transactions") as mock_cat:
-                        result = main(["--days", "30", "--rebuild-profiles"])
+                        result = main(["--rebuild-profiles"])
 
         assert result == 0
         mock_build.assert_called_once()
-        assert mock_build.call_args.kwargs.get("force_rebuild") is True
+        assert mock_build.call_args.kwargs.get("regenerate") == "all"
         mock_cat.assert_not_called()
 
-    def test_profiles_built_and_passed_when_amazon_present(self, tmp_path, monkeypatch):
-        """When writable Amazon txns exist, profiles are built and threaded into categorization."""
+    def test_refresh_profiles_flag_regenerates_stale_and_exits(self, tmp_path, monkeypatch):
+        """--refresh-profiles regenerates only flagged descriptions (regenerate='stale'), then exits 0."""
         monkeypatch.chdir(tmp_path)
         monkeypatch.setenv("YNAB_API_TOKEN", "token123")
         monkeypatch.setenv("ANTHROPIC_API_KEY", "key123")
         monkeypatch.setenv("YNAB_DEFAULT_BUDGET", "b123")
 
-        amazon_txn = {
-            "id": "t1", "payee_name": "Amazon", "category_id": None,
+        mock_client = Mock()
+        mock_client.get_transactions.return_value = ([], 0)
+        mock_client.get_categories.return_value = []
+        mock_client.get_accounts.return_value = []
+        mock_client.resolve_budget_id.return_value = "b123"
+
+        with patch("enrich.YNABClient", return_value=mock_client):
+            with patch("enrich.load_payee_cache", return_value={"_version": 2}):
+                with patch("enrich.build_profiles") as mock_build:
+                    with patch("enrich.categorize_transactions") as mock_cat:
+                        result = main(["--refresh-profiles"])
+
+        assert result == 0
+        mock_build.assert_called_once()
+        assert mock_build.call_args.kwargs.get("regenerate") == "stale"
+        mock_cat.assert_not_called()
+
+    def test_days_required_without_profile_command(self, monkeypatch):
+        """--days is required for a normal run, optional for profile-only commands."""
+        monkeypatch.setenv("YNAB_API_TOKEN", "token123")
+        monkeypatch.setenv("ANTHROPIC_API_KEY", "key123")
+        monkeypatch.setenv("YNAB_DEFAULT_BUDGET", "b123")
+        with pytest.raises(SystemExit) as exc_info:
+            main([])
+        assert exc_info.value.code == 2
+
+    def test_profiles_loaded_without_regeneration_on_normal_run(self, tmp_path, monkeypatch):
+        """A normal run loads profiles with regenerate='none' (no mid-run Claude bootstrap)
+        and threads them into categorization."""
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.setenv("YNAB_API_TOKEN", "token123")
+        monkeypatch.setenv("ANTHROPIC_API_KEY", "key123")
+        monkeypatch.setenv("YNAB_DEFAULT_BUDGET", "b123")
+
+        txn = {
+            "id": "t1", "payee_name": "Some Store", "category_id": None,
             "cleared": "cleared", "deleted": False, "approved": False,
         }
         mock_client = Mock()
-        mock_client.get_transactions.return_value = ([amazon_txn], 0)
+        mock_client.get_transactions.return_value = ([txn], 0)
         mock_client.get_categories.return_value = []
         mock_client.get_accounts.return_value = []
         mock_client.resolve_budget_id.return_value = "b123"
@@ -279,14 +313,15 @@ class TestEnrichMain:
 
         with patch("enrich.YNABClient", return_value=mock_client):
             with patch("enrich.load_payee_cache", return_value={"_version": 2}):
-                with patch("enrich.find_latest_dump", side_effect=FileNotFoundError):
-                    with patch("enrich.build_profiles", return_value=sentinel_profiles) as mock_build:
+                with patch("enrich.build_profiles", return_value=sentinel_profiles) as mock_build:
+                    with patch("enrich.categorize_transactions", return_value=([], [], [], [])) as mock_cat:
                         result = main(["--days", "30"])
 
-        # Amazon present but no dump -> exit 2; profiles must already have been built
-        # before the dump check so this proves the build ran on the Amazon path.
-        assert result == 2
+        assert result == 0
         mock_build.assert_called_once()
+        assert mock_build.call_args.kwargs.get("regenerate") == "none"
+        # profiles threaded into categorize_transactions
+        assert mock_cat.call_args.kwargs.get("profiles") is sentinel_profiles
 
 
 class TestWriteUnifiedChangeset:

@@ -698,13 +698,24 @@ def fuzzy_match(
     )
 
 
-def claude_categorize(transactions: list[dict], categories: list[dict], api_key: str) -> list[CategoryResult]:
+def claude_categorize(
+    transactions: list[dict],
+    categories: list[dict],
+    api_key: str,
+    profiles: dict | None = None,
+) -> list[CategoryResult]:
     """Categorize transactions using Claude Haiku.
 
     Args:
         transactions: List of YNAB transaction dicts to categorize
         categories: List of YNAB category group dicts (for context)
         api_key: Anthropic API key
+        profiles: Optional category profile store. When provided, each category
+                 is presented with its learned description (descriptions only —
+                 no item exemplars, which describe products not merchants) so
+                 Claude understands what the category means in this budget rather
+                 than reasoning from the generic sense of its name. When None,
+                 falls back to bare category names.
 
     Returns:
         List of CategoryResult objects in same order as input transactions.
@@ -716,11 +727,17 @@ def claude_categorize(transactions: list[dict], categories: list[dict], api_key:
         return []
 
     # Build category list for system prompt
-    category_text = ""
-    for group in categories:
-        category_text += f"{group['name']}:\n"
-        for cat in group.get("categories", []):
-            category_text += f"  - {cat['name']} (ID: {cat['id']})\n"
+    if profiles is not None:
+        from category_profiles import format_profiles_for_prompt
+        category_text = format_profiles_for_prompt(
+            categories, profiles, include_exemplars=False
+        )
+    else:
+        category_text = ""
+        for group in categories:
+            category_text += f"{group['name']}:\n"
+            for cat in group.get("categories", []):
+                category_text += f"  - {cat['name']} (ID: {cat['id']})\n"
 
     # Build user message with transactions
     txn_list = ""
@@ -1161,7 +1178,7 @@ def categorize_transactions(
     if tier3_pending:
         for i in range(0, len(tier3_pending), CLAUDE_BATCH_SIZE):
             batch = tier3_pending[i:i + CLAUDE_BATCH_SIZE]
-            tier3_results = claude_categorize(batch, categories, api_key)
+            tier3_results = claude_categorize(batch, categories, api_key, profiles=profiles)
             results.extend(tier3_results)
 
     # Process Amazon transactions
