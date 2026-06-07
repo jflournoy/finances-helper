@@ -362,6 +362,12 @@ def _edit_split_items(split: dict, categories: list[dict]) -> None:
             if new_cat is None:
                 print("    cancelled; keeping")
                 continue
+            # Stash the original so apply-time learning can detect this as a
+            # rejection of the proposed category (mirrors _mark_recategorized for
+            # payee-level proposals). Without this, the override is invisible to
+            # the category-profile refresh loop.
+            sub["original_category_id"] = sub.get("category_id")
+            sub["original_category_name"] = sub.get("category_name")
             sub["category_id"] = new_cat["id"]
             sub["category_name"] = new_cat["name"]
             print(f"    → {new_cat['name']}")

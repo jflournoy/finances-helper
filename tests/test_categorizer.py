@@ -581,6 +581,58 @@ def test_claude_categorize_uses_haiku_model():
     assert call_kwargs["model"] == "claude-haiku-4-5-20251001"
 
 
+def test_claude_categorize_injects_profile_descriptions():
+    """When profiles are passed, the payee prompt carries learned descriptions (no item exemplars)."""
+    from category_profiles import PROFILES_VERSION
+    transactions = [{"id": "txn1", "payee_name": "MicroCenter", "amount": -5000, "date": "2026-03-20"}]
+    categories = [{"id": "g1", "name": "Tech", "categories": [{"id": "c1", "name": "Computer"}]}]
+    profiles = {
+        "_version": PROFILES_VERSION,
+        "categories": {
+            "c1": {
+                "name": "Computer",
+                "description": "Core computing hardware and components.",
+                "merchants": ["Newegg"],
+                "item_exemplars": {"gpu": {"c1": {"name": "Computer", "count": 3}}},
+                "items_since_generation": 0, "dirty": False,
+            }
+        },
+    }
+    mock_response = Mock()
+    mock_response.content = [Mock(text='[{"payee_name": "MicroCenter", "category_id": "c1", "category_name": "Computer", "confidence": 0.8, "rationale": "r", "prior_strength": 10}]')]
+
+    with patch("categorizer.anthropic.Anthropic") as mock_cls:
+        mock_client = Mock()
+        mock_cls.return_value = mock_client
+        mock_client.messages.create.return_value = mock_response
+        claude_categorize(transactions, categories, "test-key", profiles=profiles)
+
+    system_prompt = mock_client.messages.create.call_args.kwargs["system"]
+    assert "Core computing hardware and components." in system_prompt
+    assert "c1" in system_prompt
+    # descriptions-only: item exemplars must NOT appear in the payee prompt
+    assert "gpu" not in system_prompt
+    assert "examples:" not in system_prompt
+
+
+def test_claude_categorize_no_profiles_uses_bare_names():
+    """Backward compat: with profiles=None the payee prompt still lists bare names/ids."""
+    transactions = [{"id": "txn1", "payee_name": "Store", "amount": -1000, "date": "2026-03-20"}]
+    categories = [{"id": "g1", "name": "Tech", "categories": [{"id": "c1", "name": "Computer"}]}]
+    mock_response = Mock()
+    mock_response.content = [Mock(text='[{"payee_name": "Store", "category_id": "c1", "category_name": "Computer", "confidence": 0.8, "rationale": "r", "prior_strength": 10}]')]
+
+    with patch("categorizer.anthropic.Anthropic") as mock_cls:
+        mock_client = Mock()
+        mock_cls.return_value = mock_client
+        mock_client.messages.create.return_value = mock_response
+        claude_categorize(transactions, categories, "test-key")
+
+    system_prompt = mock_client.messages.create.call_args.kwargs["system"]
+    assert "c1" in system_prompt
+    assert "Computer" in system_prompt
+
+
 def test_claude_categorize_max_tokens_scales_with_batch_size():
     transactions = [
         {"id": f"txn{i}", "payee_name": f"Store{i}", "amount": -1000, "date": "2026-03-20"}
@@ -2102,6 +2154,77 @@ def test_claude_categorize_amazon_items_prompt_contents():
     assert "Rewards Visa" in user_msg
 
 
+def _profiles_with_description(cat_id, name, description, exemplars=None):
+    from category_profiles import PROFILES_VERSION
+    return {
+        "_version": PROFILES_VERSION,
+        "categories": {
+            cat_id: {
+                "name": name,
+                "description": description,
+                "merchants": [],
+                "item_exemplars": exemplars or {},
+                "items_since_generation": 0,
+                "dirty": False,
+            }
+        },
+    }
+
+
+def test_claude_categorize_amazon_items_injects_profile_descriptions():
+    """When profiles are passed, the system prompt carries learned descriptions."""
+    from categorizer import claude_categorize_amazon_items
+
+    cat_id = "e5d6a5ee-c297-4e4f-8bc9-64c3b15b4c90"
+    profiles = _profiles_with_description(
+        cat_id, "Shopping", "Everyday household items and accessories."
+    )
+    allocations = [_make_allocation(_make_item())]
+    response_data = json.dumps([
+        {"item_index": 1, "category_id": None, "category_name": None, "confidence": 0.0, "rationale": "r"}
+    ])
+    mock_response = Mock()
+    mock_response.content = [Mock(text=response_data)]
+    mock_response.stop_reason = "end_turn"
+
+    with patch("categorizer.anthropic.Anthropic") as mock_cls:
+        mock_client = Mock()
+        mock_cls.return_value = mock_client
+        mock_client.messages.create.return_value = mock_response
+        claude_categorize_amazon_items(
+            _make_parent_txn(), allocations, CATEGORIES_FIXTURE, "key", profiles=profiles
+        )
+
+    system_prompt = mock_client.messages.create.call_args.kwargs["system"]
+    assert "Everyday household items and accessories." in system_prompt
+    assert cat_id in system_prompt
+
+
+def test_claude_categorize_amazon_items_no_profiles_uses_bare_names():
+    """Backward compat: with profiles=None the prompt still lists bare category names/ids."""
+    from categorizer import claude_categorize_amazon_items
+
+    allocations = [_make_allocation(_make_item())]
+    response_data = json.dumps([
+        {"item_index": 1, "category_id": None, "category_name": None, "confidence": 0.0, "rationale": "r"}
+    ])
+    mock_response = Mock()
+    mock_response.content = [Mock(text=response_data)]
+    mock_response.stop_reason = "end_turn"
+
+    with patch("categorizer.anthropic.Anthropic") as mock_cls:
+        mock_client = Mock()
+        mock_cls.return_value = mock_client
+        mock_client.messages.create.return_value = mock_response
+        claude_categorize_amazon_items(
+            _make_parent_txn(), allocations, CATEGORIES_FIXTURE, "key"
+        )
+
+    system_prompt = mock_client.messages.create.call_args.kwargs["system"]
+    assert "e5d6a5ee-c297-4e4f-8bc9-64c3b15b4c90" in system_prompt
+    assert "Electronics" in system_prompt
+
+
 # ============================================================================
 # Tests for Phase D: categorize_transactions 4-tuple return (Issue #84)
 # ============================================================================
@@ -2561,7 +2684,7 @@ def test_integration_orchestrator_end_to_end():
     assert len(match_result.unmatched_ynab) > 0, "Fixture should have unmatched YNAB txns"
 
     # Mock Claude to return categorizations for all items
-    def mock_claude_response(parent_txn, allocations, categories, api_key):
+    def mock_claude_response(parent_txn, allocations, categories, api_key, profiles=None):
         results = []
         for i, alloc in enumerate(allocations, 1):
             results.append(ItemCategoryResult(
@@ -2577,7 +2700,7 @@ def test_integration_orchestrator_end_to_end():
 
     cache = {}
 
-    def mock_claude_categorize(batch, categories, api_key):
+    def mock_claude_categorize(batch, categories, api_key, profiles=None):
         """Mock claude_categorize for non-Amazon txns (Target, etc.)."""
         return [CategoryResult(
             transaction_id=t["id"],

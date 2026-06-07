@@ -698,13 +698,24 @@ def fuzzy_match(
     )
 
 
-def claude_categorize(transactions: list[dict], categories: list[dict], api_key: str) -> list[CategoryResult]:
+def claude_categorize(
+    transactions: list[dict],
+    categories: list[dict],
+    api_key: str,
+    profiles: dict | None = None,
+) -> list[CategoryResult]:
     """Categorize transactions using Claude Haiku.
 
     Args:
         transactions: List of YNAB transaction dicts to categorize
         categories: List of YNAB category group dicts (for context)
         api_key: Anthropic API key
+        profiles: Optional category profile store. When provided, each category
+                 is presented with its learned description (descriptions only —
+                 no item exemplars, which describe products not merchants) so
+                 Claude understands what the category means in this budget rather
+                 than reasoning from the generic sense of its name. When None,
+                 falls back to bare category names.
 
     Returns:
         List of CategoryResult objects in same order as input transactions.
@@ -716,11 +727,17 @@ def claude_categorize(transactions: list[dict], categories: list[dict], api_key:
         return []
 
     # Build category list for system prompt
-    category_text = ""
-    for group in categories:
-        category_text += f"{group['name']}:\n"
-        for cat in group.get("categories", []):
-            category_text += f"  - {cat['name']} (ID: {cat['id']})\n"
+    if profiles is not None:
+        from category_profiles import format_profiles_for_prompt
+        category_text = format_profiles_for_prompt(
+            categories, profiles, include_exemplars=False
+        )
+    else:
+        category_text = ""
+        for group in categories:
+            category_text += f"{group['name']}:\n"
+            for cat in group.get("categories", []):
+                category_text += f"  - {cat['name']} (ID: {cat['id']})\n"
 
     # Build user message with transactions
     txn_list = ""
@@ -858,6 +875,7 @@ def claude_categorize_amazon_items(
     allocations: list[ItemAllocation],
     categories: list[dict],
     api_key: str,
+    profiles: dict | None = None,
 ) -> list[ItemCategoryResult]:
     """Categorize Amazon shipment items using Claude Haiku.
 
@@ -869,6 +887,12 @@ def claude_categorize_amazon_items(
                     Must be non-empty.
         categories: YNAB category groups (filtered to recently-used).
         api_key: Anthropic API key.
+        profiles: Optional category profile store (see category_profiles.py).
+                 When provided, each category is presented to Claude with its
+                 learned description and item exemplars so it understands what
+                 the category MEANS in this budget (e.g. "USB cable" -> Home
+                 Goods, not Computer). When None, falls back to bare category
+                 names — preserving prior behavior.
 
     Returns:
         List of ItemCategoryResult, one per allocation, in input order.
@@ -881,13 +905,20 @@ def claude_categorize_amazon_items(
     if not allocations:
         raise ValueError("allocations must be non-empty")
 
-    category_text = ""
     valid_category_ids = set()
     for group in categories:
-        category_text += f"{group['name']}:\n"
         for cat in group.get("categories", []):
-            category_text += f"  - {cat['name']} (ID: {cat['id']})\n"
             valid_category_ids.add(cat["id"])
+
+    if profiles is not None:
+        from category_profiles import format_profiles_for_prompt
+        category_text = format_profiles_for_prompt(categories, profiles)
+    else:
+        category_text = ""
+        for group in categories:
+            category_text += f"{group['name']}:\n"
+            for cat in group.get("categories", []):
+                category_text += f"  - {cat['name']} (ID: {cat['id']})\n"
 
     order_id = allocations[0].item.order_id
     ship_date = allocations[0].item.ship_date
@@ -1030,6 +1061,7 @@ def categorize_transactions(
     confidence_threshold: float = DEFAULT_CONFIDENCE_THRESHOLD,
     amazon_matches: "MatchResult | None" = None,
     resolve_payees: bool = False,
+    profiles: dict | None = None,
 ) -> tuple[list[CategoryResult], list[dict], list[tuple[dict, str]], list[AmazonSplitProposal]]:
     """Orchestrate the three-tier categorization for a list of transactions.
 
@@ -1041,6 +1073,8 @@ def categorize_transactions(
         K: Number of categories for Bayesian confidence. None = legacy mode.
         confidence_threshold: Minimum confidence for tiers 1 and 2.
         amazon_matches: MatchResult from amazon_matcher, or None to skip Amazon routing.
+        profiles: Optional category profile store passed through to Amazon
+                 item categorization so Claude sees learned category meanings.
 
     Returns:
         4-tuple: (results, skipped, unmatched_amazon, split_proposals)
@@ -1144,7 +1178,7 @@ def categorize_transactions(
     if tier3_pending:
         for i in range(0, len(tier3_pending), CLAUDE_BATCH_SIZE):
             batch = tier3_pending[i:i + CLAUDE_BATCH_SIZE]
-            tier3_results = claude_categorize(batch, categories, api_key)
+            tier3_results = claude_categorize(batch, categories, api_key, profiles=profiles)
             results.extend(tier3_results)
 
     # Process Amazon transactions
@@ -1205,6 +1239,7 @@ def categorize_transactions(
             allocations,
             categories,
             api_key,
+            profiles=profiles,
         )
 
         # Compute parent amount quantized to 2dp

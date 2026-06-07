@@ -22,6 +22,11 @@ from amazon_matcher import (
     check_dump_schema_drift,
     _json_default, _md_escape, _next_free_path,
 )
+from category_profiles import (
+    load_profiles, save_profiles, build_merchant_map_from_cache,
+    sync_merchants_into_profiles, backfill_from_ynab_subtransactions,
+    regenerate_stale, count_stale,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -513,6 +518,58 @@ def write_unified_changeset(
     return md_path, json_path
 
 
+def build_profiles(cache, history_txns, anthropic_key, *, regenerate="none"):
+    """Load and update the category profile store.
+
+    Category-description generation is an explicit, expensive asset — it is NOT
+    triggered by routine enrich runs. The data-sync steps (merchants, exemplar
+    backfill) are cheap and always run; whether descriptions get (re)generated is
+    controlled by `regenerate`:
+
+    - "none"    — sync data only, never call Claude. Used to load profiles for
+                  prompt injection during a normal enrich run.
+    - "stale"   — regenerate only categories flagged stale (no description yet,
+                  or dirtied by a rejection). The --refresh-profiles path.
+    - "all"     — force every category's description to regenerate. The
+                  --rebuild-profiles (setup) path.
+
+    Args:
+        cache: Payee frequency cache (source of per-category merchants).
+        history_txns: Broad transaction list (for exemplar backfill).
+        anthropic_key: Anthropic API key (only used when regenerate != "none").
+        regenerate: "none" | "stale" | "all".
+
+    Returns:
+        The updated profiles dict (already saved to disk).
+    """
+    if regenerate not in ("none", "stale", "all"):
+        raise ValueError(f"regenerate must be none|stale|all, got {regenerate!r}")
+
+    profiles = load_profiles()
+
+    merchant_map = build_merchant_map_from_cache(cache)
+    sync_merchants_into_profiles(profiles, merchant_map)
+
+    n_backfilled = backfill_from_ynab_subtransactions(profiles, history_txns)
+    if n_backfilled:
+        logger.info("Backfilled %d item exemplars from split Amazon history", n_backfilled)
+
+    if regenerate == "all":
+        for cat in profiles["categories"].values():
+            cat["dirty"] = True
+            cat["description"] = ""
+
+    if regenerate in ("stale", "all"):
+        regenerated = regenerate_stale(profiles, anthropic_key)
+        if regenerated:
+            print(f"Generated category descriptions for {len(regenerated)} categories.")
+        else:
+            print("No categories needed description regeneration.")
+
+    save_profiles(profiles)
+    return profiles
+
+
 def main(argv=None):
     """Main entry point for enrich.py.
 
@@ -525,11 +582,27 @@ def main(argv=None):
     parser = argparse.ArgumentParser(
         description="Unified categorize+enrich: process all uncategorized YNAB transactions"
     )
-    parser.add_argument("--days", type=int, required=True, help="Working window in days back from today")
+    parser.add_argument("--days", type=int, default=None, help="Working window in days back from today")
     parser.add_argument("--dump", type=Path, default=None, help="Override path to Amazon order history zip/dir")
     parser.add_argument("--out-dir", type=Path, default=Path("data/cache"), help="Output directory for changeset files")
+    parser.add_argument(
+        "--rebuild-profiles",
+        action="store_true",
+        help="Setup: force-regenerate ALL category profile descriptions from "
+             "current merchants/exemplars, then exit without categorizing.",
+    )
+    parser.add_argument(
+        "--refresh-profiles",
+        action="store_true",
+        help="Regenerate ONLY category descriptions flagged stale (new categories "
+             "or ones the user overrode during review), then exit. Cheap.",
+    )
 
     args = parser.parse_args(argv)
+
+    profile_only = args.rebuild_profiles or args.refresh_profiles
+    if args.days is None and not profile_only:
+        parser.error("--days is required unless running --rebuild-profiles or --refresh-profiles")
 
     # Load environment
     load_dotenv()
@@ -558,14 +631,30 @@ def main(argv=None):
             print(f"Error: {config_path} is not valid JSON: {e}")
             return 1
 
+    # Initialize YNAB client and resolve budget name → UUID
+    client = YNABClient(token=ynab_token)
+    budget_id = client.resolve_budget_id(budget_name)
+
+    # Profile-only commands (--rebuild-profiles / --refresh-profiles) don't
+    # categorize and don't need the windowed fetches. Handle them up front using
+    # only the payee cache + full transaction history, then exit.
+    if args.rebuild_profiles or args.refresh_profiles:
+        cache = load_payee_cache()
+        if not cache or cache.get("_migrated_from_v1"):
+            all_txns, _ = client.get_transactions(budget_id)
+            cache = build_cache_from_transactions(all_txns)
+            save_payee_cache(cache)
+        else:
+            all_txns, _ = client.get_transactions(budget_id)
+        mode = "all" if args.rebuild_profiles else "stale"
+        build_profiles(cache, all_txns, anthropic_key, regenerate=mode)
+        print("Category profiles rebuilt." if args.rebuild_profiles else "Category profiles refreshed.")
+        return 0
+
     # Calculate date windows
     now = datetime.now()
     since_date = (now - timedelta(days=args.days)).strftime("%Y-%m-%d")
     k_since = (now - timedelta(days=548)).strftime("%Y-%m-%d")
-
-    # Initialize YNAB client and resolve budget name → UUID
-    client = YNABClient(token=ynab_token)
-    budget_id = client.resolve_budget_id(budget_name)
 
     # YNAB fetches (counted order)
     txns_window, _ = client.get_transactions(budget_id, since_date=since_date)  # call #1
@@ -580,6 +669,7 @@ def main(argv=None):
     recent_categories = filter_categories_by_usage(categories, k_txns)
 
     # Cache load (and bootstrap if needed) — BEFORE early return
+    all_txns = None
     cache = load_payee_cache()
     if not cache or cache.get("_migrated_from_v1"):
         all_txns, _ = client.get_transactions(budget_id)  # bootstrap-only fetch (call #5)
@@ -594,11 +684,37 @@ def main(argv=None):
         print("No uncategorized writable transactions found.")
         return 0
 
+    has_amazon = any(is_amazon_payee(t.get("payee_name")) for t in writable)
+
+    # Load category profiles to inform BOTH Claude tiers (novel payees and Amazon
+    # items) about what each category means in this budget. regenerate="none" so
+    # this never calls Claude during a normal run — descriptions are an explicit
+    # asset built via --rebuild-profiles / --refresh-profiles. If no descriptions
+    # exist yet, format_profiles_for_prompt warns and falls back to bare names.
+    profile_history = all_txns if all_txns is not None else k_txns
+    profiles = build_profiles(cache, profile_history, anthropic_key, regenerate="none")
+
+    # Nudge: a normal run never regenerates descriptions, so stale ones (new
+    # categories, or ones the user overrode during review) silently keep their
+    # old meaning until an explicit refresh. Surface that so corrections don't
+    # pile up unused.
+    n_undescribed, n_dirty = count_stale(profiles)
+    if n_dirty:
+        print(
+            f"Note: {n_dirty} category description(s) are out of date from your "
+            f"prior review corrections. Run `enrich.py --refresh-profiles` to apply them."
+        )
+    if n_undescribed:
+        print(
+            f"Note: {n_undescribed} category(ies) have no learned description yet "
+            f"(using bare names). Run `enrich.py --rebuild-profiles` to generate them."
+        )
+
     # Amazon dump (conditional on Amazon payees present)
     match_result = None
     dump_path = None
     shipments = []
-    if any(is_amazon_payee(t.get("payee_name")) for t in writable):
+    if has_amazon:
         try:
             dump_path = args.dump or find_latest_dump()
         except FileNotFoundError:
@@ -652,6 +768,7 @@ def main(argv=None):
         writable, cache, recent_categories, anthropic_key,
         K=K, confidence_threshold=confidence_threshold,
         amazon_matches=match_result,
+        profiles=profiles,
     )
 
     # Update cache with Claude-tier results

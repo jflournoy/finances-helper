@@ -61,6 +61,20 @@ to your order-history dump, and categorizes everything via three tiers:
 2. **Fuzzy match** — catches payee name variations like store numbers (free)
 3. **Claude (Haiku, batched)** — only genuinely novel payees, batched into one API call
 
+Both Claude tiers (novel payees **and** Amazon item splits) are told what each
+budget category *means* in your budget — a learned **category profile**
+(`data/cache/category_profiles.json`) built from the merchants you file under each
+category. This is what keeps "USB cable" landing in Home Goods rather than Computer.
+
+Descriptions are an explicit, generated asset (one Claude call per category), so
+they are **not** regenerated on every run:
+
+- `uv run python enrich.py --rebuild-profiles` — setup: regenerate **all**
+  category descriptions from your current merchants/history.
+- `uv run python enrich.py --refresh-profiles` — regenerate **only** the
+  categories flagged stale: new categories, or ones where you overrode Claude's
+  guess during review (a rejection teaches the boundary that was mis-drawn).
+
 This **does not write to YNAB**. It produces a reviewable changeset under
 `data/cache/enrich-changeset-*.json` (+ a Markdown summary).
 
@@ -84,6 +98,11 @@ uv run python amazon_confirm.py data/cache/enrich-changeset-<timestamp>-reviewed
 
 Writes the reviewed changeset back to YNAB. Run `--dry-run` first to validate.
 Set `YNAB_SANDBOX_MODE=1` to target a test budget while you experiment.
+
+Applying records back into the category profile store: confirmed Amazon items
+sharpen future categorization, and any category you **overrode** during review
+(a Claude-tier guess you moved elsewhere) is flagged so its description gets
+corrected on the next `--refresh-profiles`.
 
 ### Spending advice  (`/spend-advice`)
 
@@ -125,6 +144,7 @@ finances-helper/
 ├── ynab_client.py          # YNAB API wrapper (milliunits, dates, budget resolution)
 ├── amazon_matcher.py       # Match Amazon orders → YNAB transactions
 ├── categorizer.py          # Three-tier transaction categorization
+├── category_profiles.py    # Learned per-category meaning for Amazon item splits
 ├── payee_resolver.py       # Payee normalization / lookup
 ├── spending_advisor.py     # Behavioral spending insights
 ├── audit.py                # Read-only categorization audit

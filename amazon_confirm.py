@@ -5,6 +5,7 @@ then applying them to YNAB via the update_transaction() write API.
 """
 import argparse
 import json
+import logging
 import os
 import sys
 import time
@@ -19,6 +20,8 @@ from ynab_client import YNABClient
 
 if TYPE_CHECKING:
     pass
+
+logger = logging.getLogger(__name__)
 
 BATCH_SIZE = 200
 
@@ -367,6 +370,7 @@ def apply_changeset(
     throttle_seconds: float = 0,
     rate_limit_floor: int = 5,
     report_dir: Path = Path("data/cache"),
+    profiles_path: Path | None = None,
 ) -> ApplyReport:
     """Apply changeset proposals to YNAB.
 
@@ -381,6 +385,13 @@ def apply_changeset(
         rate_limit_floor: Abort if remaining requests fall below this.
         report_dir: Directory for the summary report (created if missing).
             Defaults to data/cache; tests should pass tmp_path.
+        profiles_path: Path to the category profile store. After applying Amazon
+            splits, each confirmed subtransaction's item->category is recorded so
+            future categorization learns from the user's reviewed decisions.
+            Defaults to ``report_dir / "category_profiles.json"`` — so the real
+            CLI (report_dir=data/cache) updates the live store, while tests that
+            isolate report_dir to tmp_path automatically isolate profiles too.
+            Learning is skipped on dry runs.
 
     Returns:
         ApplyReport with detailed results.
@@ -405,6 +416,8 @@ def apply_changeset(
     non_amazon_flats = changeset["non_amazon"]["proposals"]
 
     applied = []
+    applied_amazon_splits = []   # amazon proposals applied this run, for learning
+    applied_non_amazon = []      # non-amazon proposals applied this run, for learning
     skipped = []
     failed = []
     aborted = False
@@ -510,8 +523,10 @@ def apply_changeset(
                 )
             if source == "amazon":
                 changeset["amazon"]["proposed_splits"][idx]["applied_at"] = now_iso
+                applied_amazon_splits.append(changeset["amazon"]["proposed_splits"][idx])
             else:
                 changeset["non_amazon"]["proposals"][idx]["applied_at"] = now_iso
+                applied_non_amazon.append(changeset["non_amazon"]["proposals"][idx])
             applied.append({
                 "txn_id": txn_id,
                 "type": "split" if "subtransactions" in patch_body else "flat",
@@ -519,6 +534,41 @@ def apply_changeset(
             })
 
         changeset_path.write_text(json.dumps(changeset, indent=2, default=_json_default))
+
+    # Learn from what the user confirmed/overrode this run:
+    #   - confirmed Amazon item exemplars (agreement -> keeps dominant lookup),
+    #   - rejections (the user overrode a Claude-tier guess) -> flags the affected
+    #     category descriptions for regeneration.
+    # Failures here must never mask a successful YNAB apply, so we log loudly but
+    # do not raise (the money write already happened).
+    if applied_amazon_splits or applied_non_amazon:
+        from category_profiles import (
+            load_profiles, save_profiles, record_confirmed_splits,
+            record_rejections_from_applied,
+        )
+        prof_path = str(
+            profiles_path if profiles_path is not None
+            else report_dir / "category_profiles.json"
+        )
+        try:
+            profiles = load_profiles(prof_path)
+            n_learned = record_confirmed_splits(profiles, applied_amazon_splits)
+            n_rejected = record_rejections_from_applied(
+                profiles, applied_non_amazon, applied_amazon_splits
+            )
+            save_profiles(profiles, prof_path)
+            if n_learned or n_rejected:
+                logger.info(
+                    "Category profiles updated (%s): %d confirmed exemplars, "
+                    "%d rejections flagged for description refresh",
+                    prof_path, n_learned, n_rejected,
+                )
+        except Exception as e:
+            logger.warning(
+                "Failed to update category profiles (%s): %s. YNAB apply "
+                "succeeded; profile learning skipped this run.",
+                prof_path, e,
+            )
 
     timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
     report_dir.mkdir(parents=True, exist_ok=True)
