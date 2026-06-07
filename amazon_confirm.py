@@ -416,7 +416,8 @@ def apply_changeset(
     non_amazon_flats = changeset["non_amazon"]["proposals"]
 
     applied = []
-    applied_amazon_splits = []  # proposals applied this run, for profile learning
+    applied_amazon_splits = []   # amazon proposals applied this run, for learning
+    applied_non_amazon = []      # non-amazon proposals applied this run, for learning
     skipped = []
     failed = []
     aborted = False
@@ -525,6 +526,7 @@ def apply_changeset(
                 applied_amazon_splits.append(changeset["amazon"]["proposed_splits"][idx])
             else:
                 changeset["non_amazon"]["proposals"][idx]["applied_at"] = now_iso
+                applied_non_amazon.append(changeset["non_amazon"]["proposals"][idx])
             applied.append({
                 "txn_id": txn_id,
                 "type": "split" if "subtransactions" in patch_body else "flat",
@@ -533,13 +535,16 @@ def apply_changeset(
 
         changeset_path.write_text(json.dumps(changeset, indent=2, default=_json_default))
 
-    # Learn from confirmed Amazon splits: each applied subtransaction's
-    # item->category is the user's reviewed decision and feeds future item
-    # categorization. Failures here must never mask a successful YNAB apply, so
-    # we log loudly but do not raise (the money write already happened).
-    if applied_amazon_splits:
+    # Learn from what the user confirmed/overrode this run:
+    #   - confirmed Amazon item exemplars (agreement -> keeps dominant lookup),
+    #   - rejections (the user overrode a Claude-tier guess) -> flags the affected
+    #     category descriptions for regeneration.
+    # Failures here must never mask a successful YNAB apply, so we log loudly but
+    # do not raise (the money write already happened).
+    if applied_amazon_splits or applied_non_amazon:
         from category_profiles import (
             load_profiles, save_profiles, record_confirmed_splits,
+            record_rejections_from_applied,
         )
         prof_path = str(
             profiles_path if profiles_path is not None
@@ -548,16 +553,20 @@ def apply_changeset(
         try:
             profiles = load_profiles(prof_path)
             n_learned = record_confirmed_splits(profiles, applied_amazon_splits)
+            n_rejected = record_rejections_from_applied(
+                profiles, applied_non_amazon, applied_amazon_splits
+            )
             save_profiles(profiles, prof_path)
-            if n_learned:
+            if n_learned or n_rejected:
                 logger.info(
-                    "Recorded %d confirmed item exemplars into category profiles (%s)",
-                    n_learned, prof_path,
+                    "Category profiles updated (%s): %d confirmed exemplars, "
+                    "%d rejections flagged for description refresh",
+                    prof_path, n_learned, n_rejected,
                 )
         except Exception as e:
             logger.warning(
-                "Failed to record confirmed item exemplars into category profiles "
-                "(%s): %s. YNAB apply succeeded; profile learning skipped this run.",
+                "Failed to update category profiles (%s): %s. YNAB apply "
+                "succeeded; profile learning skipped this run.",
                 prof_path, e,
             )
 

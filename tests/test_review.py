@@ -71,6 +71,41 @@ def test_mark_recategorized_mutates_category_and_stashes_original():
     assert p["review"]["decision"] == "recategorize"
 
 
+def test_edit_split_items_stashes_original_on_recategorize(monkeypatch):
+    """Recategorizing an Amazon subtransaction must stash the original category
+    so apply-time profile learning can see it as a rejection."""
+    split = {
+        "subtransactions": [
+            {
+                "item": {"product_name": "USB-C Cable", "asin": "B0X"},
+                "category_id": "cat-comp", "category_name": "Computer",
+            },
+        ]
+    }
+    monkeypatch.setattr(review, "_prompt_choice", lambda *a, **k: "r")
+    monkeypatch.setattr(review, "_pick_category", lambda *a, **k: {"id": "cat-home", "name": "Home Goods"})
+
+    review._edit_split_items(split, categories=[])
+
+    sub = split["subtransactions"][0]
+    assert sub["category_id"] == "cat-home"
+    assert sub["category_name"] == "Home Goods"
+    assert sub["original_category_id"] == "cat-comp"
+    assert sub["original_category_name"] == "Computer"
+
+
+def test_edit_split_items_keep_leaves_no_original(monkeypatch):
+    split = {
+        "subtransactions": [
+            {"item": {"product_name": "X"}, "category_id": "cat-a", "category_name": "A"},
+        ]
+    }
+    monkeypatch.setattr(review, "_prompt_choice", lambda *a, **k: "k")
+    review._edit_split_items(split, categories=[])
+    sub = split["subtransactions"][0]
+    assert "original_category_id" not in sub
+
+
 def test_has_review_decision_detects_review_block():
     p = _make_proposal()
     assert not review._has_review_decision(p)

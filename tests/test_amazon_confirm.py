@@ -844,6 +844,37 @@ def test_apply_records_confirmed_items_into_profiles(apply_changeset_path, mock_
     assert pb_name == "Groceries"
 
 
+def test_apply_records_amazon_item_rejection_into_profiles(apply_changeset_path, mock_client, tmp_path):
+    """An overridden Amazon item (original_category stashed by review) flags both
+    categories dirty for description refresh."""
+    from amazon_confirm import apply_changeset
+    from category_profiles import load_profiles
+
+    cs = _read_changeset(apply_changeset_path)
+    # Simulate a review override on the USB-C cable: was Electronics, moved to Home Goods.
+    for p in cs["amazon"]["proposed_splits"]:
+        for sub in p["subtransactions"]:
+            if sub.get("item", {}).get("product_name") == "USB-C Cable 6ft":
+                sub["original_category_id"] = sub["category_id"]
+                sub["original_category_name"] = sub["category_name"]
+                sub["category_id"] = "cccccccc-0000-0000-0000-000000000009"
+                sub["category_name"] = "Home Goods"
+    apply_changeset_path.write_text(json.dumps(cs))
+
+    prof_path = tmp_path / "category_profiles.json"
+    apply_changeset(
+        apply_changeset_path, mock_client, "budget-1",
+        report_dir=tmp_path, profiles_path=prof_path,
+    )
+
+    profiles = load_profiles(str(prof_path))
+    home = profiles["categories"]["cccccccc-0000-0000-0000-000000000009"]
+    elec = profiles["categories"]["cccccccc-0000-0000-0000-000000000002"]
+    assert home["dirty"] is True
+    assert elec["dirty"] is True
+    assert any(c["subject"] == "USB-C Cable 6ft" for c in home["corrections"])
+
+
 def test_apply_dry_run_records_nothing(apply_changeset_path, mock_client, tmp_path):
     """Dry runs apply nothing, so they must learn nothing."""
     from amazon_confirm import apply_changeset
