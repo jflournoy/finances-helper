@@ -22,9 +22,10 @@ A category profile teaches Claude what each category *means* here, at two levels
    exemplars are injected alongside the description so Claude learns the boundary
    ("USB cable -> Home Goods, GPU -> Computer").
 
-Refresh policy: descriptions are cached and regenerated only when a category is
-*stale* — it has no description yet, or enough new confirmed items have
-accumulated since it was last generated (STALE_ITEM_THRESHOLD).
+Refresh policy: descriptions are an explicit, expensive asset. They are built
+once at setup, then regenerated only when a category is *stale* — it has no
+description yet, or a rejection flagged it dirty (the user overrode Claude's
+choice for that category). Agreeing confirmations never trigger a refresh.
 
 This module follows the same conventions as categorizer.py's payee cache:
 versioned JSON, loud errors, NO silent fallbacks.
@@ -40,10 +41,6 @@ logger = logging.getLogger(__name__)
 
 PROFILES_VERSION = 1
 DEFAULT_PROFILES_PATH = "data/cache/category_profiles.json"
-
-# A category becomes stale (description worth regenerating) once this many new
-# confirmed item exemplars have accumulated since the last generation.
-STALE_ITEM_THRESHOLD = 5
 
 # How many exemplars per category to surface in the prompt (highest count first).
 MAX_EXEMPLARS_PER_CATEGORY = 8
@@ -137,7 +134,7 @@ def _ensure_category(profiles: dict, category_id: str, category_name: str) -> di
             "description": "",
             "merchants": [],
             "item_exemplars": {},
-            "items_since_generation": 0,
+            "corrections": [],
             "dirty": False,
         }
     elif category_name and not cats[category_id].get("name"):
@@ -158,11 +155,14 @@ def record_item_categorization(
     """Record one confirmed (item -> category) exemplar.
 
     Adds a frequency count under the normalized item name, mirroring the payee
-    frequency cache. Marks the category dirty and bumps its since-generation
-    counter so the description can be refreshed once enough new items accrue.
+    frequency cache. This is pure data that keeps dominant_item_category accurate;
+    it does NOT mark the category stale. Agreement is not a refresh signal —
+    descriptions are regenerated only when the user *rejects* a categorization
+    (see record_rejection). A confirmation that matched what Claude proposed tells
+    us the description is already working.
 
-    The exemplar count lives on BOTH the source category (so its description can
-    cite it) and is globally resolvable via dominant_item_category.
+    The exemplar count lives on the source category and is globally resolvable
+    via dominant_item_category.
 
     Modifies `profiles` in place.
     """
@@ -175,9 +175,6 @@ def record_item_categorization(
     if category_id not in exemplars[norm]:
         exemplars[norm][category_id] = {"name": category_name, "count": 0}
     exemplars[norm][category_id]["count"] += 1
-
-    cat["items_since_generation"] = cat.get("items_since_generation", 0) + 1
-    cat["dirty"] = True
 
 
 def _all_exemplar_counts(profiles: dict, norm_item: str) -> dict:
@@ -292,6 +289,119 @@ def record_confirmed_splits(profiles: dict, applied_splits: list) -> int:
     return recorded
 
 
+def _format_correction(viewing_cat_id: str, corr: dict) -> str:
+    """Render one stored correction from the perspective of the category viewing it.
+
+    Each correction records subject, from_category (over-claimed) and to_category
+    (the user's choice). A category sees it as either "I wrongly claimed X" or
+    "X actually belongs to me, was mis-sent to Y".
+    """
+    subject = corr.get("subject", "?")
+    if viewing_cat_id == corr.get("from_category_id"):
+        return f'"{subject}" does NOT belong here — user moved it to "{corr.get("to_category_name", "?")}"'
+    if viewing_cat_id == corr.get("to_category_id"):
+        return f'"{subject}" DOES belong here — was mis-categorized as "{corr.get("from_category_name", "?")}"'
+    return ""
+
+
+def record_rejection(
+    profiles: dict,
+    subject: str,
+    from_category_id: str,
+    from_category_name: str,
+    to_category_id: str,
+    to_category_name: str,
+) -> None:
+    """Record that the user overrode an automated categorization.
+
+    The user moved `subject` from from_category (what the categorizer guessed)
+    to to_category (where it belongs). This is the ONLY signal that flags a
+    description for regeneration: both categories got the boundary wrong — the
+    'from' category over-claimed, the 'to' category should have claimed it — so
+    both are marked dirty and both store the correction for the next refresh.
+
+    A no-op move (from == to) is ignored. Modifies `profiles` in place.
+    """
+    if from_category_id == to_category_id:
+        return
+
+    correction = {
+        "subject": subject,
+        "from_category_id": from_category_id,
+        "from_category_name": from_category_name,
+        "to_category_id": to_category_id,
+        "to_category_name": to_category_name,
+    }
+
+    for cat_id, cat_name in (
+        (from_category_id, from_category_name),
+        (to_category_id, to_category_name),
+    ):
+        if not cat_id:
+            continue
+        cat = _ensure_category(profiles, cat_id, cat_name or "")
+        cat.setdefault("corrections", []).append(correction)
+        cat["dirty"] = True
+
+
+def record_rejections_from_applied(
+    profiles: dict,
+    applied_non_amazon: list,
+    applied_amazon_splits: list,
+) -> int:
+    """Extract and record category rejections from proposals applied this run.
+
+    A rejection is the user overriding an automated categorization during review:
+
+    - Non-Amazon proposal: review.decision == "recategorize" AND the proposal's
+      tier was "claude" (only Claude-tier overrides signal a category-MEANING
+      error; history/fuzzy overrides are lookup/match errors, not meaning).
+      Subject = payee_name.
+    - Amazon subtransaction: carries original_category_id (stashed by review when
+      the user recategorized the item). Item categorization is always Claude-tier.
+      Subject = item.product_name.
+
+    Returns the number of rejections recorded. Modifies `profiles` in place.
+    """
+    recorded = 0
+
+    for proposal in applied_non_amazon:
+        review = proposal.get("review") or {}
+        if review.get("decision") != "recategorize":
+            continue
+        if proposal.get("tier") != "claude":
+            continue
+        orig_id = review.get("original_category_id")
+        final_id = proposal.get("category_id")
+        if not orig_id or not final_id or orig_id == final_id:
+            continue
+        record_rejection(
+            profiles,
+            proposal.get("payee_name") or "?",
+            orig_id, review.get("original_category_name") or "",
+            final_id, proposal.get("category_name") or "",
+        )
+        recorded += 1
+
+    for split in applied_amazon_splits:
+        for sub in split.get("subtransactions") or []:
+            orig_id = sub.get("original_category_id")
+            final_id = sub.get("category_id")
+            if not orig_id or not final_id or orig_id == final_id:
+                continue
+            item = sub.get("item") or {}
+            subject = (item.get("product_name") or sub.get("memo") or "?")
+            record_rejection(
+                profiles,
+                subject,
+                orig_id, sub.get("original_category_name") or "",
+                final_id, sub.get("category_name") or "",
+            )
+            recorded += 1
+
+    return recorded
+
+
 def mark_dirty(profiles: dict, category_id: str) -> None:
     """Flag a category's description as needing regeneration."""
     cat = profiles["categories"].get(category_id)
@@ -303,14 +413,14 @@ def mark_dirty(profiles: dict, category_id: str) -> None:
 def is_stale(cat: dict) -> bool:
     """True if a category's description should be (re)generated.
 
-    A category is stale when it has no description yet, or it is dirty and has
-    accumulated at least STALE_ITEM_THRESHOLD new exemplars since last generation.
+    A category is stale when it has no description yet, or it has been flagged
+    dirty by a rejection (the user overrode Claude's choice involving this
+    category). Volume of agreeing confirmations is NOT a staleness signal —
+    descriptions refresh on divergence, not on use.
     """
     if not cat.get("description"):
         return True
-    if cat.get("dirty") and cat.get("items_since_generation", 0) >= STALE_ITEM_THRESHOLD:
-        return True
-    return False
+    return bool(cat.get("dirty"))
 
 
 # ---------------------------------------------------------------------------
@@ -418,11 +528,20 @@ def bootstrap_descriptions(profiles: dict, category_ids: list, api_key: str) -> 
         merchants = ", ".join(cat.get("merchants", [])[:20]) or "(no known merchants)"
         exemplar_names = list(cat.get("item_exemplars", {}).keys())[:15]
         exemplars = ", ".join(exemplar_names) if exemplar_names else "(none yet)"
-        lines.append(
+        entry = (
             f'- category_id "{cat_id}" | name "{cat["name"]}"\n'
             f"    merchants: {merchants}\n"
             f"    example items: {exemplars}"
         )
+        corrections = cat.get("corrections", [])
+        if corrections:
+            # Surface the user's recent overrides so the new description fixes
+            # the exact boundary that was getting mis-drawn.
+            corr_lines = [_format_correction(cat_id, c) for c in corrections[-10:]]
+            entry += "\n    user corrections:\n" + "\n".join(
+                f"      - {line}" for line in corr_lines if line
+            )
+        lines.append(entry)
     catalog = "\n".join(lines)
 
     system_prompt = """You summarize what a personal-budget spending category MEANS,
@@ -432,6 +551,11 @@ For each category, write ONE concise sentence (max ~20 words) describing the
 kinds of purchases that belong in it — concrete enough to disambiguate similar
 categories (e.g. distinguish "Computer" core hardware from "Home Goods"
 accessories). Do not just restate the category name.
+
+Some categories include "user corrections": cases where an automated
+categorizer guessed this category but the user moved the item elsewhere (or
+moved it INTO this category from elsewhere). Treat these as authoritative
+boundary corrections — the new description MUST be consistent with them.
 
 Respond with ONLY a JSON array, one object per category, in any order:
 [{"category_id": "<id>", "description": "<one sentence>"}]"""
@@ -493,8 +617,8 @@ Respond with ONLY a JSON array, one object per category, in any order:
 
         cat = profiles["categories"][cat_id]
         cat["description"] = str(desc).strip()
-        cat["items_since_generation"] = 0
         cat["dirty"] = False
+        cat["corrections"] = []  # consumed by this regeneration; clear the queue
         seen.add(cat_id)
 
     missing = requested - seen
@@ -525,12 +649,17 @@ def regenerate_stale(profiles: dict, api_key: str) -> list:
 # Prompt formatting — what Claude sees during item categorization
 # ---------------------------------------------------------------------------
 
-def format_profiles_for_prompt(categories: list, profiles: dict) -> str:
-    """Build the category block for the Amazon item-categorization prompt.
+def format_profiles_for_prompt(
+    categories: list, profiles: dict, *, include_exemplars: bool = True
+) -> str:
+    """Build the category block for a Claude categorization prompt.
 
-    For each category we emit its name, id, learned description, and the items
-    for which THIS category is the dominant choice (so contradictory weak signals
-    don't leak across categories).
+    For each category we emit its name, id, and learned description. When
+    `include_exemplars` is True (the Amazon item tier), we also list the items
+    for which THIS category is the dominant choice, so contradictory weak signals
+    don't leak across categories. The payee tier passes include_exemplars=False:
+    item-level exemplars describe products, not merchants, and add no signal to a
+    merchant-level decision.
 
     NO SILENT FALLBACK: a category without a learned description is still listed
     (so categorization can proceed) but emits a logged warning — an undescribed
@@ -540,6 +669,7 @@ def format_profiles_for_prompt(categories: list, profiles: dict) -> str:
     Args:
         categories: YNAB category groups (filtered to recently-used).
         profiles: The category profile store.
+        include_exemplars: Whether to append per-category item examples.
 
     Returns:
         A formatted multi-line string for inclusion in the system prompt.
@@ -548,14 +678,15 @@ def format_profiles_for_prompt(categories: list, profiles: dict) -> str:
 
     # Precompute, per category, the exemplar item names where it is dominant.
     dominant_items: dict = {}
-    for cat in cat_profiles.values():
-        for norm_item in cat.get("item_exemplars", {}):
-            dom_id, _ = dominant_item_category(profiles, norm_item)
-            if dom_id is None:
-                continue
-            counts = _all_exemplar_counts(profiles, norm_item)
-            total = counts[dom_id]["count"]
-            dominant_items.setdefault(dom_id, []).append((total, norm_item))
+    if include_exemplars:
+        for cat in cat_profiles.values():
+            for norm_item in cat.get("item_exemplars", {}):
+                dom_id, _ = dominant_item_category(profiles, norm_item)
+                if dom_id is None:
+                    continue
+                counts = _all_exemplar_counts(profiles, norm_item)
+                total = counts[dom_id]["count"]
+                dominant_items.setdefault(dom_id, []).append((total, norm_item))
 
     out_lines = []
     for group in categories:
@@ -568,7 +699,7 @@ def format_profiles_for_prompt(categories: list, profiles: dict) -> str:
             if not description:
                 logger.warning(
                     "Category %r (id %s) has no learned profile description; "
-                    "item categorization will rely on the bare name. Run a "
+                    "categorization will rely on the bare name. Run a "
                     "profile bootstrap to teach Claude what this category means.",
                     name, cat_id,
                 )
@@ -576,10 +707,11 @@ def format_profiles_for_prompt(categories: list, profiles: dict) -> str:
             else:
                 out_lines.append(f"- {name} (ID: {cat_id}): {description}")
 
-            examples = dominant_items.get(cat_id, [])
-            if examples:
-                examples.sort(key=lambda p: (-p[0], p[1]))
-                top = [n for _, n in examples[:MAX_EXEMPLARS_PER_CATEGORY]]
-                out_lines.append(f"    examples: {', '.join(top)}")
+            if include_exemplars:
+                examples = dominant_items.get(cat_id, [])
+                if examples:
+                    examples.sort(key=lambda p: (-p[0], p[1]))
+                    top = [n for _, n in examples[:MAX_EXEMPLARS_PER_CATEGORY]]
+                    out_lines.append(f"    examples: {', '.join(top)}")
 
     return "\n".join(out_lines)

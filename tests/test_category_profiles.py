@@ -25,7 +25,8 @@ from category_profiles import (
     dominant_item_category,
     mark_dirty,
     is_stale,
-    STALE_ITEM_THRESHOLD,
+    record_rejection,
+    record_rejections_from_applied,
     bootstrap_descriptions,
     regenerate_stale,
     format_profiles_for_prompt,
@@ -132,35 +133,34 @@ def test_dominant_item_category_unknown_returns_none():
     assert dominant_item_category(profiles, "never seen") == (None, None)
 
 
-def test_record_item_marks_category_dirty_and_counts():
+def test_record_item_does_not_mark_dirty():
+    # Agreement is not a refresh signal: recording an exemplar must NOT dirty.
     profiles = _empty()
     profiles["categories"]["cat-home"] = {
         "name": "Home Goods", "description": "old desc", "merchants": [],
-        "item_exemplars": {}, "items_since_generation": 0, "dirty": False,
+        "item_exemplars": {}, "corrections": [], "dirty": False,
     }
     record_item_categorization(profiles, "Batteries", "cat-home", "Home Goods")
-    cat = profiles["categories"]["cat-home"]
-    assert cat["items_since_generation"] == 1
-    assert cat["dirty"] is True
+    assert profiles["categories"]["cat-home"]["dirty"] is False
 
 
 # ---------------------------------------------------------------------------
-# staleness
+# staleness — dirty (from a rejection) or no-description-yet
 # ---------------------------------------------------------------------------
 
-def test_is_stale_true_when_dirty_and_enough_new_items():
-    cat = {"dirty": True, "items_since_generation": STALE_ITEM_THRESHOLD, "description": "x"}
+def test_is_stale_true_when_dirty():
+    cat = {"dirty": True, "description": "x"}
     assert is_stale(cat) is True
 
 
-def test_is_stale_false_below_threshold():
-    cat = {"dirty": True, "items_since_generation": STALE_ITEM_THRESHOLD - 1, "description": "x"}
+def test_is_stale_false_when_clean_and_described():
+    cat = {"dirty": False, "description": "x"}
     assert is_stale(cat) is False
 
 
 def test_is_stale_true_when_description_empty():
     # A category that has merchants but no description yet is always stale.
-    cat = {"dirty": False, "items_since_generation": 0, "description": ""}
+    cat = {"dirty": False, "description": ""}
     assert is_stale(cat) is True
 
 
@@ -178,6 +178,112 @@ def test_mark_dirty_unknown_category_raises():
     profiles = _empty()
     with pytest.raises(ValueError, match="unknown category_id"):
         mark_dirty(profiles, "nope")
+
+
+# ---------------------------------------------------------------------------
+# record_rejection — the only signal that flags a description for refresh
+# ---------------------------------------------------------------------------
+
+def test_record_rejection_marks_both_categories_dirty():
+    profiles = _empty()
+    record_rejection(profiles, "usb cable", "cat-comp", "Computer", "cat-home", "Home Goods")
+    assert profiles["categories"]["cat-comp"]["dirty"] is True
+    assert profiles["categories"]["cat-home"]["dirty"] is True
+
+
+def test_record_rejection_stores_correction_on_both_categories():
+    profiles = _empty()
+    record_rejection(profiles, "usb cable", "cat-comp", "Computer", "cat-home", "Home Goods")
+    comp_corr = profiles["categories"]["cat-comp"]["corrections"]
+    home_corr = profiles["categories"]["cat-home"]["corrections"]
+    assert len(comp_corr) == 1 and comp_corr[0]["subject"] == "usb cable"
+    assert len(home_corr) == 1 and home_corr[0]["to_category_id"] == "cat-home"
+
+
+def test_record_rejection_noop_when_from_equals_to():
+    profiles = _empty()
+    record_rejection(profiles, "x", "cat-a", "A", "cat-a", "A")
+    assert profiles["categories"] == {}
+
+
+def test_record_rejection_makes_categories_stale():
+    profiles = _empty()
+    profiles["categories"]["cat-comp"] = {
+        "name": "Computer", "description": "had a description", "merchants": [],
+        "item_exemplars": {}, "corrections": [], "dirty": False,
+    }
+    assert is_stale(profiles["categories"]["cat-comp"]) is False
+    record_rejection(profiles, "usb cable", "cat-comp", "Computer", "cat-home", "Home Goods")
+    assert is_stale(profiles["categories"]["cat-comp"]) is True
+
+
+# ---------------------------------------------------------------------------
+# record_rejections_from_applied — extract overrides from an applied changeset
+# ---------------------------------------------------------------------------
+
+def test_rejections_from_applied_records_claude_payee_override():
+    profiles = _empty()
+    non_amazon = [{
+        "payee_name": "MicroCenter",
+        "tier": "claude",
+        "category_id": "cat-home",
+        "category_name": "Home Goods",
+        "review": {"decision": "recategorize",
+                   "original_category_id": "cat-comp",
+                   "original_category_name": "Computer"},
+    }]
+    n = record_rejections_from_applied(profiles, non_amazon, [])
+    assert n == 1
+    assert profiles["categories"]["cat-comp"]["dirty"] is True
+    assert profiles["categories"]["cat-home"]["dirty"] is True
+
+
+def test_rejections_from_applied_ignores_non_claude_tier():
+    # A fuzzy/history override is a lookup error, not a category-meaning error.
+    profiles = _empty()
+    non_amazon = [{
+        "payee_name": "Foo", "tier": "fuzzy",
+        "category_id": "cat-b", "category_name": "B",
+        "review": {"decision": "recategorize",
+                   "original_category_id": "cat-a", "original_category_name": "A"},
+    }]
+    n = record_rejections_from_applied(profiles, non_amazon, [])
+    assert n == 0
+    assert profiles["categories"] == {}
+
+
+def test_rejections_from_applied_ignores_accepted_proposals():
+    profiles = _empty()
+    non_amazon = [{
+        "payee_name": "Foo", "tier": "claude",
+        "category_id": "cat-a", "category_name": "A",
+        "review": {"decision": "accept"},
+    }]
+    n = record_rejections_from_applied(profiles, non_amazon, [])
+    assert n == 0
+
+
+def test_rejections_from_applied_records_amazon_item_override():
+    profiles = _empty()
+    splits = [{
+        "subtransactions": [
+            {
+                "item": {"product_name": "USB-C Cable"},
+                "category_id": "cat-home", "category_name": "Home Goods",
+                "original_category_id": "cat-comp", "original_category_name": "Computer",
+            },
+            {
+                "item": {"product_name": "GPU"},
+                "category_id": "cat-comp", "category_name": "Computer",
+            },
+        ]
+    }]
+    n = record_rejections_from_applied(profiles, [], splits)
+    assert n == 1
+    assert profiles["categories"]["cat-comp"]["dirty"] is True
+    assert profiles["categories"]["cat-home"]["dirty"] is True
+    corr = profiles["categories"]["cat-home"]["corrections"][0]
+    assert corr["subject"] == "USB-C Cable"
 
 
 # ---------------------------------------------------------------------------
@@ -351,12 +457,13 @@ def test_record_confirmed_splits_corrects_prior_via_frequency():
     assert dominant_item_category(profiles, "usb cable") == ("cat-home", "Home Goods")
 
 
-def test_record_confirmed_splits_marks_categories_dirty():
+def test_record_confirmed_splits_does_not_mark_dirty():
+    # Confirmed splits that AGREED with the proposal are not a refresh signal.
     profiles = _empty()
     record_confirmed_splits(profiles, [
         _applied_split([{"product_name": "Lamp", "category_id": "cat-home", "category_name": "Home Goods"}]),
     ])
-    assert profiles["categories"]["cat-home"]["dirty"] is True
+    assert profiles["categories"]["cat-home"]["dirty"] is False
 
 
 # ---------------------------------------------------------------------------
@@ -392,11 +499,15 @@ def test_bootstrap_descriptions_fills_descriptions_for_target_categories():
     assert "computing" in profiles["categories"]["cat-comp"]["description"]
 
 
-def test_bootstrap_descriptions_resets_dirty_and_counter():
+def test_bootstrap_descriptions_resets_dirty_and_clears_corrections():
     profiles = _empty()
     profiles["categories"]["cat-home"] = {
         "name": "Home Goods", "description": "stale", "merchants": ["Target"],
-        "item_exemplars": {}, "items_since_generation": 9, "dirty": True,
+        "item_exemplars": {},
+        "corrections": [{"subject": "usb cable", "from_category_id": "cat-comp",
+                         "from_category_name": "Computer", "to_category_id": "cat-home",
+                         "to_category_name": "Home Goods"}],
+        "dirty": True,
     }
     claude_json = json.dumps([
         {"category_id": "cat-home", "description": "Fresh description."},
@@ -407,8 +518,29 @@ def test_bootstrap_descriptions_resets_dirty_and_counter():
 
     cat = profiles["categories"]["cat-home"]
     assert cat["description"] == "Fresh description."
-    assert cat["items_since_generation"] == 0
     assert cat["dirty"] is False
+    assert cat["corrections"] == []
+
+
+def test_bootstrap_descriptions_feeds_corrections_into_prompt():
+    profiles = _empty()
+    profiles["categories"]["cat-home"] = {
+        "name": "Home Goods", "description": "", "merchants": ["Target"],
+        "item_exemplars": {},
+        "corrections": [{"subject": "usb cable", "from_category_id": "cat-comp",
+                         "from_category_name": "Computer", "to_category_id": "cat-home",
+                         "to_category_name": "Home Goods"}],
+        "dirty": True,
+    }
+    claude_json = json.dumps([{"category_id": "cat-home", "description": "Household stuff."}])
+    with patch("category_profiles.anthropic.Anthropic") as mock_cls:
+        mock_client = mock_cls.return_value
+        mock_client.messages.create.return_value = _mk_claude_response(claude_json)
+        bootstrap_descriptions(profiles, ["cat-home"], "key")
+
+    user_msg = mock_client.messages.create.call_args.kwargs["messages"][0]["content"]
+    assert "usb cable" in user_msg
+    assert "corrections" in user_msg.lower()
 
 
 def test_bootstrap_descriptions_empty_target_list_makes_no_call():
