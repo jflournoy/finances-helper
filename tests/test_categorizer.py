@@ -581,6 +581,48 @@ def test_claude_categorize_uses_haiku_model():
     assert call_kwargs["model"] == "claude-haiku-4-5-20251001"
 
 
+def test_claude_categorize_raises_on_unknown_category_id():
+    # NO SILENT FALLBACK: if Claude returns a category_id that isn't one of the
+    # provided category IDs (e.g. it returned the category NAME by mistake), error
+    # loudly at categorization time instead of writing a bad id that YNAB rejects.
+    transactions = [{"id": "txn1", "payee_name": "Meijer", "amount": -8200, "date": "2026-03-20"}]
+    categories = [
+        {"id": "g1", "name": "Food", "categories": [
+            {"id": "aaaaaaaa-0000-0000-0000-000000000001", "name": "Groceries"}
+        ]}
+    ]
+    mock_response = Mock()
+    mock_response.content = [Mock(text='[{"payee_name": "Meijer", "category_id": "Groceries", "category_name": "Groceries", "confidence": 0.9, "rationale": "r", "prior_strength": 12}]')]
+
+    with patch("categorizer.anthropic.Anthropic") as mock_cls:
+        mock_client = Mock()
+        mock_cls.return_value = mock_client
+        mock_client.messages.create.return_value = mock_response
+        with pytest.raises(ValueError, match="unknown category_id|Groceries"):
+            claude_categorize(transactions, categories, "test-key")
+
+
+def test_claude_categorize_allows_null_category_id():
+    # A null category_id (Claude declining to categorize) is valid — it flows
+    # through as uncategorized, not an error.
+    transactions = [{"id": "txn1", "payee_name": "Mystery LLC", "amount": -500, "date": "2026-03-20"}]
+    categories = [
+        {"id": "g1", "name": "Food", "categories": [
+            {"id": "aaaaaaaa-0000-0000-0000-000000000001", "name": "Groceries"}
+        ]}
+    ]
+    mock_response = Mock()
+    mock_response.content = [Mock(text='[{"payee_name": "Mystery LLC", "category_id": null, "category_name": null, "confidence": 0.2, "rationale": "unclear", "prior_strength": 2}]')]
+
+    with patch("categorizer.anthropic.Anthropic") as mock_cls:
+        mock_client = Mock()
+        mock_cls.return_value = mock_client
+        mock_client.messages.create.return_value = mock_response
+        result = claude_categorize(transactions, categories, "test-key")
+
+    assert result[0].category_id is None
+
+
 def test_claude_categorize_injects_profile_descriptions():
     """When profiles are passed, the payee prompt carries learned descriptions (no item exemplars)."""
     from category_profiles import PROFILES_VERSION

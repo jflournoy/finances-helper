@@ -842,6 +842,15 @@ Only use category IDs from the list above. Return ONLY the JSON array, no other 
     if len(data) != len(transactions):
         raise ValueError(f"Claude returned {len(data)} results for {len(transactions)} transactions")
 
+    # Valid category IDs, for response validation. Claude occasionally returns
+    # the category NAME in the category_id field; without this check a bad id
+    # flows all the way to the YNAB write and is rejected there (atomically,
+    # aborting the whole batch). Catch it here instead. NO SILENT FALLBACK.
+    valid_category_ids = set()
+    for group in categories:
+        for cat in group.get("categories", []):
+            valid_category_ids.add(cat["id"])
+
     # Build results
     results = []
     required_fields = {"category_id", "category_name", "confidence", "rationale", "prior_strength"}
@@ -856,10 +865,18 @@ Only use category IDs from the list above. Return ONLY the JSON array, no other 
                 f"Response item {i} has invalid prior_strength: {ps!r} (must be integer 1-20)"
             )
 
+        cat_id = item["category_id"]
+        if cat_id is not None and cat_id not in valid_category_ids:
+            raise ValueError(
+                f"Response item {i} has unknown category_id: {cat_id!r} "
+                f"(not one of the {len(valid_category_ids)} provided categories — "
+                f"Claude may have returned the category name instead of its ID)"
+            )
+
         txn = transactions[i]
         results.append(CategoryResult(
             transaction_id=txn["id"],
-            category_id=item["category_id"],
+            category_id=cat_id,
             category_name=item["category_name"],
             confidence=item["confidence"],
             rationale=item["rationale"],
