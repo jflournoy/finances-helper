@@ -48,6 +48,12 @@ MAX_EXEMPLARS_PER_CATEGORY = 8
 # Model used for the cheap bootstrap/refresh summarization call.
 _BOOTSTRAP_MODEL = "claude-haiku-4-5-20251001"
 
+# Max categories per bootstrap Claude call. Asking Haiku for a single JSON array
+# covering many categories makes it likely to silently drop a few entries (not a
+# truncation — the model just emits an incomplete list). Batching keeps each
+# array small enough that every requested category reliably comes back.
+_BOOTSTRAP_BATCH_SIZE = 20
+
 
 # ---------------------------------------------------------------------------
 # Item name normalization
@@ -534,10 +540,27 @@ def bootstrap_descriptions(profiles: dict, category_ids: list, api_key: str) -> 
     returned descriptions are written back and the categories' dirty flags /
     counters reset.
 
+    Categories are processed in batches of at most ``_BOOTSTRAP_BATCH_SIZE`` per
+    Claude call; a single huge array prompts Haiku to silently drop entries.
+
     No-op (no API call) if `category_ids` is empty.
 
     Raises ValueError on a malformed response: bad JSON, truncation, an unknown
     category_id, or a missing description (NO silent fallback).
+    """
+    if not category_ids:
+        return
+
+    for start in range(0, len(category_ids), _BOOTSTRAP_BATCH_SIZE):
+        batch = category_ids[start : start + _BOOTSTRAP_BATCH_SIZE]
+        _bootstrap_descriptions_batch(profiles, batch, api_key)
+
+
+def _bootstrap_descriptions_batch(profiles: dict, category_ids: list, api_key: str) -> None:
+    """Generate descriptions for one batch of categories in a single Claude call.
+
+    Validates that every requested category comes back with a non-empty
+    description and that no unexpected category_id appears (NO silent fallback).
     """
     if not category_ids:
         return

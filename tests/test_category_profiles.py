@@ -640,6 +640,64 @@ def test_bootstrap_descriptions_raises_on_truncated_response():
             bootstrap_descriptions(profiles, ["cat-home"], "key")
 
 
+def test_bootstrap_descriptions_batches_large_category_sets():
+    # A single huge JSON array makes Haiku silently drop entries, so we split
+    # into batches of at most _BOOTSTRAP_BATCH_SIZE per Claude call.
+    from category_profiles import _BOOTSTRAP_BATCH_SIZE
+
+    profiles = _empty()
+    n = _BOOTSTRAP_BATCH_SIZE * 2 + 3
+    cat_ids = [f"cat-{i}" for i in range(n)]
+    for cid in cat_ids:
+        profiles["categories"][cid] = {
+            "name": cid, "description": "", "merchants": ["M"],
+            "item_exemplars": {}, "items_since_generation": 0, "dirty": False,
+        }
+
+    def fake_create(**kwargs):
+        # Echo back a description for exactly the categories named in this call.
+        user_msg = kwargs["messages"][0]["content"]
+        batch_ids = [cid for cid in cat_ids if f'"{cid}"' in user_msg]
+        assert len(batch_ids) <= _BOOTSTRAP_BATCH_SIZE
+        payload = [{"category_id": cid, "description": f"desc {cid}"} for cid in batch_ids]
+        return _mk_claude_response(json.dumps(payload))
+
+    with patch("category_profiles.anthropic.Anthropic") as mock_cls:
+        mock_cls.return_value.messages.create.side_effect = fake_create
+        bootstrap_descriptions(profiles, cat_ids, "key")
+
+    expected_calls = (n + _BOOTSTRAP_BATCH_SIZE - 1) // _BOOTSTRAP_BATCH_SIZE
+    assert mock_cls.return_value.messages.create.call_count == expected_calls
+    for cid in cat_ids:
+        assert profiles["categories"][cid]["description"] == f"desc {cid}"
+
+
+def test_bootstrap_descriptions_raises_when_a_later_batch_omits_a_category():
+    # NO SILENT FALLBACK survives batching: an omission in any batch still errors.
+    from category_profiles import _BOOTSTRAP_BATCH_SIZE
+
+    profiles = _empty()
+    n = _BOOTSTRAP_BATCH_SIZE + 2
+    cat_ids = [f"cat-{i}" for i in range(n)]
+    for cid in cat_ids:
+        profiles["categories"][cid] = {
+            "name": cid, "description": "", "merchants": ["M"],
+            "item_exemplars": {}, "items_since_generation": 0, "dirty": False,
+        }
+
+    def fake_create(**kwargs):
+        user_msg = kwargs["messages"][0]["content"]
+        batch_ids = [cid for cid in cat_ids if f'"{cid}"' in user_msg]
+        # Drop the last id of the (second) batch to simulate Haiku omitting one.
+        payload = [{"category_id": cid, "description": f"desc {cid}"} for cid in batch_ids[:-1]]
+        return _mk_claude_response(json.dumps(payload))
+
+    with patch("category_profiles.anthropic.Anthropic") as mock_cls:
+        mock_cls.return_value.messages.create.side_effect = fake_create
+        with pytest.raises(ValueError, match="omitted descriptions"):
+            bootstrap_descriptions(profiles, cat_ids, "key")
+
+
 # ---------------------------------------------------------------------------
 # regenerate_stale — orchestration over is_stale + bootstrap_descriptions
 # ---------------------------------------------------------------------------
