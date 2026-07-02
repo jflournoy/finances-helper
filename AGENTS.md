@@ -234,7 +234,7 @@ I want to understand how my development practices have evolved. Use the session-
 
 The key question: "Am I doing this the same way every time (command) or do I need analysis and insights (agent)?"
 
-## vexp <!-- vexp v2.0.25 -->
+## vexp <!-- vexp v2.1.0 -->
 
 **MANDATORY: use `run_pipeline` - do NOT grep or glob the codebase.**
 vexp returns pre-indexed, graph-ranked context in a single call.
