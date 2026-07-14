@@ -7,15 +7,15 @@ import anthropic
 
 
 @dataclass
-class SpendingInsight:
-    """A single behavioral spending insight with financial impact estimate."""
+class SpendingSignal:
+    """A neutral behavioral spending pattern with reflective framing."""
 
     pattern_type: str
-    title: str
-    estimated_monthly_savings_dollars: float
+    category: str | None
+    summary: str
+    magnitude_dollars: float
     payees_involved: list[str]
-    evidence: str
-    suggested_action: str
+    reflective_prompt: str
 
 
 @dataclass
@@ -38,7 +38,7 @@ class SpendingContext:
     spend_by_category: dict[str, float]
     monthly_by_category: dict[str, dict[str, float]]
     payee_groups: dict[str, list[dict]]
-    insights: list[SpendingInsight] = field(default_factory=list)
+    insights: list[SpendingSignal] = field(default_factory=list)
     trends: list[CategoryTrend] = field(default_factory=list)
 
 
@@ -199,11 +199,8 @@ DELIVERY_MARKUP_RATE = 0.35
 def analyze_delivery_premium(
     payee_groups: dict[str, list[dict]],
     period_months: int,
-) -> list[SpendingInsight]:
-    """Identify delivery app spend and estimate overpay vs. pickup.
-
-    Returns one aggregated insight or empty list.
-    """
+) -> list[SpendingSignal]:
+    """Identify delivery app spend patterns. Returns one aggregated signal or empty list."""
     if period_months == 0:
         return []
 
@@ -221,19 +218,16 @@ def analyze_delivery_premium(
         return []
 
     total_delivery = sum(abs(txn["amount_dollars"]) for txn in delivery_txns)
-    overpay = total_delivery * DELIVERY_MARKUP_RATE / (1 + DELIVERY_MARKUP_RATE)
-    monthly_savings = overpay / period_months
-
-    evidence = f"{len(delivery_txns)} charges totaling ${total_delivery:.2f} over {period_months} months"
+    monthly_avg = total_delivery / period_months
 
     return [
-        SpendingInsight(
+        SpendingSignal(
             pattern_type="delivery_premium",
-            title="Delivery app premium",
-            estimated_monthly_savings_dollars=monthly_savings,
+            category=None,
+            summary=f"{len(delivery_txns)} delivery charges averaging ${monthly_avg:.2f}/month over {period_months} months",
+            magnitude_dollars=monthly_avg,
             payees_involved=sorted(list(matching_payees)),
-            evidence=evidence,
-            suggested_action=f"Switch to pickup where possible — estimated {DELIVERY_MARKUP_RATE*100:.0f}% savings (~${monthly_savings:.2f}/month)",
+            reflective_prompt="Does this delivery spend feel like it reflects how you want to be living? Or does it feel like more than you intended?",
         )
     ]
 
@@ -254,11 +248,8 @@ CONVENIENCE_MARKUP_RATE = 0.30
 def analyze_convenience_markup(
     payee_groups: dict[str, list[dict]],
     period_months: int,
-) -> list[SpendingInsight]:
-    """Flag significant spend at convenience stores.
-
-    Only fires if total > $50/period.
-    """
+) -> list[SpendingSignal]:
+    """Flag significant spend at convenience stores. Only fires if total > $50/period."""
     if period_months == 0:
         return []
 
@@ -280,19 +271,16 @@ def analyze_convenience_markup(
     if total_convenience <= 50:
         return []
 
-    overpay = total_convenience * CONVENIENCE_MARKUP_RATE / (1 + CONVENIENCE_MARKUP_RATE)
-    monthly_savings = overpay / period_months
-
-    evidence = f"{len(convenience_txns)} charges totaling ${total_convenience:.2f} over {period_months} months"
+    monthly_avg = total_convenience / period_months
 
     return [
-        SpendingInsight(
+        SpendingSignal(
             pattern_type="convenience_markup",
-            title="Convenience store premium",
-            estimated_monthly_savings_dollars=monthly_savings,
+            category=None,
+            summary=f"{len(convenience_txns)} convenience store charges, ~${monthly_avg:.2f}/month over {period_months} months",
+            magnitude_dollars=monthly_avg,
             payees_involved=sorted(list(matching_payees)),
-            evidence=evidence,
-            suggested_action=f"Shop at grocery stores instead — estimated {CONVENIENCE_MARKUP_RATE*100:.0f}% savings (~${monthly_savings:.2f}/month)",
+            reflective_prompt="Convenience store visits often reflect a need for quick access — does this feel like a pattern you'd want to budget for intentionally?",
         )
     ]
 
@@ -303,12 +291,12 @@ def analyze_frequent_small_charges(
     period_months: int,
     min_frequency_per_month: float = 3.0,
     max_amount_per_charge: float = 30.0,
-) -> list[SpendingInsight]:
+) -> list[SpendingSignal]:
     """Flag payees in a category with high-frequency, low-amount charges."""
     if period_months == 0:
         return []
 
-    insights = []
+    signals = []
 
     for payee, txns in payee_groups.items():
         category_txns = [
@@ -328,22 +316,19 @@ def analyze_frequent_small_charges(
         ):
             total = sum(abs(t["amount_dollars"]) for t in category_txns)
             monthly_avg = total / period_months
-            estimated_savings = min(monthly_avg * 0.25, monthly_avg)
 
-            evidence = f"{len(category_txns)} charges over {period_months} months, avg ${avg_amount:.2f} per charge, freq {frequency:.1f}/month"
-
-            insights.append(
-                SpendingInsight(
+            signals.append(
+                SpendingSignal(
                     pattern_type="frequency",
-                    title=f"{payee.title()} (high-frequency)",
-                    estimated_monthly_savings_dollars=estimated_savings,
+                    category=category_name,
+                    summary=f"{payee.title()}: {len(category_txns)} charges over {period_months} months (avg ${avg_amount:.2f}, {frequency:.1f}×/month)",
+                    magnitude_dollars=monthly_avg,
                     payees_involved=[payee],
-                    evidence=evidence,
-                    suggested_action=f"Consider reducing frequency — estimated savings ${estimated_savings:.2f}/month",
+                    reflective_prompt=f"You visit {payee.title()} about {frequency:.0f} times a month — does that feel like it matches the role you want this to play in your budget?",
                 )
             )
 
-    return insights
+    return signals
 
 
 def analyze_trends(
@@ -421,29 +406,29 @@ def synthesize_advisory(
     context: SpendingContext,
     api_key: str,
     model: str = "claude-sonnet-4-6",
-) -> str:
-    """Call Claude Sonnet with spending context; return prose advisory string.
+) -> tuple[str, list[dict]]:
+    """Call Claude Sonnet with spending context; return (prose_text, messages).
 
-    Builds a user message summarizing period, total spend, top insights, and trends.
-    Returns raw prose text (not JSON). Raises ValueError on empty response or
-    max_tokens, RuntimeError on API error.
+    Builds a user message summarizing period, total spend, signals, and trends.
+    Returns the assistant's first-turn text and the full conversation messages list
+    (suitable for passing to continue_advisory_turn). Raises ValueError on empty
+    response or max_tokens.
     """
     if not api_key:
         raise ValueError("api_key is required for synthesis")
 
-    # Sort insights by estimated savings (descending)
-    sorted_insights = sorted(
+    # Sort signals by magnitude (descending)
+    sorted_signals = sorted(
         context.insights,
-        key=lambda i: i.estimated_monthly_savings_dollars,
+        key=lambda s: s.magnitude_dollars,
         reverse=True,
     )
 
-    # Build insights section
+    # Build signals section
     insights_text = "\n".join(
-        f"- {i.title}: ${i.estimated_monthly_savings_dollars:.2f}/month possible savings\n"
-        f"  Evidence: {i.evidence}\n"
-        f"  Action: {i.suggested_action}"
-        for i in sorted_insights
+        f"- {s.summary}\n"
+        f"  Explore: {s.reflective_prompt}"
+        for s in sorted_signals
     )
 
     # Build trends section
@@ -463,7 +448,7 @@ Total Spending: ${context.total_spend_dollars:.2f}
 Spending by Category:
 {chr(10).join(f"- {cat}: ${total:.2f}" for cat, total in sorted(context.spend_by_category.items(), key=lambda x: -x[1]))}
 
-Key Insights (ranked by potential monthly savings):
+Spending Signals (ranked by monthly magnitude):
 {insights_text}{trends_text}
 """
 
@@ -489,4 +474,9 @@ Key Insights (ranked by potential monthly savings):
     if not response.content or not response.content[0].text:
         raise ValueError("Claude returned empty advisory response")
 
-    return response.content[0].text
+    text = response.content[0].text
+    messages = [
+        {"role": "user", "content": user_message},
+        {"role": "assistant", "content": text},
+    ]
+    return text, messages

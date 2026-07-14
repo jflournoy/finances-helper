@@ -7,7 +7,7 @@ from dataclasses import asdict
 from unittest.mock import Mock, patch
 
 from spending_advisor import (
-    SpendingInsight,
+    SpendingSignal,
     SpendingContext,
     CategoryTrend,
     filter_advisory_transactions,
@@ -190,17 +190,17 @@ def test_analyze_delivery_premium_identifies_doordash_and_uber_eats(advisory_txn
     assert any("delivery" in i.pattern_type.lower() for i in insights)
 
 
-def test_analyze_delivery_premium_computes_overpay_correctly(advisory_txns):
+def test_analyze_delivery_premium_magnitude_is_positive(advisory_txns):
     txns, cats = advisory_txns
     filtered = filter_advisory_transactions(txns)
     joined, _ = join_category_names(filtered, cats)
     context = collect_spending_data(joined)
 
-    insights = analyze_delivery_premium(context.payee_groups, context.period_months_complete)
+    signals = analyze_delivery_premium(context.payee_groups, context.period_months_complete)
 
-    if insights:
-        insight = insights[0]
-        assert insight.estimated_monthly_savings_dollars > 0
+    if signals:
+        signal = signals[0]
+        assert signal.magnitude_dollars > 0
 
 
 def test_analyze_delivery_premium_handles_substring_match(advisory_txns):
@@ -259,7 +259,7 @@ def test_analyze_frequent_small_charges_flags_chipotle(advisory_txns):
         context.period_months_complete,
     )
 
-    assert any("chipotle" in i.title.lower() for i in insights), "Should flag Chipotle as high-frequency"
+    assert any("chipotle" in i.summary.lower() for i in insights), "Should flag Chipotle as high-frequency"
 
 
 def test_analyze_frequent_small_charges_ignores_low_frequency():
@@ -334,25 +334,25 @@ def test_analyze_trends_ignores_small_categories():
 
 
 # ============================================================================
-# SpendingInsight dataclass tests
+# SpendingSignal dataclass tests
 # ============================================================================
 
-def test_spending_insight_has_required_fields(advisory_txns):
+def test_spending_signal_has_required_fields(advisory_txns):
     txns, cats = advisory_txns
     filtered = filter_advisory_transactions(txns)
     joined, _ = join_category_names(filtered, cats)
     context = collect_spending_data(joined)
 
-    insights = analyze_delivery_premium(context.payee_groups, context.period_months_complete)
+    signals = analyze_delivery_premium(context.payee_groups, context.period_months_complete)
 
-    if insights:
-        insight = insights[0]
-        assert hasattr(insight, "pattern_type")
-        assert hasattr(insight, "title")
-        assert hasattr(insight, "estimated_monthly_savings_dollars")
-        assert hasattr(insight, "payees_involved")
-        assert hasattr(insight, "evidence")
-        assert hasattr(insight, "suggested_action")
+    if signals:
+        signal = signals[0]
+        assert hasattr(signal, "pattern_type")
+        assert hasattr(signal, "category")
+        assert hasattr(signal, "summary")
+        assert hasattr(signal, "magnitude_dollars")
+        assert hasattr(signal, "payees_involved")
+        assert hasattr(signal, "reflective_prompt")
 
 
 # ============================================================================
@@ -456,13 +456,13 @@ def test_synthesize_advisory_calls_claude_with_correct_model():
         monthly_by_category={},
         payee_groups={},
         insights=[
-            SpendingInsight(
+            SpendingSignal(
                 pattern_type="test",
-                title="Test insight",
-                estimated_monthly_savings_dollars=50.0,
+                category=None,
+                summary="Test signal summary",
+                magnitude_dollars=50.0,
                 payees_involved=["Test"],
-                evidence="test",
-                suggested_action="test",
+                reflective_prompt="Does this feel right?",
             )
         ],
         trends=[],
@@ -476,9 +476,13 @@ def test_synthesize_advisory_calls_claude_with_correct_model():
         mock_response.content = [Mock(text="Test advisory response")]
         mock_client.messages.create.return_value = mock_response
 
-        result = synthesize_advisory(context, "test-key", model="claude-sonnet-4-6")
+        text, messages = synthesize_advisory(context, "test-key", model="claude-sonnet-4-6")
 
-        assert result == "Test advisory response"
+        assert text == "Test advisory response"
+        assert len(messages) == 2
+        assert messages[0]["role"] == "user"
+        assert messages[1]["role"] == "assistant"
+        assert messages[1]["content"] == "Test advisory response"
         mock_client_cls.assert_called_once_with(api_key="test-key")
         call_kwargs = mock_client.messages.create.call_args.kwargs
         assert call_kwargs["model"] == "claude-sonnet-4-6"
@@ -527,11 +531,13 @@ def test_synthesize_advisory_returns_prose_string(advisory_txns):
         mock_response.content = [Mock(text="Test prose response")]
         mock_client.messages.create.return_value = mock_response
 
-        result = synthesize_advisory(context, "test-key")
+        text, messages = synthesize_advisory(context, "test-key")
 
-        assert isinstance(result, str)
-        assert len(result) > 0
-        assert "Test prose response" == result
+        assert isinstance(text, str)
+        assert len(text) > 0
+        assert text == "Test prose response"
+        assert isinstance(messages, list)
+        assert len(messages) == 2
 
 
 def test_synthesize_advisory_raises_on_empty_response():
