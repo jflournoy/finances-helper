@@ -193,8 +193,6 @@ DELIVERY_APPS = {
     "gopuff",
     "shipt",
 }
-DELIVERY_MARKUP_RATE = 0.35
-
 
 def analyze_delivery_premium(
     payee_groups: dict[str, list[dict]],
@@ -242,8 +240,6 @@ CONVENIENCE_STORES = {
     "sheetz",
     "wawa",
 }
-CONVENIENCE_MARKUP_RATE = 0.30
-
 
 def analyze_convenience_markup(
     payee_groups: dict[str, list[dict]],

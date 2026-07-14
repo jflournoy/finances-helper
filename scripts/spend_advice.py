@@ -97,9 +97,9 @@ def _render_markdown(ctx: SpendingContext, advisory_text: str) -> str:
 
 
 def _render_transcript(turns: list[dict]) -> str:
-    """Render the full conversation transcript as Markdown."""
+    """Render the full conversation transcript as Markdown. Skips the seed context message."""
     lines = ["# Spending Reflection Transcript", ""]
-    for turn in turns:
+    for turn in turns[1:]:
         role = turn["role"]
         content = turn["content"]
         if role == "assistant":

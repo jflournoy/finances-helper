@@ -11,7 +11,7 @@ from io import StringIO
 import sys
 sys.path.insert(0, str(Path(__file__).parent.parent / "scripts"))
 
-from spend_advice import main, _render_markdown
+from spend_advice import main, _render_markdown, _render_transcript
 
 
 @pytest.fixture
@@ -169,6 +169,77 @@ def test_markdown_contains_insights_header(temp_out_dir, monkeypatch):
     assert "##" in md_text or "Advisory" in md_text
 
 
+def test_tty_dialogue_loop_runs_and_writes_transcript(temp_out_dir, monkeypatch):
+    """When stdin is a TTY, the loop runs and the transcript branch fires."""
+    monkeypatch.setenv("YNAB_API_TOKEN", "test-token")
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key")
+
+    initial_messages = [
+        {"role": "user", "content": "context payload"},
+        {"role": "assistant", "content": "First turn"},
+    ]
+    after_turn2 = initial_messages + [
+        {"role": "user", "content": "that feels right"},
+        {"role": "assistant", "content": "Glad to hear it."},
+    ]
+
+    with patch("sys.argv", ["spend_advice.py", "--days", "90", "--out-dir", temp_out_dir]):
+        with patch("spend_advice.YNABClient") as mock_client_cls:
+            mock_client = Mock()
+            mock_client_cls.return_value = mock_client
+            mock_client.resolve_budget_id.return_value = "budget-id"
+            mock_client.get_transactions.return_value = ([], "server-knowledge")
+            mock_client.get_categories.return_value = [{"categories": []}]
+
+            with patch("spend_advice.synthesize_advisory") as mock_synth:
+                mock_synth.return_value = ("First turn", initial_messages)
+                with patch("spend_advice.continue_advisory_turn") as mock_continue:
+                    mock_continue.return_value = ("Glad to hear it.", after_turn2)
+                    with patch("sys.stdin") as mock_stdin:
+                        mock_stdin.isatty.return_value = True
+                        with patch("builtins.input", side_effect=["that feels right", "done"]):
+                            result = main()
+
+    assert result == 0
+    mock_continue.assert_called_once()
+
+    md_files = list(Path(temp_out_dir).glob("reflection-*.md"))
+    assert len(md_files) == 1
+    transcript = md_files[0].read_text()
+    assert "Spending Reflection Transcript" in transcript
+    assert "context payload" not in transcript
+
+
+def test_tty_dialogue_loop_eof_exits_cleanly(temp_out_dir, monkeypatch):
+    """EOFError from input() exits the loop without error."""
+    monkeypatch.setenv("YNAB_API_TOKEN", "test-token")
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key")
+
+    initial_messages = [
+        {"role": "user", "content": "context payload"},
+        {"role": "assistant", "content": "First turn"},
+    ]
+
+    with patch("sys.argv", ["spend_advice.py", "--days", "90", "--out-dir", temp_out_dir]):
+        with patch("spend_advice.YNABClient") as mock_client_cls:
+            mock_client = Mock()
+            mock_client_cls.return_value = mock_client
+            mock_client.resolve_budget_id.return_value = "budget-id"
+            mock_client.get_transactions.return_value = ([], "server-knowledge")
+            mock_client.get_categories.return_value = [{"categories": []}]
+
+            with patch("spend_advice.synthesize_advisory") as mock_synth:
+                mock_synth.return_value = ("First turn", initial_messages)
+                with patch("spend_advice.continue_advisory_turn") as mock_continue:
+                    with patch("sys.stdin") as mock_stdin:
+                        mock_stdin.isatty.return_value = True
+                        with patch("builtins.input", side_effect=EOFError):
+                            result = main()
+
+    assert result == 0
+    mock_continue.assert_not_called()
+
+
 def test_non_tty_skips_dialogue_loop(temp_out_dir, monkeypatch):
     """When stdin is not a TTY, the dialogue loop must not run."""
     monkeypatch.setenv("YNAB_API_TOKEN", "test-token")
@@ -200,6 +271,35 @@ def test_non_tty_skips_dialogue_loop(temp_out_dir, monkeypatch):
 # ============================================================================
 # _render_markdown() function tests
 # ============================================================================
+
+def test_render_transcript_skips_seed_context_message():
+    """The first message (context data payload) must not appear as 'You:' in the transcript."""
+    turns = [
+        {"role": "user", "content": "Period: 90 days\nTotal Spending: $1,000.00"},
+        {"role": "assistant", "content": "Here's what I notice about your spending."},
+        {"role": "user", "content": "That makes sense."},
+        {"role": "assistant", "content": "Great, let's talk about next steps."},
+    ]
+    result = _render_transcript(turns)
+
+    assert "Period: 90 days" not in result
+    assert "Here's what I notice" in result
+    assert "That makes sense." in result
+    assert "Great, let's talk" in result
+
+
+def test_render_transcript_opens_with_advisor_not_user():
+    """After skipping the seed message, the transcript should open with the advisor's voice."""
+    turns = [
+        {"role": "user", "content": "seed context"},
+        {"role": "assistant", "content": "Welcome to your reflection."},
+    ]
+    result = _render_transcript(turns)
+
+    lines = [l for l in result.splitlines() if l.strip()]
+    non_header_lines = [l for l in lines if not l.startswith("#")]
+    assert non_header_lines[0] == "**Advisor:**"
+
 
 def test_render_markdown_includes_title():
     from spending_advisor import SpendingContext
