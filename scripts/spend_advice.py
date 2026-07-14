@@ -1,5 +1,5 @@
 #!/usr/bin/env python
-"""CLI for generating spending advisor reports with behavioral insights."""
+"""CLI for generating a reflective spending planning conversation."""
 import sys
 import os
 import json
@@ -21,8 +21,12 @@ from spending_advisor import (
     analyze_frequent_small_charges,
     analyze_trends,
     synthesize_advisory,
+    continue_advisory_turn,
     SpendingContext,
 )
+
+MAX_DIALOGUE_TURNS = 6
+EXIT_PHRASES = {"done", "quit", "exit", "q"}
 
 
 def _flatten_categories(categories):
@@ -35,36 +39,34 @@ def _flatten_categories(categories):
 
 
 def _render_markdown(ctx: SpendingContext, advisory_text: str) -> str:
-    """Render the full advisory report as Markdown."""
+    """Render the advisory report as Markdown."""
     lines = [
         "# Spending Advisory Report",
         "",
         f"**Period:** {ctx.period_days} days ({ctx.period_months_complete} complete months)",
         f"**Total Spending:** ${ctx.total_spend_dollars:,.2f}",
         "",
-        "## Your Personal Advisory",
+        "## Reflection",
         "",
         advisory_text,
         "",
     ]
 
-    # Insights section
+    # Signals section
     if ctx.insights:
-        lines.append("## Insights")
+        lines.append("## Signals")
         lines.append("")
-        sorted_insights = sorted(
+        sorted_signals = sorted(
             ctx.insights,
-            key=lambda i: i.estimated_monthly_savings_dollars,
+            key=lambda s: s.magnitude_dollars,
             reverse=True,
         )
-        for insight in sorted_insights:
-            lines.append(f"### {insight.title}")
+        for signal in sorted_signals:
+            lines.append(f"### {signal.summary}")
             lines.append("")
-            lines.append(f"**Estimated Monthly Savings:** ${insight.estimated_monthly_savings_dollars:.2f}")
+            lines.append(f"**Monthly magnitude:** ${signal.magnitude_dollars:.2f}")
             lines.append("")
-            lines.append(f"**Evidence:** {insight.evidence}")
-            lines.append("")
-            lines.append(f"**Action:** {insight.suggested_action}")
+            lines.append(f"**Explore:** {signal.reflective_prompt}")
             lines.append("")
 
     # Trends section
@@ -94,12 +96,31 @@ def _render_markdown(ctx: SpendingContext, advisory_text: str) -> str:
     return "\n".join(lines)
 
 
+def _render_transcript(turns: list[dict]) -> str:
+    """Render the full conversation transcript as Markdown."""
+    lines = ["# Spending Reflection Transcript", ""]
+    for turn in turns:
+        role = turn["role"]
+        content = turn["content"]
+        if role == "assistant":
+            lines.append("**Advisor:**")
+            lines.append("")
+            lines.append(content)
+            lines.append("")
+        elif role == "user":
+            lines.append("**You:**")
+            lines.append("")
+            lines.append(content)
+            lines.append("")
+    return "\n".join(lines)
+
+
 def main() -> int:
     """Run the spending advisor CLI."""
     load_dotenv()
 
     parser = argparse.ArgumentParser(
-        description="Generate a spending advisor report with behavioral insights."
+        description="Start a reflective spending planning conversation."
     )
     parser.add_argument(
         "--days",
@@ -158,7 +179,6 @@ def main() -> int:
     flat_categories = _flatten_categories(categories)
 
     # Process transactions
-    # Filter to outflows only (spending, where amount_dollars < 0)
     outflow_txns = [t for t in txns if t.get("amount_dollars", 0) < 0]
     filtered_txns = filter_advisory_transactions(outflow_txns)
     joined_txns, unknown_cat_count = join_category_names(filtered_txns, flat_categories)
@@ -178,7 +198,6 @@ def main() -> int:
         context.payee_groups, context.period_months_complete
     )
 
-    # Frequent small charges for dining/food categories
     for cat_name in context.spend_by_category:
         if any(
             kw in cat_name.lower()
@@ -192,14 +211,10 @@ def main() -> int:
 
     trends = analyze_trends(context.monthly_by_category)
 
-    # Sort insights and attach to context
-    insights.sort(
-        key=lambda i: i.estimated_monthly_savings_dollars, reverse=True
-    )
+    insights.sort(key=lambda s: s.magnitude_dollars, reverse=True)
     context.insights = insights
     context.trends = trends
 
-    # Warn if limited trend data
     if context.period_months_complete < 2:
         print(
             f"Warning: Only {context.period_months_complete} complete month(s) available. "
@@ -207,38 +222,74 @@ def main() -> int:
             file=sys.stderr,
         )
 
-    # Call Claude
+    # First Claude turn
     try:
-        advisory_text = synthesize_advisory(context, anthropic_key)
+        advisory_text, messages = synthesize_advisory(context, anthropic_key)
     except Exception as e:
         print(f"Error synthesizing advisory: {e}", file=sys.stderr)
         return 1
 
-    # Render and write outputs
-    markdown_text = _render_markdown(context, advisory_text)
+    # Print first turn
+    print()
+    print(advisory_text)
+    print()
 
+    # Dialogue loop — only when running interactively
+    if sys.stdin.isatty():
+        turns_taken = 1
+        while turns_taken < MAX_DIALOGUE_TURNS:
+            try:
+                user_input = input("You: ").strip()
+            except (EOFError, KeyboardInterrupt):
+                print()
+                break
+
+            if not user_input:
+                continue
+
+            if user_input.lower() in EXIT_PHRASES:
+                break
+
+            try:
+                reply, messages = continue_advisory_turn(messages, user_input, anthropic_key)
+            except Exception as e:
+                print(f"Error: {e}", file=sys.stderr)
+                break
+
+            print()
+            print(reply)
+            print()
+            turns_taken += 1
+
+    # Write outputs
     timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
-    md_path = out_dir / f"spend-advice-{timestamp}.md"
-    json_path = out_dir / f"spend-advice-{timestamp}.json"
+    md_path = out_dir / f"reflection-{timestamp}.md"
+    json_path = out_dir / f"reflection-{timestamp}.json"
+
+    # The markdown output: transcript if dialogue happened, else single advisory
+    if len(messages) > 2:
+        md_content = _render_transcript(messages)
+    else:
+        md_content = _render_markdown(context, advisory_text)
 
     with open(md_path, "w") as f:
-        f.write(markdown_text)
+        f.write(md_content)
 
     json_data = {
         "generated_at": datetime.now().isoformat(),
         "period_days": context.period_days,
         "period_months_complete": context.period_months_complete,
         "total_spend_dollars": context.total_spend_dollars,
-        "insights": [
+        "signals": [
             {
-                "pattern_type": i.pattern_type,
-                "title": i.title,
-                "estimated_monthly_savings_dollars": i.estimated_monthly_savings_dollars,
-                "payees_involved": i.payees_involved,
-                "evidence": i.evidence,
-                "suggested_action": i.suggested_action,
+                "pattern_type": s.pattern_type,
+                "category": s.category,
+                "summary": s.summary,
+                "magnitude_dollars": s.magnitude_dollars,
+                "payees_involved": s.payees_involved,
+                "reflective_prompt": s.reflective_prompt,
             }
-            for i in context.insights
+            for s in context.insights
         ],
         "trends": [
             {
@@ -254,12 +305,8 @@ def main() -> int:
     with open(json_path, "w") as f:
         json.dump(json_data, f, indent=2)
 
-    # Print summary
-    total_savings = sum(i.estimated_monthly_savings_dollars for i in context.insights)
-    print()
     print(f"Analyzed {len(joined_txns)} transactions over {context.period_months_complete} complete months (${context.total_spend_dollars:,.2f} total)")
-    print(f"Found {len(context.insights)} insights — estimated ${total_savings:.2f}/month in potential savings")
-    print(f"Report: {md_path}")
+    print(f"Reflection: {md_path}")
     print()
 
     return 0
