@@ -1805,7 +1805,7 @@ class TestITEnrich:
             {"id": "transfer", "payee_name": "Transfer : Savings", "amount_dollars": "-200.00", "date": "2026-04-10", "category_id": None, "cleared": "cleared", "deleted": False, "approved": False},
             {"id": "reconciled", "payee_name": "Some Store", "amount_dollars": "20.00", "date": "2026-04-09", "category_id": None, "cleared": "reconciled", "deleted": False, "approved": False},
             {"id": "deleted", "payee_name": "Deleted Store", "amount_dollars": "10.00", "date": "2026-04-08", "category_id": None, "cleared": "cleared", "deleted": True, "approved": False},
-            {"id": "categorized", "payee_name": "Already Cat", "amount_dollars": "5.00", "date": "2026-04-07", "category_id": "cat1", "cleared": "cleared", "deleted": False, "approved": True},
+            {"id": "categorized", "payee_name": "Already Cat", "amount_dollars": "5.00", "date": "2026-04-07", "category_id": "dddddddd-0000-0000-0000-000000000001", "cleared": "cleared", "deleted": False, "approved": True},
         ]
 
         get_transactions_calls = []
@@ -2050,7 +2050,7 @@ class TestITEnrich:
             {"id": "transfer", "payee_name": "Transfer : Savings", "amount_dollars": "-200.00", "date": "2026-04-10", "category_id": None, "cleared": "cleared", "deleted": False, "approved": False, "import_payee_name": None},
             {"id": "reconciled", "payee_name": "Some Store", "amount_dollars": "20.00", "date": "2026-04-09", "category_id": None, "cleared": "reconciled", "deleted": False, "approved": False, "import_payee_name": None},
             {"id": "deleted", "payee_name": "Deleted Store", "amount_dollars": "10.00", "date": "2026-04-08", "category_id": None, "cleared": "cleared", "deleted": True, "approved": False, "import_payee_name": None},
-            {"id": "categorized", "payee_name": "Already Cat", "amount_dollars": "5.00", "date": "2026-04-07", "category_id": "cat1", "cleared": "cleared", "deleted": False, "approved": True, "import_payee_name": None},
+            {"id": "categorized", "payee_name": "Already Cat", "amount_dollars": "5.00", "date": "2026-04-07", "category_id": "dddddddd-0000-0000-0000-000000000001", "cleared": "cleared", "deleted": False, "approved": True, "import_payee_name": None},
         ]
 
         get_transactions_calls = []
