@@ -18,6 +18,7 @@ from spending_advisor import (
     analyze_frequent_small_charges,
     analyze_trends,
     synthesize_advisory,
+    continue_advisory_turn,
     ADVISOR_SYSTEM_PROMPT,
 )
 
@@ -602,3 +603,116 @@ def test_synthesize_advisory_raises_on_missing_api_key():
 
     with pytest.raises(ValueError, match="api_key"):
         synthesize_advisory(context, "")
+
+
+# ============================================================================
+# continue_advisory_turn tests (dialogue loop)
+# ============================================================================
+
+def _make_mock_client(text: str):
+    """Return (mock_client_cls, mock_client) patched for a single messages.create call."""
+    mock_client_cls = Mock()
+    mock_client = Mock()
+    mock_client_cls.return_value = mock_client
+    mock_response = Mock()
+    mock_response.stop_reason = "end_turn"
+    mock_response.content = [Mock(text=text)]
+    mock_client.messages.create.return_value = mock_response
+    return mock_client_cls, mock_client
+
+
+def test_continue_advisory_turn_appends_to_messages():
+    seed_messages = [
+        {"role": "user", "content": "Context here"},
+        {"role": "assistant", "content": "First assistant turn"},
+    ]
+
+    with patch("anthropic.Anthropic") as mock_client_cls:
+        mock_client = Mock()
+        mock_client_cls.return_value = mock_client
+        mock_response = Mock()
+        mock_response.stop_reason = "end_turn"
+        mock_response.content = [Mock(text="Second assistant turn")]
+        mock_client.messages.create.return_value = mock_response
+
+        text, updated = continue_advisory_turn(seed_messages, "User reply here", "test-key")
+
+    assert text == "Second assistant turn"
+    assert len(updated) == 4
+    assert updated[2] == {"role": "user", "content": "User reply here"}
+    assert updated[3] == {"role": "assistant", "content": "Second assistant turn"}
+
+
+def test_continue_advisory_turn_does_not_mutate_input_messages():
+    seed_messages = [
+        {"role": "user", "content": "Context"},
+        {"role": "assistant", "content": "Turn 1"},
+    ]
+    original_len = len(seed_messages)
+
+    with patch("anthropic.Anthropic") as mock_client_cls:
+        mock_client = Mock()
+        mock_client_cls.return_value = mock_client
+        mock_response = Mock()
+        mock_response.stop_reason = "end_turn"
+        mock_response.content = [Mock(text="Turn 2")]
+        mock_client.messages.create.return_value = mock_response
+
+        _, _ = continue_advisory_turn(seed_messages, "reply", "test-key")
+
+    assert len(seed_messages) == original_len, "Input messages list must not be mutated"
+
+
+def test_scripted_dialogue_two_turns():
+    """Simulate a two-turn dialogue and assert message state is threaded correctly."""
+    context = SpendingContext(
+        period_days=90,
+        period_months_complete=3,
+        total_spend_dollars=1000.0,
+        spend_by_category={"Dining Out": 400.0, "Groceries": 600.0},
+        monthly_by_category={
+            "Dining Out": {"2025-01": 130.0, "2025-02": 140.0, "2025-03": 130.0},
+            "Groceries": {"2025-01": 200.0, "2025-02": 210.0, "2025-03": 190.0},
+        },
+        payee_groups={},
+        insights=[],
+        trends=[],
+    )
+
+    with patch("anthropic.Anthropic") as mock_client_cls:
+        mock_client = Mock()
+        mock_client_cls.return_value = mock_client
+
+        turn1_response = Mock()
+        turn1_response.stop_reason = "end_turn"
+        turn1_response.content = [Mock(text="Turn 1: here is what I see...")]
+
+        turn2_response = Mock()
+        turn2_response.stop_reason = "end_turn"
+        turn2_response.content = [Mock(text="Turn 2: got it, let me adjust...")]
+
+        mock_client.messages.create.side_effect = [turn1_response, turn2_response]
+
+        text1, messages1 = synthesize_advisory(context, "test-key")
+        assert text1 == "Turn 1: here is what I see..."
+        assert len(messages1) == 2
+
+        text2, messages2 = continue_advisory_turn(messages1, "That feels right", "test-key")
+        assert text2 == "Turn 2: got it, let me adjust..."
+        assert len(messages2) == 4
+        assert messages2[2]["role"] == "user"
+        assert messages2[2]["content"] == "That feels right"
+        assert messages2[3]["role"] == "assistant"
+
+        assert mock_client.messages.create.call_count == 2
+
+
+def test_continue_advisory_turn_raises_on_empty_messages():
+    with pytest.raises(ValueError, match="messages"):
+        continue_advisory_turn([], "reply", "test-key")
+
+
+def test_continue_advisory_turn_raises_on_missing_api_key():
+    messages = [{"role": "user", "content": "x"}, {"role": "assistant", "content": "y"}]
+    with pytest.raises(ValueError, match="api_key"):
+        continue_advisory_turn(messages, "reply", "")

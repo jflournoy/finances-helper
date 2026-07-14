@@ -387,6 +387,22 @@ def analyze_trends(
     return sorted(trends, key=lambda t: abs(t.pct_change_recent), reverse=True)
 
 
+CONTINUE_SYSTEM_PROMPT = """You are a reflective personal finance advisor continuing a conversation about \
+spending patterns and priorities.
+
+You have already shared initial observations and a forward-looking plan. Now you are listening and \
+responding to the user's reaction.
+
+Rules:
+- Acknowledge what the user said without judgment.
+- Adjust the plan in light of their response if they've clarified intent.
+- Ask at most ONE follow-up question if something important is still unresolved.
+- If the conversation feels complete (user said "done", "looks good", "that's right", etc.), \
+summarize the agreed plan and close warmly.
+- Never say "you should", "cut", "waste", "overpaid", "savings", or "reduce".
+- Under 250 words.
+"""
+
 ADVISOR_SYSTEM_PROMPT = """You are a reflective personal finance advisor. Your role is to help the user see \
 what their spending patterns suggest about their current priorities, and to explore whether that matches \
 the life they intended to budget for.
@@ -510,3 +526,41 @@ Spending Signals (ranked by monthly magnitude):
         {"role": "assistant", "content": text},
     ]
     return text, messages
+
+
+def continue_advisory_turn(
+    messages: list[dict],
+    user_response: str,
+    api_key: str,
+    model: str = "claude-sonnet-4-6",
+) -> tuple[str, list[dict]]:
+    """Send one more user turn and return (assistant_text, updated_messages).
+
+    Appends the user response to messages, calls Claude, then appends the
+    assistant reply. Returns the assistant text and the full updated messages list.
+    Raises ValueError on empty response or max_tokens.
+    """
+    if not api_key:
+        raise ValueError("api_key is required for advisory continuation")
+    if not messages:
+        raise ValueError("messages must not be empty — call synthesize_advisory first")
+
+    updated = messages + [{"role": "user", "content": user_response}]
+
+    client = anthropic.Anthropic(api_key=api_key)
+    response = client.messages.create(
+        model=model,
+        max_tokens=1024,
+        system=CONTINUE_SYSTEM_PROMPT,
+        messages=updated,
+    )
+
+    if response.stop_reason == "max_tokens":
+        raise ValueError("Advisory response was truncated (max_tokens). Increase max_tokens.")
+
+    if not response.content or not response.content[0].text:
+        raise ValueError("Claude returned empty advisory response")
+
+    text = response.content[0].text
+    updated.append({"role": "assistant", "content": text})
+    return text, updated
