@@ -514,7 +514,7 @@ def test_synthesize_advisory_includes_system_prompt():
         call_kwargs = mock_client.messages.create.call_args.kwargs
         system_prompt = call_kwargs["system"]
         assert "personal finance advisor" in system_prompt.lower()
-        assert "behavioral change" in system_prompt.lower()
+        assert "forward-looking" in system_prompt.lower() or "priorities" in system_prompt.lower()
 
 
 def test_synthesize_advisory_returns_prose_string(advisory_txns):

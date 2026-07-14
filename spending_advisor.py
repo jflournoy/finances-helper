@@ -387,19 +387,41 @@ def analyze_trends(
     return sorted(trends, key=lambda t: abs(t.pct_change_recent), reverse=True)
 
 
-ADVISOR_SYSTEM_PROMPT = """You are a personal finance advisor. The user wants to reduce their spending.
-You have been given a structured summary of their spending patterns for the last {period_months} months.
-Your job is to write a plain-English advisory report.
+ADVISOR_SYSTEM_PROMPT = """You are a reflective personal finance advisor. Your role is to help the user see \
+what their spending patterns suggest about their current priorities, and to explore whether that matches \
+the life they intended to budget for.
+
+You are not here to judge. You hold up a mirror, not a scorecard.
+
+For this first turn:
+1. Briefly reflect on what the patterns suggest (2-3 sentences, warm and curious).
+2. Propose a forward-looking monthly plan number for each major category — framed as a starting \
+point to react to, not a number to obey. Use the suggested starting points provided.
+3. Ask exactly ONE reflective question to open the conversation.
 
 Rules:
-- Lead with the 1-2 highest-impact behavioral changes (by estimated dollar savings).
-- Be specific: name the payees, dollar amounts, frequency.
-- Be direct: "You spent $X on DoorDash" not "Some charges may indicate delivery usage."
-- Estimate total potential monthly savings if the user makes the suggested changes.
-- Acknowledge uncertainty where it exists (e.g., convenience store visits may include pharmacy).
-- Do NOT lecture about budgeting generally. Focus on what they can change.
-- Keep it under 400 words.
+- Never say "you should", "cut", "waste", "overpaid", "savings", or "reduce".
+- Never assume a pattern is a problem — it might be exactly what the user wants.
+- One question only. The dialogue that follows is where alignment happens.
+- Warm, curious, and concise. Under 300 words.
+- Honor YNAB's core principle: every dollar is a choice about what matters. \
+Your job is alignment between intended priorities and revealed ones.
 """
+
+
+def _compute_category_medians(monthly_by_category: dict[str, dict[str, float]]) -> dict[str, float]:
+    """Compute trailing median of complete months per category as budget starting points."""
+    medians: dict[str, float] = {}
+    for category, monthly in monthly_by_category.items():
+        vals = sorted(monthly.values())
+        n = len(vals)
+        if n == 0:
+            continue
+        if n % 2 == 1:
+            medians[category] = vals[n // 2]
+        else:
+            medians[category] = (vals[n // 2 - 1] + vals[n // 2]) / 2
+    return medians
 
 
 def synthesize_advisory(
@@ -441,20 +463,28 @@ def synthesize_advisory(
                 f"({trend.pct_change_recent:+.1f}%)\n"
             )
 
+    # Compute per-category medians as plan starting points
+    category_medians = _compute_category_medians(context.monthly_by_category)
+    medians_text = "\n".join(
+        f"- {cat}: ${amt:.2f}/month"
+        for cat, amt in sorted(category_medians.items(), key=lambda x: -x[1])
+    ) or "(no multi-month data)"
+
     # Build user message
     user_message = f"""Period: {context.period_days} days ({context.period_months_complete} complete months)
 Total Spending: ${context.total_spend_dollars:.2f}
 
-Spending by Category:
+Spending by Category (total over period):
 {chr(10).join(f"- {cat}: ${total:.2f}" for cat, total in sorted(context.spend_by_category.items(), key=lambda x: -x[1]))}
+
+Suggested Monthly Budget Starting Points (trailing median of complete months):
+{medians_text}
 
 Spending Signals (ranked by monthly magnitude):
 {insights_text}{trends_text}
 """
 
-    system_prompt = ADVISOR_SYSTEM_PROMPT.format(
-        period_months=context.period_months_complete
-    )
+    system_prompt = ADVISOR_SYSTEM_PROMPT
 
     client = anthropic.Anthropic(api_key=api_key)
 
