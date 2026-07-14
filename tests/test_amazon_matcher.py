@@ -174,7 +174,7 @@ class TestExtractOrderHistoryCSV:
         assert "some_other_file.txt" in str(exc_info.value)
 
     def test_extract_order_history_csv_utf8_sig_encoding(self, tmp_path):
-        """Handle UTF-8 with BOM encoding."""
+        """Handle UTF-8 with BOM encoding, stripping the BOM from the header."""
         csv_content = "Order ID,Order Date\n111-0000001-0000001,2024-01-15"
         csv_bytes = csv_content.encode("utf-8-sig")
 
@@ -183,7 +183,9 @@ class TestExtractOrderHistoryCSV:
             zf.writestr("Your Amazon Orders/Order History.csv", csv_bytes)
 
         result = extract_order_history_csv(zip_path)
-        assert "Order ID" in result
+        assert result.startswith("Order ID"), (
+            f"BOM was not stripped, header starts with: {result[:10]!r}"
+        )
         assert "111-0000001-0000001" in result
 
 

@@ -139,8 +139,11 @@ def extract_order_history_csv(zip_path: Path) -> str:
 
         csv_bytes = zf.read(csv_path)
 
-        # Try UTF-8, then UTF-8 with BOM, then cp1252
-        for encoding in ["utf-8", "utf-8-sig", "cp1252"]:
+        # Try UTF-8 with BOM (also handles plain UTF-8), then cp1252.
+        # utf-8-sig must come before utf-8: plain "utf-8" decodes a BOM's
+        # bytes into a literal U+FEFF character instead of erroring, so it
+        # would silently corrupt the first header column (e.g. "﻿ASIN").
+        for encoding in ["utf-8-sig", "cp1252"]:
             try:
                 return csv_bytes.decode(encoding)
             except UnicodeDecodeError:
