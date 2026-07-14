@@ -42,6 +42,12 @@ logger = logging.getLogger(__name__)
 PROFILES_VERSION = 1
 DEFAULT_PROFILES_PATH = "data/cache/category_profiles.json"
 
+_UUID_RE = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$", re.I)
+
+
+def _is_uuid(value: str) -> bool:
+    return bool(_UUID_RE.match(value))
+
 # How many exemplars per category to surface in the prompt (highest count first).
 MAX_EXEMPLARS_PER_CATEGORY = 8
 
@@ -327,9 +333,23 @@ def record_rejection(
     both are marked dirty and both store the correction for the next refresh.
 
     A no-op move (from == to) is ignored. Modifies `profiles` in place.
+
+    Raises ValueError if either non-null category_id is not a YNAB UUID. Claude's
+    flat categorizer has historically echoed the category NAME into the id field
+    (fixed in categorizer.claude_categorize); an old applied changeset can still
+    carry that bad id in original_category_id. Without this check it would get
+    silently persisted as a bogus name-keyed category entry (NO SILENT FALLBACK).
     """
     if from_category_id == to_category_id:
         return
+
+    for cat_id in (from_category_id, to_category_id):
+        if cat_id and not _is_uuid(cat_id):
+            raise ValueError(
+                f"record_rejection: category_id {cat_id!r} is not a UUID — "
+                f"likely a stale pre-fix changeset that stored the category name "
+                f"instead of its id; refusing to persist"
+            )
 
     correction = {
         "subject": subject,
@@ -464,6 +484,13 @@ def build_merchant_map_from_cache(payee_cache: dict) -> dict:
     Alias entries (those with 'alias_of') and the cache's metadata keys are
     skipped. Merchants are sorted by descending observation count so the most
     representative ones lead.
+
+    Raises ValueError if any category_id in the cache is not a UUID. Claude's
+    flat categorizer has historically echoed the category NAME into the id
+    field (fixed in categorizer.claude_categorize); a payee_lookup.json built
+    before that fix can still carry the bad id. Silently syncing it here would
+    re-create a bogus name-keyed category profile on every rebuild (NO SILENT
+    FALLBACK) — run scripts/repair_payee_lookup_bogus_ids.py to clean the cache.
     """
     by_category: dict = {}
     scored: dict = {}  # category_id -> list[(count, payee)]
@@ -482,6 +509,13 @@ def build_merchant_map_from_cache(payee_cache: dict) -> dict:
         dom_id = None
         dom_name = None
         for cat_id, info in sorted(categories.items()):
+            if not _is_uuid(cat_id):
+                raise ValueError(
+                    f"build_merchant_map_from_cache: payee {key!r} has non-UUID "
+                    f"category_id {cat_id!r} in payee_lookup.json — likely a "
+                    f"stale pre-fix entry that stored the category name instead "
+                    f"of its id; refusing to sync"
+                )
             if info["count"] > max_count:
                 max_count = info["count"]
                 dom_id = cat_id

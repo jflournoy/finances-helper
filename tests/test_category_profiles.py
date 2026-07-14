@@ -202,20 +202,24 @@ def test_mark_dirty_unknown_category_raises():
 # record_rejection — the only signal that flags a description for refresh
 # ---------------------------------------------------------------------------
 
+_CAT_COMP = "aaaaaaaa-0000-0000-0000-000000000001"
+_CAT_HOME = "aaaaaaaa-0000-0000-0000-000000000002"
+
+
 def test_record_rejection_marks_both_categories_dirty():
     profiles = _empty()
-    record_rejection(profiles, "usb cable", "cat-comp", "Computer", "cat-home", "Home Goods")
-    assert profiles["categories"]["cat-comp"]["dirty"] is True
-    assert profiles["categories"]["cat-home"]["dirty"] is True
+    record_rejection(profiles, "usb cable", _CAT_COMP, "Computer", _CAT_HOME, "Home Goods")
+    assert profiles["categories"][_CAT_COMP]["dirty"] is True
+    assert profiles["categories"][_CAT_HOME]["dirty"] is True
 
 
 def test_record_rejection_stores_correction_on_both_categories():
     profiles = _empty()
-    record_rejection(profiles, "usb cable", "cat-comp", "Computer", "cat-home", "Home Goods")
-    comp_corr = profiles["categories"]["cat-comp"]["corrections"]
-    home_corr = profiles["categories"]["cat-home"]["corrections"]
+    record_rejection(profiles, "usb cable", _CAT_COMP, "Computer", _CAT_HOME, "Home Goods")
+    comp_corr = profiles["categories"][_CAT_COMP]["corrections"]
+    home_corr = profiles["categories"][_CAT_HOME]["corrections"]
     assert len(comp_corr) == 1 and comp_corr[0]["subject"] == "usb cable"
-    assert len(home_corr) == 1 and home_corr[0]["to_category_id"] == "cat-home"
+    assert len(home_corr) == 1 and home_corr[0]["to_category_id"] == _CAT_HOME
 
 
 def test_record_rejection_noop_when_from_equals_to():
@@ -226,13 +230,32 @@ def test_record_rejection_noop_when_from_equals_to():
 
 def test_record_rejection_makes_categories_stale():
     profiles = _empty()
-    profiles["categories"]["cat-comp"] = {
+    profiles["categories"][_CAT_COMP] = {
         "name": "Computer", "description": "had a description", "merchants": [],
         "item_exemplars": {}, "corrections": [], "dirty": False,
     }
-    assert is_stale(profiles["categories"]["cat-comp"]) is False
-    record_rejection(profiles, "usb cable", "cat-comp", "Computer", "cat-home", "Home Goods")
-    assert is_stale(profiles["categories"]["cat-comp"]) is True
+    assert is_stale(profiles["categories"][_CAT_COMP]) is False
+    record_rejection(profiles, "usb cable", _CAT_COMP, "Computer", _CAT_HOME, "Home Goods")
+    assert is_stale(profiles["categories"][_CAT_COMP]) is True
+
+
+def test_record_rejection_raises_on_non_uuid_category_id():
+    # NO SILENT FALLBACK: a bare category name (Claude's historical bug, or a
+    # stale pre-fix changeset) must not be silently persisted as a category_id.
+    profiles = _empty()
+    with pytest.raises(ValueError, match="is not a UUID"):
+        record_rejection(profiles, "usb cable", "Auto Maintenance", "Auto Maintenance", _CAT_HOME, "Home Goods")
+    assert profiles["categories"] == {}
+
+
+def test_record_rejection_raises_on_non_uuid_id_even_when_name_is_blank():
+    # The bad id can arrive with an EMPTY name field (old changesets stored
+    # original_category_name as "" in some paths) — id==name is not a reliable
+    # signal, so the guard must key off the id's shape alone.
+    profiles = _empty()
+    with pytest.raises(ValueError, match="is not a UUID"):
+        record_rejection(profiles, "usb cable", "Auto Maintenance", "", _CAT_HOME, "Home Goods")
+    assert profiles["categories"] == {}
 
 
 # ---------------------------------------------------------------------------
@@ -244,16 +267,16 @@ def test_rejections_from_applied_records_claude_payee_override():
     non_amazon = [{
         "payee_name": "MicroCenter",
         "tier": "claude",
-        "category_id": "cat-home",
+        "category_id": _CAT_HOME,
         "category_name": "Home Goods",
         "review": {"decision": "recategorize",
-                   "original_category_id": "cat-comp",
+                   "original_category_id": _CAT_COMP,
                    "original_category_name": "Computer"},
     }]
     n = record_rejections_from_applied(profiles, non_amazon, [])
     assert n == 1
-    assert profiles["categories"]["cat-comp"]["dirty"] is True
-    assert profiles["categories"]["cat-home"]["dirty"] is True
+    assert profiles["categories"][_CAT_COMP]["dirty"] is True
+    assert profiles["categories"][_CAT_HOME]["dirty"] is True
 
 
 def test_rejections_from_applied_ignores_non_claude_tier():
@@ -287,20 +310,20 @@ def test_rejections_from_applied_records_amazon_item_override():
         "subtransactions": [
             {
                 "item": {"product_name": "USB-C Cable"},
-                "category_id": "cat-home", "category_name": "Home Goods",
-                "original_category_id": "cat-comp", "original_category_name": "Computer",
+                "category_id": _CAT_HOME, "category_name": "Home Goods",
+                "original_category_id": _CAT_COMP, "original_category_name": "Computer",
             },
             {
                 "item": {"product_name": "GPU"},
-                "category_id": "cat-comp", "category_name": "Computer",
+                "category_id": _CAT_COMP, "category_name": "Computer",
             },
         ]
     }]
     n = record_rejections_from_applied(profiles, [], splits)
     assert n == 1
-    assert profiles["categories"]["cat-comp"]["dirty"] is True
-    assert profiles["categories"]["cat-home"]["dirty"] is True
-    corr = profiles["categories"]["cat-home"]["corrections"][0]
+    assert profiles["categories"][_CAT_COMP]["dirty"] is True
+    assert profiles["categories"][_CAT_HOME]["dirty"] is True
+    corr = profiles["categories"][_CAT_HOME]["corrections"][0]
     assert corr["subject"] == "USB-C Cable"
 
 
@@ -334,24 +357,35 @@ def test_sync_merchants_no_change_leaves_clean():
 def test_build_merchant_map_groups_payees_by_dominant_category():
     payee_cache = {
         "_version": 2,
-        "target": {"total": 5, "categories": {"cat-home": {"name": "Home Goods", "count": 5}}},
-        "best buy": {"total": 3, "categories": {"cat-comp": {"name": "Computer", "count": 3}}},
-        "costco": {"total": 4, "categories": {"cat-home": {"name": "Home Goods", "count": 4}}},
+        "target": {"total": 5, "categories": {_CAT_HOME: {"name": "Home Goods", "count": 5}}},
+        "best buy": {"total": 3, "categories": {_CAT_COMP: {"name": "Computer", "count": 3}}},
+        "costco": {"total": 4, "categories": {_CAT_HOME: {"name": "Home Goods", "count": 4}}},
     }
     mmap = build_merchant_map_from_cache(payee_cache)
-    assert set(mmap["cat-home"]["merchants"]) == {"target", "costco"}
-    assert mmap["cat-comp"]["merchants"] == ["best buy"]
-    assert mmap["cat-home"]["name"] == "Home Goods"
+    assert set(mmap[_CAT_HOME]["merchants"]) == {"target", "costco"}
+    assert mmap[_CAT_COMP]["merchants"] == ["best buy"]
+    assert mmap[_CAT_HOME]["name"] == "Home Goods"
 
 
 def test_build_merchant_map_skips_aliases():
     payee_cache = {
         "_version": 2,
-        "amazon": {"total": 2, "categories": {"cat-shop": {"name": "Shopping", "count": 2}}},
+        "amazon": {"total": 2, "categories": {_CAT_HOME: {"name": "Shopping", "count": 2}}},
         "amzn mktp": {"alias_of": "amazon"},
     }
     mmap = build_merchant_map_from_cache(payee_cache)
-    assert mmap["cat-shop"]["merchants"] == ["amazon"]
+    assert mmap[_CAT_HOME]["merchants"] == ["amazon"]
+
+
+def test_build_merchant_map_raises_on_non_uuid_category_id():
+    # NO SILENT FALLBACK: a bare category name in payee_lookup.json (Claude's
+    # historical bug) must not be silently synced into a bogus profile entry.
+    payee_cache = {
+        "_version": 2,
+        "exxon": {"total": 16, "categories": {"Auto Maintenance": {"name": "Auto Maintenance", "count": 16}}},
+    }
+    with pytest.raises(ValueError, match="is not a UUID|non-UUID"):
+        build_merchant_map_from_cache(payee_cache)
 
 
 # ---------------------------------------------------------------------------
