@@ -118,12 +118,12 @@ Only the `amazon` section is read. Default values apply when absent:
 
 If `config.json` is missing, all three CLIs run with defaults.
 
-## Canonical Entry Point: `enrich.py`
+## Canonical Entry Point: `tag.py`
 
-**For routine use, run `enrich.py`.**
+**For routine use, run `tag.py`.**
 
 ```
-uv run python enrich.py --days 30
+uv run python tag.py --days 30
 ```
 
 This is the unified workflow that handles both Amazon and non-Amazon uncategorized transactions in a single pass:
@@ -157,7 +157,7 @@ A transaction is included if ALL of:
 - `2`: Missing Amazon dump when Amazon txns are present
 
 ### Known Limitations
-- `categorizer.py` when run standalone has a latent bug: it does NOT apply the full writability filter. Use `enrich.py` for correct behavior.
+- `categorizer.py` when run standalone has a latent bug: it does NOT apply the full writability filter. Use `tag.py` for correct behavior.
 - Reconciled/deleted transactions are silently skipped — they should be, but the API doesn't guarantee they won't reappear in a later run. This is a YNAB API contract issue, not a bug in our code.
 
 ## Categorization Strategy (Token Efficient)
@@ -208,7 +208,7 @@ When #55 is implemented, `--confirm` will automate step 1-3 via the YNAB API (PA
 
 ## Diagnostic and Specialized CLIs
 
-These tools remain available for single-purpose workflows or diagnostics, but **are not the recommended entry point** — use `enrich.py` instead.
+These tools remain available for single-purpose workflows or diagnostics, but **are not the recommended entry point** — use `tag.py` instead.
 
 ### Amazon Matcher (Diagnostic)
 ```
@@ -217,7 +217,7 @@ uv run python amazon_matcher.py --days 30
 - Matches Amazon order history to YNAB transactions by date + amount
 - Produces item-level split proposals for matched shipments
 - Writes a separate changeset in `data/cache/amazon-changeset-*.{md,json}`
-- **Limitation:** Does not categorize non-Amazon txns; for a complete workflow, use `enrich.py`
+- **Limitation:** Does not categorize non-Amazon txns; for a complete workflow, use `tag.py`
 
 ### Categorizer (Diagnostic)
 ```
@@ -226,8 +226,8 @@ uv run python categorizer.py --days 30
 - Categorizes uncategorized txns using Claude
 - Produces flat (non-split) category proposals
 - Writes a changeset in `data/cache/categorizer-changeset-*.{md,json}`
-- **Limitation:** Does not handle Amazon item-level enrichment; for full enrichment, use `enrich.py`
-- **Known bug:** Does not apply the full writability filter (use `enrich.py` for correct behavior)
+- **Limitation:** Does not handle Amazon item-level enrichment; for full enrichment, use `tag.py`
+- **Known bug:** Does not apply the full writability filter (use `tag.py` for correct behavior)
 
 ### Spending Insights
 ```

@@ -51,7 +51,7 @@ slash-command wrapper (shown in parentheses) and an underlying CLI you can run d
 ### 1. Enrich & categorize  (`/enrich-run`)
 
 ```bash
-uv run python enrich.py --days 30
+uv run python tag.py --days 30
 ```
 
 Fetches uncategorized YNAB transactions from the last N days, matches Amazon charges
@@ -69,9 +69,9 @@ category. This is what keeps "USB cable" landing in Home Goods rather than Compu
 Descriptions are an explicit, generated asset (one Claude call per category), so
 they are **not** regenerated on every run:
 
-- `uv run python enrich.py --rebuild-profiles` — setup: regenerate **all**
+- `uv run python tag.py --rebuild-profiles` — setup: regenerate **all**
   category descriptions from your current merchants/history.
-- `uv run python enrich.py --refresh-profiles` — regenerate **only** the
+- `uv run python tag.py --refresh-profiles` — regenerate **only** the
   categories flagged stale: new categories, or ones where you overrode Claude's
   guess during review (a rejection teaches the boundary that was mis-drawn).
 
@@ -81,7 +81,7 @@ This **does not write to YNAB**. It produces a reviewable changeset under
 ### 2. Review  (`/confirm-review`)
 
 ```bash
-uv run python review.py data/cache/enrich-changeset-<timestamp>.json
+uv run python decide.py data/cache/enrich-changeset-<timestamp>.json
 ```
 
 Interactive (needs a real terminal): opens an HTML view and walks you through the
@@ -92,8 +92,8 @@ are saved to a `-reviewed.json` sidecar. Quitting mid-walk saves partial progres
 ### 3. Apply  (`/confirm-apply`)
 
 ```bash
-uv run python amazon_confirm.py data/cache/enrich-changeset-<timestamp>-reviewed.json --dry-run --yes
-uv run python amazon_confirm.py data/cache/enrich-changeset-<timestamp>-reviewed.json
+uv run python apply.py data/cache/enrich-changeset-<timestamp>-reviewed.json --dry-run --yes
+uv run python apply.py data/cache/enrich-changeset-<timestamp>-reviewed.json
 ```
 
 Writes the reviewed changeset back to YNAB. Run `--dry-run` first to validate.
@@ -138,9 +138,9 @@ unmatched — that's expected.
 
 ```
 finances-helper/
-├── enrich.py               # Step 1: match + categorize → changeset (no writes)
-├── review.py               # Step 2: interactive human review → -reviewed.json
-├── amazon_confirm.py       # Step 3: apply reviewed changeset to YNAB
+├── tag.py                  # Step 1: match + categorize → changeset (no writes)
+├── decide.py               # Step 2: interactive human review → -reviewed.json
+├── apply.py                # Step 3: apply reviewed changeset to YNAB
 ├── ynab_client.py          # YNAB API wrapper (milliunits, dates, budget resolution)
 ├── amazon_matcher.py       # Match Amazon orders → YNAB transactions
 ├── categorizer.py          # Three-tier transaction categorization

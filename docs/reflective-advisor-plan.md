@@ -82,8 +82,8 @@ writes markdown. Rework the tail into a chat loop:
    write a transcript + the final agreed plan to `data/cache/`.
 
 Notes:
-- Needs a real terminal (like `review.py`). Gate on `sys.stdin.isatty()`.
-- Persist conversation state so a session can resume (mirror review.py's
+- Needs a real terminal (like `decide.py`). Gate on `sys.stdin.isatty()`.
+- Persist conversation state so a session can resume (mirror decide.py's
   sidecar pattern). Optional v1; one-session is fine to start.
 - Model: keep Sonnet (`claude-sonnet-4-6`) for the conversational turns — voice
   quality matters here.
