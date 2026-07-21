@@ -889,6 +889,219 @@ class TestWriteUnifiedChangeset:
         assert unmatched_list[0]["transaction_id"] == "t_unmatched"
         assert unmatched_list[0]["reason"] == "date_out_of_window"
 
+    def test_write_unified_changeset_unmatched_amazon_includes_memo(self, tmp_path):
+        """unmatched_ynab entries carry the txn's memo, including when null."""
+        from tag import write_unified_changeset
+        from datetime import datetime
+
+        out_dir = tmp_path / "changesets"
+        now = datetime(2026, 4, 27, 14, 30, 0)
+
+        unmatched = [
+            (
+                {"id": "t1", "payee_name": "Amazon.com", "date": "2026-03-01", "memo": "gift for mom"},
+                "no matching shipment in dump",
+            ),
+            (
+                {"id": "t2", "payee_name": "Amazon.com", "date": "2026-03-02", "memo": None},
+                "no matching shipment in dump",
+            ),
+        ]
+
+        _, json_path = write_unified_changeset(
+            flat_results=[],
+            skipped=[],
+            unmatched_amazon=unmatched,
+            split_proposals=[],
+            source_txns=[],
+            budget_id="b123",
+            since_date="2026-03-28",
+            days_back=30,
+            K=312,
+            confidence_threshold=0.0096,
+            dump_path=None,
+            out_dir=out_dir,
+            now=now,
+        )
+
+        unmatched_list = json.loads(json_path.read_text())["amazon"]["unmatched_ynab"]
+        by_id = {u["transaction_id"]: u for u in unmatched_list}
+        assert by_id["t1"]["memo"] == "gift for mom"
+        assert by_id["t2"]["memo"] is None
+
+    def test_write_unified_changeset_unmatched_amazon_includes_closest_shipment(self, tmp_path):
+        """unmatched_ynab entries carry the closest unmatched shipment as a near-miss hint."""
+        from tag import write_unified_changeset
+        from amazon_matcher import AmazonShipment, MatchResult
+        from datetime import datetime
+
+        out_dir = tmp_path / "changesets"
+        now = datetime(2026, 4, 27, 14, 30, 0)
+
+        close_shipment = AmazonShipment(
+            order_id="111-CLOSE",
+            ship_date=datetime(2026, 3, 3).date(),
+            payment_method_raw="Visa - XXXX",
+            payment_method_last4="0804",
+            is_split_tender=False,
+            currency="USD",
+            item_subtotal=Decimal("40.00"),
+            tax=Decimal("2.17"),
+            shipping=Decimal("0"),
+            discounts=Decimal("0"),
+            total_amount=Decimal("42.17"),
+            items=[],
+            shipment_status="Shipped",
+        )
+        far_shipment = AmazonShipment(
+            order_id="111-FAR",
+            ship_date=datetime(2026, 1, 3).date(),
+            payment_method_raw="Visa - XXXX",
+            payment_method_last4="0804",
+            is_split_tender=False,
+            currency="USD",
+            item_subtotal=Decimal("9.00"),
+            tax=Decimal("0"),
+            shipping=Decimal("0"),
+            discounts=Decimal("0"),
+            total_amount=Decimal("9.00"),
+            items=[],
+            shipment_status="Shipped",
+        )
+
+        unmatched = [
+            (
+                {"id": "t1", "payee_name": "Amazon.com", "date": "2026-03-01", "amount": -45170, "memo": None},
+                "no matching shipment in dump",
+            ),
+        ]
+        match_result = MatchResult(
+            matched=[],
+            unmatched_ynab=[],
+            unmatched_shipments=[far_shipment, close_shipment],
+            excluded_shipments=[],
+            parse_errors=[],
+        )
+
+        _, json_path = write_unified_changeset(
+            flat_results=[],
+            skipped=[],
+            unmatched_amazon=unmatched,
+            split_proposals=[],
+            source_txns=[],
+            budget_id="b123",
+            since_date="2026-03-28",
+            days_back=30,
+            K=312,
+            confidence_threshold=0.0096,
+            dump_path=None,
+            out_dir=out_dir,
+            match_result=match_result,
+            now=now,
+        )
+
+        unmatched_list = json.loads(json_path.read_text())["amazon"]["unmatched_ynab"]
+        closest = unmatched_list[0]["closest_shipment"]
+        assert closest["order_id"] == "111-CLOSE"
+        assert closest["amount_delta_dollars"] == "3.00"
+        assert closest["date_delta_days"] == 2
+
+    def test_write_unified_changeset_unmatched_amazon_no_closest_shipment_when_none_unmatched(self, tmp_path):
+        """closest_shipment is None when there are no unmatched shipments to compare against."""
+        from tag import write_unified_changeset
+        from amazon_matcher import MatchResult
+        from datetime import datetime
+
+        out_dir = tmp_path / "changesets"
+        now = datetime(2026, 4, 27, 14, 30, 0)
+
+        unmatched = [
+            (
+                {"id": "t1", "payee_name": "Amazon.com", "date": "2026-03-01", "amount": -45170, "memo": None},
+                "no matching shipment in dump",
+            ),
+        ]
+        match_result = MatchResult(
+            matched=[], unmatched_ynab=[], unmatched_shipments=[], excluded_shipments=[], parse_errors=[],
+        )
+
+        _, json_path = write_unified_changeset(
+            flat_results=[],
+            skipped=[],
+            unmatched_amazon=unmatched,
+            split_proposals=[],
+            source_txns=[],
+            budget_id="b123",
+            since_date="2026-03-28",
+            days_back=30,
+            K=312,
+            confidence_threshold=0.0096,
+            dump_path=None,
+            out_dir=out_dir,
+            match_result=match_result,
+            now=now,
+        )
+
+        unmatched_list = json.loads(json_path.read_text())["amazon"]["unmatched_ynab"]
+        assert unmatched_list[0]["closest_shipment"] is None
+
+    def test_write_unified_changeset_markdown_unmatched_shows_memo_and_closest_shipment(self, tmp_path):
+        """Markdown 'Unmatched Amazon txns' section shows memo and near-miss hint per txn."""
+        from tag import write_unified_changeset
+        from amazon_matcher import AmazonShipment, MatchResult
+        from datetime import datetime
+
+        out_dir = tmp_path / "changesets"
+        now = datetime(2026, 4, 27, 14, 30, 0)
+
+        close_shipment = AmazonShipment(
+            order_id="111-CLOSE",
+            ship_date=datetime(2026, 3, 3).date(),
+            payment_method_raw="Visa - XXXX",
+            payment_method_last4="0804",
+            is_split_tender=False,
+            currency="USD",
+            item_subtotal=Decimal("40.00"),
+            tax=Decimal("2.17"),
+            shipping=Decimal("0"),
+            discounts=Decimal("0"),
+            total_amount=Decimal("42.17"),
+            items=[],
+            shipment_status="Shipped",
+        )
+
+        unmatched = [
+            (
+                {"id": "t1", "payee_name": "Amazon.com", "date": "2026-03-01", "amount": -45170, "memo": "office supplies"},
+                "no matching shipment in dump",
+            ),
+        ]
+        match_result = MatchResult(
+            matched=[], unmatched_ynab=[], unmatched_shipments=[close_shipment], excluded_shipments=[], parse_errors=[],
+        )
+
+        md_path, _ = write_unified_changeset(
+            flat_results=[],
+            skipped=[],
+            unmatched_amazon=unmatched,
+            split_proposals=[],
+            source_txns=[],
+            budget_id="b123",
+            since_date="2026-03-28",
+            days_back=30,
+            K=312,
+            confidence_threshold=0.0096,
+            dump_path=None,
+            out_dir=out_dir,
+            match_result=match_result,
+            now=now,
+        )
+
+        text = md_path.read_text()
+        assert "memo: office supplies" in text
+        assert "closest unmatched shipment: order 111-CLOSE" in text
+        assert "$3.00" in text
+
     def test_write_unified_changeset_markdown_per_txn_tables(self, tmp_path):
         """Markdown output includes per-txn tables with payee names and amounts."""
         from tag import write_unified_changeset

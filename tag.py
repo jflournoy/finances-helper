@@ -5,7 +5,7 @@ import json
 import argparse
 import logging
 from pathlib import Path
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 from dotenv import load_dotenv
 import os
 from decimal import Decimal
@@ -54,6 +54,48 @@ def _amount_dollars_str(txn: dict) -> str | None:
         f"got {type(existing).__name__}={existing!r}. Float values cause "
         f"precision drift — fix the producer."
     )
+
+
+def _closest_unmatched_shipment(txn: dict, unmatched_shipments: list) -> dict | None:
+    """Find the unmatched shipment closest to `txn` by amount, tiebreaking on date.
+
+    Used to give the user a near-miss hint for a YNAB txn with no shipment
+    match ("no matching shipment in dump") — e.g. off by a few dollars or a
+    few days outside the match window. Only compares against shipments that
+    themselves went unmatched; a consumed shipment is an exact match to some
+    other txn, not a near-miss for this one.
+
+    Returns None if there are no unmatched shipments or the txn has no date.
+    """
+    if not unmatched_shipments:
+        return None
+
+    txn_date_str = txn.get("date")
+    if not txn_date_str:
+        return None
+    txn_date = date.fromisoformat(txn_date_str)
+
+    milliunits = txn.get("amount")
+    if not (isinstance(milliunits, int) and not isinstance(milliunits, bool)):
+        return None
+    txn_amount = abs(Decimal(milliunits)) / Decimal(1000)
+
+    def _distance(shipment):
+        amount_delta = abs(txn_amount - shipment.total_amount)
+        date_delta = abs((shipment.ship_date - txn_date).days) if shipment.ship_date else 999999
+        return (amount_delta, date_delta)
+
+    closest = min(unmatched_shipments, key=_distance)
+    amount_delta = abs(txn_amount - closest.total_amount)
+    date_delta = (closest.ship_date - txn_date).days if closest.ship_date else None
+
+    return {
+        "order_id": closest.order_id,
+        "ship_date": closest.ship_date.isoformat() if closest.ship_date else None,
+        "amount_dollars": format(closest.total_amount, "f"),
+        "amount_delta_dollars": format(amount_delta, "f"),
+        "date_delta_days": date_delta,
+    }
 
 
 def _summarize_split_items(subs: list) -> str:
@@ -248,6 +290,7 @@ def write_unified_changeset(
 
     # Serialize unmatched Amazon (txn, reason) tuples — sorted by reason then date then id
     # unmatched_amazon is list of (txn: dict, reason: str) tuples, so x[0] is the txn dict
+    unmatched_shipments_for_hints = match_result.unmatched_shipments if match_result else []
     unmatched_ynab = []
     for txn, reason in sorted(unmatched_amazon, key=lambda x: (x[1], x[0].get('date', '9999-12-31'), x[0].get('id', ''))):
         unmatched_ynab.append({
@@ -255,7 +298,9 @@ def write_unified_changeset(
             "payee_name": txn.get("payee_name"),
             "amount_dollars": _amount_dollars_str(txn),
             "date": txn.get("date"),
+            "memo": txn.get("memo"),
             "reason": reason,
+            "closest_shipment": _closest_unmatched_shipment(txn, unmatched_shipments_for_hints),
         })
 
     def _parent_field(parent, field):
@@ -502,8 +547,19 @@ def write_unified_changeset(
             for u in by_reason[reason]:
                 payee = _md_escape(u.get("payee_name", ""))
                 amount = u.get("amount_dollars", "")
-                date = u.get("date", "")
-                markdown_lines.append(f"- {date} {payee} {amount}")
+                txn_date = u.get("date", "")
+                memo = u.get("memo")
+                line = f"- {txn_date} {payee} {amount}"
+                if memo:
+                    line += f" — memo: {_md_escape(memo)}"
+                markdown_lines.append(line)
+                closest = u.get("closest_shipment")
+                if closest:
+                    markdown_lines.append(
+                        f"    closest unmatched shipment: order {closest['order_id']} "
+                        f"${closest['amount_dollars']} shipped {closest['ship_date']} "
+                        f"(Δ${closest['amount_delta_dollars']}, Δ{closest['date_delta_days']}d)"
+                    )
             markdown_lines.append("")
 
     markdown_lines.extend([
