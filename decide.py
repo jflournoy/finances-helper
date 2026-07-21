@@ -2,10 +2,10 @@
 
 Walks the user through risky proposals (Amazon splits, fuzzy/Claude tier
 non-Amazon proposals), bulk-accepts the safe ones (history tier), and writes
-a sidecar `*-reviewed.json` that amazon_confirm.py can operate on.
+a sidecar `*-reviewed.json` that apply.py can operate on.
 
 A skipped proposal is marked by setting `applied_at` to a sentinel string —
-amazon_confirm.py already short-circuits on that field, so no changes to the
+apply.py already short-circuits on that field, so no changes to the
 applier are needed.
 
 A recategorized proposal mutates `category_id` / `category_name` in place and
@@ -14,7 +14,7 @@ records the original under a `review` block on the proposal.
 Resumable: if the sidecar exists, the next run picks up unreviewed items only.
 
 Usage:
-    uv run python review.py [path-to-changeset.json]
+    uv run python decide.py [path-to-changeset.json]
 """
 import argparse
 import json
@@ -500,7 +500,7 @@ def run_review(
         if result == "quit":
             print("\nQuitting mid-review; partial state saved.")
             _save_reviewed(changeset, sidecar_path)
-            print(f"Resume later with: uv run python review.py {changeset_path}")
+            print(f"Resume later with: uv run python decide.py {changeset_path}")
             return 0
 
     print()
@@ -539,7 +539,7 @@ def run_review(
     _print_summary(changeset)
     print()
     print(f"Reviewed changeset written: {sidecar_path}")
-    print(f"Next: /confirm-apply (or `uv run python amazon_confirm.py {sidecar_path} --yes`)")
+    print(f"Next: /confirm-apply (or `uv run python apply.py {sidecar_path} --yes`)")
     return 0
 
 

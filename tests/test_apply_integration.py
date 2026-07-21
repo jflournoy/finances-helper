@@ -1,4 +1,4 @@
-"""Integration tests for amazon_confirm.apply_changeset against a real YNAB Sandbox budget.
+"""Integration tests for apply.apply_changeset against a real YNAB Sandbox budget.
 
 Pattern: seed real txns in Sandbox via sandbox_client.create_transactions, then
 build a synthetic enrich-changeset referencing those txn IDs and apply it via a
@@ -23,7 +23,7 @@ import json
 import pytest
 from pathlib import Path
 
-from amazon_confirm import apply_changeset
+from apply import apply_changeset
 from ynab_client import dollars_to_milliunits
 
 pytestmark = pytest.mark.integration

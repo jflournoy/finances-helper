@@ -571,7 +571,7 @@ def build_profiles(cache, history_txns, anthropic_key, *, regenerate="none"):
 
 
 def main(argv=None):
-    """Main entry point for enrich.py.
+    """Main entry point for tag.py.
 
     Args:
         argv: Optional list of command-line arguments (for testing).
@@ -702,12 +702,12 @@ def main(argv=None):
     if n_dirty:
         print(
             f"Note: {n_dirty} category description(s) are out of date from your "
-            f"prior review corrections. Run `enrich.py --refresh-profiles` to apply them."
+            f"prior review corrections. Run `tag.py --refresh-profiles` to apply them."
         )
     if n_undescribed:
         print(
             f"Note: {n_undescribed} category(ies) have no learned description yet "
-            f"(using bare names). Run `enrich.py --rebuild-profiles` to generate them."
+            f"(using bare names). Run `tag.py --rebuild-profiles` to generate them."
         )
 
     # Amazon dump (conditional on Amazon payees present)

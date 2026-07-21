@@ -135,7 +135,7 @@ def summarize_changeset(changeset: dict) -> ChangesetSummary:
         PLUS non-Amazon proposals with category_id=None
       - applied_previously: proposals with a real `applied_at` timestamp (a prior
         PATCH succeeded). Does NOT include skipped-by-review entries.
-      - skipped_by_review: proposals where review.py set
+      - skipped_by_review: proposals where decide.py set
         applied_at = "skipped-by-review:<reason>". These will still be skipped at
         apply time, but are reported separately so the user can tell intentional
         skips apart from resume state.

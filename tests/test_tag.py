@@ -1,10 +1,10 @@
-"""Tests for enrich.py — unified categorize+enrich workflow."""
+"""Tests for tag.py — unified categorize+enrich workflow."""
 import pytest
 import json
 from pathlib import Path
 from unittest.mock import patch, Mock
 from decimal import Decimal
-from enrich import main
+from tag import main
 from zipfile import ZipFile
 from datetime import datetime, timedelta
 
@@ -69,12 +69,12 @@ class _ITEnrichAnthropicMock:
 @pytest.fixture(autouse=True)
 def patch_load_dotenv():
     """Patch load_dotenv for all tests."""
-    with patch("enrich.load_dotenv"):
+    with patch("tag.load_dotenv"):
         yield
 
 
 class TestEnrichMain:
-    """Test enrich.py main() CLI scaffold."""
+    """Test tag.py main() CLI scaffold."""
 
     def test_missing_ynab_token(self, tmp_path, monkeypatch):
         """Missing YNAB_API_TOKEN exits 1 with clear message."""
@@ -130,8 +130,8 @@ class TestEnrichMain:
         mock_client.get_accounts.return_value = []
         mock_client.resolve_budget_id.return_value = "b123"
 
-        with patch("enrich.YNABClient", return_value=mock_client):
-            with patch("enrich.load_payee_cache", return_value={}):
+        with patch("tag.YNABClient", return_value=mock_client):
+            with patch("tag.load_payee_cache", return_value={}):
                 result = main(["--days", "30"])
 
         assert result == 0
@@ -151,10 +151,10 @@ class TestEnrichMain:
         mock_client.get_accounts.return_value = []
         mock_client.resolve_budget_id.return_value = "b123"
 
-        with patch("enrich.YNABClient", return_value=mock_client):
-            with patch("enrich.load_payee_cache", return_value=None):
-                with patch("enrich.build_cache_from_transactions", return_value={}):
-                    with patch("enrich.save_payee_cache"):
+        with patch("tag.YNABClient", return_value=mock_client):
+            with patch("tag.load_payee_cache", return_value=None):
+                with patch("tag.build_cache_from_transactions", return_value={}):
+                    with patch("tag.save_payee_cache"):
                         result = main(["--days", "30"])
 
         assert result == 0
@@ -174,9 +174,9 @@ class TestEnrichMain:
         mock_client.get_accounts.return_value = []
         mock_client.resolve_budget_id.return_value = "b123"
 
-        with patch("enrich.YNABClient", return_value=mock_client):
-            with patch("enrich.load_payee_cache", return_value={"_version": 2}):
-                with patch("enrich.categorize_transactions", return_value=([], [], [], [])):
+        with patch("tag.YNABClient", return_value=mock_client):
+            with patch("tag.load_payee_cache", return_value={"_version": 2}):
+                with patch("tag.categorize_transactions", return_value=([], [], [], [])):
                     result = main(["--days", "30"])
 
         assert result == 0
@@ -199,10 +199,10 @@ class TestEnrichMain:
         mock_client.get_accounts.return_value = []
         mock_client.resolve_budget_id.return_value = "b123"
 
-        with patch("enrich.YNABClient", return_value=mock_client):
-            with patch("enrich.load_payee_cache", return_value=None):
-                with patch("enrich.build_cache_from_transactions", return_value={}):
-                    with patch("enrich.categorize_transactions", return_value=([], [], [], [])):
+        with patch("tag.YNABClient", return_value=mock_client):
+            with patch("tag.load_payee_cache", return_value=None):
+                with patch("tag.build_cache_from_transactions", return_value={}):
+                    with patch("tag.categorize_transactions", return_value=([], [], [], [])):
                         result = main(["--days", "30"])
 
         assert result == 0
@@ -228,8 +228,8 @@ class TestEnrichMain:
         mock_client.get_accounts.return_value = []
         mock_client.resolve_budget_id.return_value = "b123"
 
-        with patch("enrich.YNABClient", return_value=mock_client):
-            with patch("enrich.load_payee_cache", return_value={}):
+        with patch("tag.YNABClient", return_value=mock_client):
+            with patch("tag.load_payee_cache", return_value={}):
                 result = main(["--days", "30"])
 
         assert result == 0
@@ -247,10 +247,10 @@ class TestEnrichMain:
         mock_client.get_accounts.return_value = []
         mock_client.resolve_budget_id.return_value = "b123"
 
-        with patch("enrich.YNABClient", return_value=mock_client):
-            with patch("enrich.load_payee_cache", return_value={"_version": 2}):
-                with patch("enrich.build_profiles") as mock_build:
-                    with patch("enrich.categorize_transactions") as mock_cat:
+        with patch("tag.YNABClient", return_value=mock_client):
+            with patch("tag.load_payee_cache", return_value={"_version": 2}):
+                with patch("tag.build_profiles") as mock_build:
+                    with patch("tag.categorize_transactions") as mock_cat:
                         result = main(["--rebuild-profiles"])
 
         assert result == 0
@@ -271,10 +271,10 @@ class TestEnrichMain:
         mock_client.get_accounts.return_value = []
         mock_client.resolve_budget_id.return_value = "b123"
 
-        with patch("enrich.YNABClient", return_value=mock_client):
-            with patch("enrich.load_payee_cache", return_value={"_version": 2}):
-                with patch("enrich.build_profiles") as mock_build:
-                    with patch("enrich.categorize_transactions") as mock_cat:
+        with patch("tag.YNABClient", return_value=mock_client):
+            with patch("tag.load_payee_cache", return_value={"_version": 2}):
+                with patch("tag.build_profiles") as mock_build:
+                    with patch("tag.categorize_transactions") as mock_cat:
                         result = main(["--refresh-profiles"])
 
         assert result == 0
@@ -311,10 +311,10 @@ class TestEnrichMain:
 
         sentinel_profiles = {"_version": 1, "categories": {}}
 
-        with patch("enrich.YNABClient", return_value=mock_client):
-            with patch("enrich.load_payee_cache", return_value={"_version": 2}):
-                with patch("enrich.build_profiles", return_value=sentinel_profiles) as mock_build:
-                    with patch("enrich.categorize_transactions", return_value=([], [], [], [])) as mock_cat:
+        with patch("tag.YNABClient", return_value=mock_client):
+            with patch("tag.load_payee_cache", return_value={"_version": 2}):
+                with patch("tag.build_profiles", return_value=sentinel_profiles) as mock_build:
+                    with patch("tag.categorize_transactions", return_value=([], [], [], [])) as mock_cat:
                         result = main(["--days", "30"])
 
         assert result == 0
@@ -348,10 +348,10 @@ class TestEnrichMain:
             },
         }
 
-        with patch("enrich.YNABClient", return_value=mock_client):
-            with patch("enrich.load_payee_cache", return_value={"_version": 2}):
-                with patch("enrich.build_profiles", return_value=stale_profiles):
-                    with patch("enrich.categorize_transactions", return_value=([], [], [], [])):
+        with patch("tag.YNABClient", return_value=mock_client):
+            with patch("tag.load_payee_cache", return_value={"_version": 2}):
+                with patch("tag.build_profiles", return_value=stale_profiles):
+                    with patch("tag.categorize_transactions", return_value=([], [], [], [])):
                         result = main(["--days", "30"])
 
         assert result == 0
@@ -380,10 +380,10 @@ class TestEnrichMain:
             "categories": {"a": {"name": "A", "description": "good", "dirty": False}},
         }
 
-        with patch("enrich.YNABClient", return_value=mock_client):
-            with patch("enrich.load_payee_cache", return_value={"_version": 2}):
-                with patch("enrich.build_profiles", return_value=fresh_profiles):
-                    with patch("enrich.categorize_transactions", return_value=([], [], [], [])):
+        with patch("tag.YNABClient", return_value=mock_client):
+            with patch("tag.load_payee_cache", return_value={"_version": 2}):
+                with patch("tag.build_profiles", return_value=fresh_profiles):
+                    with patch("tag.categorize_transactions", return_value=([], [], [], [])):
                         result = main(["--days", "30"])
 
         assert result == 0
@@ -396,7 +396,7 @@ class TestWriteUnifiedChangeset:
 
     def test_minimal_json_structure(self, tmp_path):
         """Minimal valid changeset has version, kind, and metadata."""
-        from enrich import write_unified_changeset
+        from tag import write_unified_changeset
         from datetime import datetime
 
         out_dir = tmp_path / "changesets"
@@ -432,7 +432,7 @@ class TestWriteUnifiedChangeset:
 
     def test_file_naming_with_timestamp(self, tmp_path):
         """File naming uses YYYYMMDD-HHMMSS format."""
-        from enrich import write_unified_changeset
+        from tag import write_unified_changeset
         from datetime import datetime
 
         out_dir = tmp_path / "changesets"
@@ -459,7 +459,7 @@ class TestWriteUnifiedChangeset:
 
     def test_summary_labels_present(self, tmp_path):
         """Markdown output contains all required summary labels when there's content."""
-        from enrich import write_unified_changeset
+        from tag import write_unified_changeset
         from datetime import datetime
         from categorizer import CategoryResult
 
@@ -533,7 +533,7 @@ class TestWriteUnifiedChangeset:
         emit exactly '0.30' (or equivalent exact decimal) when derived from
         milliunits.
         """
-        from enrich import _amount_dollars_str
+        from tag import _amount_dollars_str
         from decimal import Decimal
         assert Decimal(_amount_dollars_str({"amount": 300})) == Decimal("0.3")
         assert Decimal(_amount_dollars_str({"amount": -50000})) == Decimal("-50")
@@ -556,7 +556,7 @@ class TestWriteUnifiedChangeset:
         Specifically: a txn with amount=-300 milliunits emits '-0.300', not
         '-0.30000000000000004'. This catches float-to-decimal drift.
         """
-        from enrich import write_unified_changeset
+        from tag import write_unified_changeset
         from datetime import datetime
         from categorizer import CategoryResult
 
@@ -585,7 +585,7 @@ class TestWriteUnifiedChangeset:
 
     def test_write_unified_changeset_serializes_flat_results(self, tmp_path):
         """flat_results CategoryResult objects are serialized into non_amazon.proposals."""
-        from enrich import write_unified_changeset
+        from tag import write_unified_changeset
         from datetime import datetime
         from categorizer import CategoryResult
 
@@ -651,7 +651,7 @@ class TestWriteUnifiedChangeset:
 
     def test_write_unified_changeset_raises_on_missing_txn(self, tmp_path):
         """Missing source txn for a proposal raises loudly."""
-        from enrich import write_unified_changeset
+        from tag import write_unified_changeset
         from datetime import datetime
         from categorizer import CategoryResult
 
@@ -691,7 +691,7 @@ class TestWriteUnifiedChangeset:
 
     def test_write_unified_changeset_serializes_skipped(self, tmp_path):
         """skipped transactions are serialized into non_amazon.skipped_transfers."""
-        from enrich import write_unified_changeset
+        from tag import write_unified_changeset
         from datetime import datetime
 
         out_dir = tmp_path / "changesets"
@@ -728,7 +728,7 @@ class TestWriteUnifiedChangeset:
 
     def test_write_unified_changeset_sort_by_date(self, tmp_path):
         """Proposals are sorted by date then transaction_id."""
-        from enrich import write_unified_changeset
+        from tag import write_unified_changeset
         from datetime import datetime
         from categorizer import CategoryResult
 
@@ -798,7 +798,7 @@ class TestWriteUnifiedChangeset:
 
     def test_write_unified_changeset_serializes_match_result(self, tmp_path):
         """match_result shipments and parse_errors are serialized into amazon sections."""
-        from enrich import write_unified_changeset
+        from tag import write_unified_changeset
         from datetime import datetime
         from amazon_matcher import AmazonShipment, MatchResult
 
@@ -854,7 +854,7 @@ class TestWriteUnifiedChangeset:
 
     def test_write_unified_changeset_serializes_unmatched_amazon(self, tmp_path):
         """unmatched_amazon tuples are serialized into amazon.unmatched_ynab."""
-        from enrich import write_unified_changeset
+        from tag import write_unified_changeset
         from datetime import datetime
 
         out_dir = tmp_path / "changesets"
@@ -891,7 +891,7 @@ class TestWriteUnifiedChangeset:
 
     def test_write_unified_changeset_markdown_per_txn_tables(self, tmp_path):
         """Markdown output includes per-txn tables with payee names and amounts."""
-        from enrich import write_unified_changeset
+        from tag import write_unified_changeset
         from datetime import datetime
         from categorizer import CategoryResult
 
@@ -935,7 +935,7 @@ class TestWriteUnifiedChangeset:
 
     def test_write_unified_changeset_markdown_amazon_splits_table(self, tmp_path):
         """Markdown output includes per-shipment Amazon splits table."""
-        from enrich import write_unified_changeset
+        from tag import write_unified_changeset
         from datetime import datetime
         from categorizer import AmazonSplitProposal
 
@@ -988,7 +988,7 @@ class TestWriteUnifiedChangeset:
 
     def test_write_unified_changeset_markdown_uncategorized_amazon_item(self, tmp_path):
         """Amazon split items with no category render as [UNCATEGORIZED] in the markdown table."""
-        from enrich import write_unified_changeset
+        from tag import write_unified_changeset
         from datetime import datetime
         from decimal import Decimal
         from categorizer import AmazonSplitProposal, ItemCategoryResult
@@ -1080,7 +1080,7 @@ class TestWriteUnifiedChangeset:
 
     def test_write_unified_changeset_markdown_no_amazon_splits(self, tmp_path):
         """Markdown output omits Amazon section when no splits."""
-        from enrich import write_unified_changeset
+        from tag import write_unified_changeset
         from datetime import datetime
 
         out_dir = tmp_path / "changesets"
@@ -1107,7 +1107,7 @@ class TestWriteUnifiedChangeset:
 
     def test_write_unified_changeset_deterministic(self, tmp_path):
         """Same inputs produce byte-for-byte identical JSON output."""
-        from enrich import write_unified_changeset
+        from tag import write_unified_changeset
         from datetime import datetime
         from categorizer import CategoryResult
 
@@ -1171,7 +1171,7 @@ class TestWriteUnifiedChangeset:
 
     def test_write_unified_changeset_parse_errors_deterministic(self, tmp_path):
         """parse_errors are sorted deterministically."""
-        from enrich import write_unified_changeset
+        from tag import write_unified_changeset
         from datetime import datetime
         from amazon_matcher import MatchResult, ParseError
         import json
@@ -1238,7 +1238,7 @@ class TestWriteUnifiedChangeset:
 
     def test_excluded_shipments_unpacks_tuple_with_reason(self, tmp_path):
         """Issue #142: excluded_shipments is list[tuple[shipment, reason]] — must unpack."""
-        from enrich import write_unified_changeset
+        from tag import write_unified_changeset
         from amazon_matcher import AmazonShipment, MatchResult
         from datetime import datetime
 
@@ -1297,7 +1297,7 @@ class TestWriteUnifiedChangeset:
 
     def test_unmatched_shipments_mixed_none_dates_sorts(self, tmp_path):
         """Issue #143: ship_date None alongside real dates must sort without TypeError."""
-        from enrich import write_unified_changeset
+        from tag import write_unified_changeset
         from amazon_matcher import AmazonShipment, MatchResult
         from datetime import datetime
 
@@ -1377,7 +1377,7 @@ class TestWriteUnifiedChangeset:
 
     def test_proposed_splits_schema_and_account_name(self, tmp_path):
         """Issue #145 + #144: amazon split schema fields + account_name_lookup resolution."""
-        from enrich import write_unified_changeset
+        from tag import write_unified_changeset
         from datetime import datetime
         from categorizer import AmazonSplitProposal, ItemCategoryResult
         from amazon_matcher import AmazonShipment, AmazonItem
@@ -1506,13 +1506,13 @@ class TestSummarizeSplitItems:
         )
 
     def test_single_sub_shows_category_and_first_item(self):
-        from enrich import _summarize_split_items
+        from tag import _summarize_split_items
 
         out = _summarize_split_items([self._sub("Computer", "Logitech MX Mouse")])
         assert out == "Computer (Logitech MX Mouse)"
 
     def test_groups_by_category_with_count_and_first_item(self):
-        from enrich import _summarize_split_items
+        from tag import _summarize_split_items
 
         subs = [
             self._sub("Groceries", "Organic Spinach"),
@@ -1525,7 +1525,7 @@ class TestSummarizeSplitItems:
         assert out == "Groceries ×3 (Organic Spinach), Household supplies ×2 (Paper Towels)"
 
     def test_long_product_name_is_truncated(self):
-        from enrich import _summarize_split_items
+        from tag import _summarize_split_items
 
         long_name = "X" * 100
         out = _summarize_split_items([self._sub("Groceries", long_name)])
@@ -1533,7 +1533,7 @@ class TestSummarizeSplitItems:
         assert "..." in out
 
     def test_empty_subs_returns_empty_string(self):
-        from enrich import _summarize_split_items
+        from tag import _summarize_split_items
 
         assert _summarize_split_items([]) == ""
 
@@ -1543,7 +1543,7 @@ class TestDumpFreshnessWarning:
 
     def test_empty_shipments_returns_warning(self):
         """Empty shipments list returns 0-shipments message."""
-        from enrich import _dump_freshness_warning
+        from tag import _dump_freshness_warning
 
         result = _dump_freshness_warning([], "2026-03-28", 30)
         assert result is not None
@@ -1551,7 +1551,7 @@ class TestDumpFreshnessWarning:
 
     def test_no_ship_dates_returns_warning(self):
         """All shipments with None ship_date returns unparseable message."""
-        from enrich import _dump_freshness_warning
+        from tag import _dump_freshness_warning
         from amazon_matcher import AmazonShipment
 
         shipments = [
@@ -1578,7 +1578,7 @@ class TestDumpFreshnessWarning:
 
     def test_stale_dump_returns_warning(self):
         """Ship date before window start returns stale dump warning."""
-        from enrich import _dump_freshness_warning
+        from tag import _dump_freshness_warning
         from amazon_matcher import AmazonShipment
         from datetime import date
 
@@ -1607,7 +1607,7 @@ class TestDumpFreshnessWarning:
 
     def test_fresh_dump_returns_none(self):
         """Ship date on/after window start returns None."""
-        from enrich import _dump_freshness_warning
+        from tag import _dump_freshness_warning
         from amazon_matcher import AmazonShipment
         from datetime import date
 
@@ -1634,7 +1634,7 @@ class TestDumpFreshnessWarning:
 
     def test_fresh_dump_after_returns_none(self):
         """Ship date after window start returns None."""
-        from enrich import _dump_freshness_warning
+        from tag import _dump_freshness_warning
         from amazon_matcher import AmazonShipment
         from datetime import date
 
@@ -1665,7 +1665,7 @@ class TestPrintUnifiedSummary:
 
     def test_print_unified_summary_labels(self, capsys):
         """Summary output contains all required labels with exact format."""
-        from enrich import _print_unified_summary
+        from tag import _print_unified_summary
         import re
 
         _print_unified_summary(
@@ -1704,7 +1704,7 @@ class TestPrintUnifiedSummary:
 
     def test_print_unified_summary_counts(self, capsys):
         """Summary output includes correct counts."""
-        from enrich import _print_unified_summary
+        from tag import _print_unified_summary
 
         _print_unified_summary(
             dump_path=Path("data/imports/amazon-order-history.zip"),
@@ -1728,7 +1728,7 @@ class TestPrintUnifiedSummary:
 
     def test_print_unified_summary_no_emojis(self, capsys):
         """Summary output contains no emoji characters."""
-        from enrich import _print_unified_summary
+        from tag import _print_unified_summary
 
         _print_unified_summary(
             dump_path=Path("data/imports/amazon-order-history.zip"),
@@ -1753,7 +1753,7 @@ class TestPrintUnifiedSummary:
 
 
 class TestITEnrich:
-    """Integration tests for enrich.py — exercises real categorize_transactions engine.
+    """Integration tests for tag.py — exercises real categorize_transactions engine.
 
     The comprehensive test (test_it_enrich_full_fixture) validates all 17 assertions
     from the refined plan and exercises the full wiring end-to-end.
@@ -1837,7 +1837,7 @@ class TestITEnrich:
         mock_match_result.excluded_shipments = []
         mock_match_result.parse_errors = []
 
-        from enrich import main
+        from tag import main
 
         from categorizer import CategoryResult
         mock_category_results = [
@@ -1858,13 +1858,13 @@ class TestITEnrich:
             ),
         ]
 
-        with patch("enrich.datetime") as mock_datetime:
+        with patch("tag.datetime") as mock_datetime:
             mock_datetime.now.return_value = today
             mock_datetime.side_effect = lambda *args, **kw: datetime(*args, **kw)
-            with patch("enrich.match_shipments_to_transactions", return_value=mock_match_result):
-                with patch("enrich.categorize_transactions", return_value=(mock_category_results, [], [], [])):
-                    with patch("enrich.load_payee_cache", return_value=payee_cache):
-                        with patch("enrich.save_payee_cache"):
+            with patch("tag.match_shipments_to_transactions", return_value=mock_match_result):
+                with patch("tag.categorize_transactions", return_value=(mock_category_results, [], [], [])):
+                    with patch("tag.load_payee_cache", return_value=payee_cache):
+                        with patch("tag.save_payee_cache"):
                             result = main(["--days", "30", "--out-dir", str(out_dir)])
 
         assert result == 0, "Assertion #1: result == 0"
@@ -1964,7 +1964,7 @@ class TestITEnrich:
         monkeypatch.setattr(_ynab_mod.YNABClient, "resolve_budget_id", lambda self, name: "budget-uuid-test")
         monkeypatch.setattr(_categorizer_mod.anthropic, "Anthropic", _ITEnrichAnthropicMock)
 
-        from enrich import main
+        from tag import main
         from categorizer import CategoryResult
 
         mock_match_result = Mock()
@@ -1987,14 +1987,14 @@ class TestITEnrich:
             ),
         ]
 
-        with patch("enrich.datetime") as mock_datetime:
+        with patch("tag.datetime") as mock_datetime:
             mock_datetime.now.return_value = today
             mock_datetime.side_effect = lambda *args, **kw: datetime(*args, **kw)
-            with patch("enrich.match_shipments_to_transactions", return_value=mock_match_result):
-                with patch("enrich.categorize_transactions", return_value=(mock_category_results, [], [], [])):
-                    with patch("enrich.load_payee_cache", return_value=None):
-                        with patch("enrich.build_cache_from_transactions", return_value={"_version": 2}):
-                            with patch("enrich.save_payee_cache"):
+            with patch("tag.match_shipments_to_transactions", return_value=mock_match_result):
+                with patch("tag.categorize_transactions", return_value=(mock_category_results, [], [], [])):
+                    with patch("tag.load_payee_cache", return_value=None):
+                        with patch("tag.build_cache_from_transactions", return_value={"_version": 2}):
+                            with patch("tag.save_payee_cache"):
                                 result = main(["--days", "30", "--out-dir", str(out_dir)])
 
         assert result == 0
@@ -2094,11 +2094,11 @@ class TestITEnrich:
         mock_match_result.excluded_shipments = []
         mock_match_result.parse_errors = []
 
-        with patch("enrich.datetime") as mock_datetime:
+        with patch("tag.datetime") as mock_datetime:
             mock_datetime.now.return_value = today
             mock_datetime.side_effect = lambda *args, **kw: datetime(*args, **kw)
-            with patch("enrich.match_shipments_to_transactions", return_value=mock_match_result):
-                with patch("enrich.load_payee_cache", return_value=payee_cache):
+            with patch("tag.match_shipments_to_transactions", return_value=mock_match_result):
+                with patch("tag.load_payee_cache", return_value=payee_cache):
                     # Do NOT mock save_payee_cache so cache is actually saved to disk
                     result = main(["--days", "30", "--out-dir", str(out_dir)])
 

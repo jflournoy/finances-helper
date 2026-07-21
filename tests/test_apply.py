@@ -1,4 +1,4 @@
-"""Tests for amazon_confirm.py — changeset loading and summarization."""
+"""Tests for apply.py — changeset loading and summarization."""
 import io
 import json
 import os
@@ -8,7 +8,7 @@ import tempfile
 from pathlib import Path
 from decimal import Decimal
 from unittest.mock import patch, MagicMock
-from amazon_confirm import load_changeset, summarize_changeset, ChangesetSummary, ApplyReport, apply_changeset
+from apply import load_changeset, summarize_changeset, ChangesetSummary, ApplyReport, apply_changeset
 
 FIXTURES = Path("data/fixtures")
 
@@ -228,7 +228,7 @@ def test_load_and_summarize_real_fixture():
 
 
 def test_single_subtxn_returns_flat_patch():
-    from amazon_confirm import proposal_to_patch_body
+    from apply import proposal_to_patch_body
     changeset = load_changeset(Path("data/fixtures/enrich_changeset_sample.json"))
     flat_proposal = next((p for p in changeset["amazon"]["proposed_splits"] if len(p["subtransactions"]) == 1), None)
     if flat_proposal:
@@ -239,7 +239,7 @@ def test_single_subtxn_returns_flat_patch():
 
 
 def test_multi_subtxn_returns_split_patch():
-    from amazon_confirm import proposal_to_patch_body
+    from apply import proposal_to_patch_body
     changeset = load_changeset(Path("data/fixtures/enrich_changeset_sample.json"))
     split_proposal = next((p for p in changeset["amazon"]["proposed_splits"] if len(p["subtransactions"]) >= 2), None)
     if split_proposal:
@@ -250,7 +250,7 @@ def test_multi_subtxn_returns_split_patch():
 
 
 def test_subtxn_amounts_are_negative_milliunits():
-    from amazon_confirm import proposal_to_patch_body
+    from apply import proposal_to_patch_body
     changeset = load_changeset(Path("data/fixtures/enrich_changeset_sample.json"))
     proposal = changeset["amazon"]["proposed_splits"][0]
     result = proposal_to_patch_body(proposal)
@@ -261,7 +261,7 @@ def test_subtxn_amounts_are_negative_milliunits():
 
 
 def test_subtxn_amounts_are_integers_not_floats():
-    from amazon_confirm import proposal_to_patch_body
+    from apply import proposal_to_patch_body
     changeset = load_changeset(Path("data/fixtures/enrich_changeset_sample.json"))
     proposal = changeset["amazon"]["proposed_splits"][0]
     result = proposal_to_patch_body(proposal)
@@ -272,7 +272,7 @@ def test_subtxn_amounts_are_integers_not_floats():
 
 
 def test_split_amounts_sum_to_parent():
-    from amazon_confirm import proposal_to_patch_body
+    from apply import proposal_to_patch_body
     changeset = load_changeset(Path("data/fixtures/enrich_changeset_sample.json"))
     split_proposal = next((p for p in changeset["amazon"]["proposed_splits"] if len(p["subtransactions"]) >= 2), None)
     if split_proposal:
@@ -284,7 +284,7 @@ def test_split_amounts_sum_to_parent():
 
 
 def test_null_category_id_any_subtxn_returns_none():
-    from amazon_confirm import proposal_to_patch_body
+    from apply import proposal_to_patch_body
     changeset = load_changeset(Path("data/fixtures/enrich_changeset_sample.json"))
     proposal = changeset["amazon"]["proposed_splits"][0]
     proposal["subtransactions"][0]["category_id"] = None
@@ -293,7 +293,7 @@ def test_null_category_id_any_subtxn_returns_none():
 
 
 def test_memo_truncated_to_200_chars():
-    from amazon_confirm import proposal_to_patch_body
+    from apply import proposal_to_patch_body
     changeset = load_changeset(Path("data/fixtures/enrich_changeset_sample.json"))
     split_proposal = next(
         (p for p in changeset["amazon"]["proposed_splits"] if len(p["subtransactions"]) >= 2),
@@ -309,7 +309,7 @@ def test_memo_truncated_to_200_chars():
 
 
 def test_split_subtxn_memo_contains_real_product_name():
-    from amazon_confirm import proposal_to_patch_body
+    from apply import proposal_to_patch_body
     changeset = load_changeset(Path("data/fixtures/enrich_changeset_sample.json"))
     split_proposal = next(
         (p for p in changeset["amazon"]["proposed_splits"] if len(p["subtransactions"]) >= 2),
@@ -323,7 +323,7 @@ def test_split_subtxn_memo_contains_real_product_name():
 
 
 def test_split_subtxn_memo_contains_real_asin():
-    from amazon_confirm import proposal_to_patch_body
+    from apply import proposal_to_patch_body
     changeset = load_changeset(Path("data/fixtures/enrich_changeset_sample.json"))
     split_proposal = next(
         (p for p in changeset["amazon"]["proposed_splits"] if len(p["subtransactions"]) >= 2),
@@ -337,7 +337,7 @@ def test_split_subtxn_memo_contains_real_asin():
 
 
 def test_proposal_to_patch_body_raises_when_item_missing():
-    from amazon_confirm import proposal_to_patch_body
+    from apply import proposal_to_patch_body
     changeset = load_changeset(Path("data/fixtures/enrich_changeset_sample.json"))
     split_proposal = next(
         (p for p in changeset["amazon"]["proposed_splits"] if len(p["subtransactions"]) >= 2),
@@ -350,7 +350,7 @@ def test_proposal_to_patch_body_raises_when_item_missing():
 
 
 def test_flat_patch_preserves_parent_memo():
-    from amazon_confirm import proposal_to_patch_body
+    from apply import proposal_to_patch_body
     changeset = load_changeset(Path("data/fixtures/enrich_changeset_sample.json"))
     flat_proposal = next((p for p in changeset["amazon"]["proposed_splits"] if len(p["subtransactions"]) == 1), None)
     if flat_proposal:
@@ -363,7 +363,7 @@ def test_flat_patch_preserves_parent_memo():
 
 def test_proposal_to_patch_body_with_all_fixture_proposals():
     """Exercise full call chain: load_changeset → each proposal through proposal_to_patch_body."""
-    from amazon_confirm import proposal_to_patch_body
+    from apply import proposal_to_patch_body
     changeset = load_changeset(Path("data/fixtures/enrich_changeset_sample.json"))
     for proposal in changeset["amazon"]["proposed_splits"]:
         result = proposal_to_patch_body(proposal)
@@ -385,7 +385,7 @@ def cli_changeset_path(tmp_path):
 
 @pytest.fixture
 def fake_client_factory(monkeypatch):
-    """Patch amazon_confirm.YNABClient to return a configurable MagicMock."""
+    """Patch apply.YNABClient to return a configurable MagicMock."""
     instances = []
 
     def _make(**overrides):
@@ -411,22 +411,22 @@ def fake_client_factory(monkeypatch):
         constructed.append(client)
         return client
 
-    import amazon_confirm
-    monkeypatch.setattr(amazon_confirm, "YNABClient", fake_ctor)
-    monkeypatch.setattr(amazon_confirm.time, "sleep", lambda *_: None)
+    import apply
+    monkeypatch.setattr(apply, "YNABClient", fake_ctor)
+    monkeypatch.setattr(apply.time, "sleep", lambda *_: None)
 
     return {"make": _make, "constructed": constructed}
 
 
 def _run_main(argv, monkeypatch, tmp_path, stdin_text="", env=None):
-    """Invoke amazon_confirm.main() with isolated stdin/argv/cwd.
+    """Invoke apply.main() with isolated stdin/argv/cwd.
 
     chdir(tmp_path) so the default report_dir (Path("data/cache")) lands in
     the test's tmp directory rather than polluting the real repo cache.
     """
-    import amazon_confirm
+    import apply
     monkeypatch.chdir(tmp_path)
-    monkeypatch.setattr("sys.argv", ["amazon_confirm.py"] + argv)
+    monkeypatch.setattr("sys.argv", ["apply.py"] + argv)
     monkeypatch.setattr("sys.stdin", io.StringIO(stdin_text))
     if env is not None:
         for k, v in env.items():
@@ -434,7 +434,7 @@ def _run_main(argv, monkeypatch, tmp_path, stdin_text="", env=None):
                 monkeypatch.delenv(k, raising=False)
             else:
                 monkeypatch.setenv(k, v)
-    return amazon_confirm.main()
+    return apply.main()
 
 
 def test_cli_dry_run_makes_no_writes(cli_changeset_path, fake_client_factory, monkeypatch, tmp_path):
@@ -501,7 +501,7 @@ def test_cli_exit_code_reflects_failures(cli_changeset_path, monkeypatch, tmp_pa
     monkeypatch.setenv("YNAB_DEFAULT_BUDGET", "My Budget")
     monkeypatch.delenv("YNAB_SANDBOX_MODE", raising=False)
 
-    import amazon_confirm
+    import apply
 
     def fake_apply(*args, **kwargs):
         return ApplyReport(
@@ -519,8 +519,8 @@ def test_cli_exit_code_reflects_failures(cli_changeset_path, monkeypatch, tmp_pa
     fake_client.sandbox_mode = False
     fake_client.resolve_budget_id.return_value = "budget-uuid-123"
     fake_client.get_budget.return_value = {"id": "budget-uuid-123", "name": "My Budget"}
-    monkeypatch.setattr(amazon_confirm, "YNABClient", lambda *a, **kw: fake_client)
-    monkeypatch.setattr(amazon_confirm, "apply_changeset", fake_apply)
+    monkeypatch.setattr(apply, "YNABClient", lambda *a, **kw: fake_client)
+    monkeypatch.setattr(apply, "apply_changeset", fake_apply)
     code = _run_main([str(cli_changeset_path), "--yes"], monkeypatch, tmp_path)
     assert code == 1
 
@@ -530,7 +530,7 @@ def test_cli_exit_code_reflects_aborted(cli_changeset_path, monkeypatch, tmp_pat
     monkeypatch.setenv("YNAB_DEFAULT_BUDGET", "My Budget")
     monkeypatch.delenv("YNAB_SANDBOX_MODE", raising=False)
 
-    import amazon_confirm
+    import apply
 
     def fake_apply(*args, **kwargs):
         return ApplyReport(
@@ -548,15 +548,15 @@ def test_cli_exit_code_reflects_aborted(cli_changeset_path, monkeypatch, tmp_pat
     fake_client.sandbox_mode = False
     fake_client.resolve_budget_id.return_value = "budget-uuid-123"
     fake_client.get_budget.return_value = {"id": "budget-uuid-123", "name": "My Budget"}
-    monkeypatch.setattr(amazon_confirm, "YNABClient", lambda *a, **kw: fake_client)
-    monkeypatch.setattr(amazon_confirm, "apply_changeset", fake_apply)
+    monkeypatch.setattr(apply, "YNABClient", lambda *a, **kw: fake_client)
+    monkeypatch.setattr(apply, "apply_changeset", fake_apply)
     code = _run_main([str(cli_changeset_path), "--yes"], monkeypatch, tmp_path)
     assert code == 2
 
 
 def test_cli_401_token_clear_message(cli_changeset_path, monkeypatch, tmp_path, capsys):
     from ynab_client import YNABAPIError
-    import amazon_confirm
+    import apply
 
     monkeypatch.setenv("YNAB_API_TOKEN", "tok")
     monkeypatch.setenv("YNAB_DEFAULT_BUDGET", "My Budget")
@@ -565,7 +565,7 @@ def test_cli_401_token_clear_message(cli_changeset_path, monkeypatch, tmp_path, 
     fake_client = MagicMock()
     fake_client.sandbox_mode = False
     fake_client.resolve_budget_id.side_effect = YNABAPIError(401, name="unauthorized", detail="Unauthorized")
-    monkeypatch.setattr(amazon_confirm, "YNABClient", lambda *a, **kw: fake_client)
+    monkeypatch.setattr(apply, "YNABClient", lambda *a, **kw: fake_client)
 
     code = _run_main([str(cli_changeset_path), "--yes"], monkeypatch, tmp_path)
     err = capsys.readouterr().err.lower()
@@ -575,7 +575,7 @@ def test_cli_401_token_clear_message(cli_changeset_path, monkeypatch, tmp_path, 
 
 def test_cli_429_clear_message(cli_changeset_path, monkeypatch, tmp_path, capsys):
     from ynab_client import YNABRateLimitError
-    import amazon_confirm
+    import apply
 
     monkeypatch.setenv("YNAB_API_TOKEN", "tok")
     monkeypatch.setenv("YNAB_DEFAULT_BUDGET", "My Budget")
@@ -584,7 +584,7 @@ def test_cli_429_clear_message(cli_changeset_path, monkeypatch, tmp_path, capsys
     fake_client = MagicMock()
     fake_client.sandbox_mode = False
     fake_client.resolve_budget_id.side_effect = YNABRateLimitError(429, detail="rate limited")
-    monkeypatch.setattr(amazon_confirm, "YNABClient", lambda *a, **kw: fake_client)
+    monkeypatch.setattr(apply, "YNABClient", lambda *a, **kw: fake_client)
 
     code = _run_main([str(cli_changeset_path), "--yes"], monkeypatch, tmp_path)
     err = capsys.readouterr().err.lower()
@@ -595,7 +595,7 @@ def test_cli_429_clear_message(cli_changeset_path, monkeypatch, tmp_path, capsys
 def test_cli_prompt_excludes_uncategorized_from_count(cli_changeset_path, fake_client_factory, monkeypatch, tmp_path, capsys):
     """The prompt's 'Apply N proposals' count should match the number of
     PATCH calls — i.e. subtract both already-applied and uncategorized skips."""
-    import amazon_confirm
+    import apply
 
     monkeypatch.setenv("YNAB_API_TOKEN", "tok")
     monkeypatch.setenv("YNAB_DEFAULT_BUDGET", "My Budget")
@@ -610,7 +610,7 @@ def test_cli_prompt_excludes_uncategorized_from_count(cli_changeset_path, fake_c
         total_outflow_dollars=Decimal("100.00"),
         by_category={},
     )
-    monkeypatch.setattr(amazon_confirm, "summarize_changeset", lambda *_: fake_summary)
+    monkeypatch.setattr(apply, "summarize_changeset", lambda *_: fake_summary)
 
     prompts = []
     def fake_input(prompt):
@@ -626,7 +626,7 @@ def test_cli_prompt_excludes_uncategorized_from_count(cli_changeset_path, fake_c
 
 def test_cli_404_budget_clear_message(cli_changeset_path, monkeypatch, tmp_path, capsys):
     from ynab_client import YNABNotFoundError
-    import amazon_confirm
+    import apply
 
     monkeypatch.setenv("YNAB_API_TOKEN", "tok")
     monkeypatch.setenv("YNAB_DEFAULT_BUDGET", "Phantom")
@@ -635,7 +635,7 @@ def test_cli_404_budget_clear_message(cli_changeset_path, monkeypatch, tmp_path,
     fake_client = MagicMock()
     fake_client.sandbox_mode = False
     fake_client.resolve_budget_id.side_effect = YNABNotFoundError(404, name="not_found", detail="No budget with that id")
-    monkeypatch.setattr(amazon_confirm, "YNABClient", lambda *a, **kw: fake_client)
+    monkeypatch.setattr(apply, "YNABClient", lambda *a, **kw: fake_client)
 
     code = _run_main([str(cli_changeset_path), "--yes"], monkeypatch, tmp_path)
     err = capsys.readouterr().err
@@ -645,7 +645,7 @@ def test_cli_404_budget_clear_message(cli_changeset_path, monkeypatch, tmp_path,
 
 
 def test_cli_unknown_budget_clear_message(cli_changeset_path, monkeypatch, tmp_path, capsys):
-    import amazon_confirm
+    import apply
 
     monkeypatch.setenv("YNAB_API_TOKEN", "tok")
     monkeypatch.setenv("YNAB_DEFAULT_BUDGET", "Nonexistent")
@@ -654,7 +654,7 @@ def test_cli_unknown_budget_clear_message(cli_changeset_path, monkeypatch, tmp_p
     fake_client = MagicMock()
     fake_client.sandbox_mode = False
     fake_client.resolve_budget_id.side_effect = ValueError("YNAB_DEFAULT_BUDGET='Nonexistent' not found. Available: ['My Budget']")
-    monkeypatch.setattr(amazon_confirm, "YNABClient", lambda *a, **kw: fake_client)
+    monkeypatch.setattr(apply, "YNABClient", lambda *a, **kw: fake_client)
 
     code = _run_main([str(cli_changeset_path), "--yes"], monkeypatch, tmp_path)
     err = capsys.readouterr().err
@@ -687,8 +687,8 @@ def mock_client():
 
 @pytest.fixture(autouse=True)
 def _no_sleep(monkeypatch):
-    import amazon_confirm
-    monkeypatch.setattr(amazon_confirm.time, "sleep", lambda *_: None)
+    import apply
+    monkeypatch.setattr(apply.time, "sleep", lambda *_: None)
 
 
 def _read_changeset(path):
@@ -696,7 +696,7 @@ def _read_changeset(path):
 
 
 def test_apply_refuses_sandbox_mode(apply_changeset_path, mock_client, tmp_path):
-    from amazon_confirm import apply_changeset
+    from apply import apply_changeset
     mock_client.sandbox_mode = True
     with pytest.raises(RuntimeError, match="sandbox"):
         apply_changeset(apply_changeset_path, mock_client, "budget-1", report_dir=tmp_path)
@@ -704,7 +704,7 @@ def test_apply_refuses_sandbox_mode(apply_changeset_path, mock_client, tmp_path)
 
 
 def test_apply_creates_backup(apply_changeset_path, mock_client, tmp_path):
-    from amazon_confirm import apply_changeset
+    from apply import apply_changeset
     original = apply_changeset_path.read_text()
     apply_changeset(apply_changeset_path, mock_client, "budget-1", report_dir=tmp_path)
     bak = apply_changeset_path.with_suffix(".json.bak")
@@ -713,7 +713,7 @@ def test_apply_creates_backup(apply_changeset_path, mock_client, tmp_path):
 
 
 def test_apply_does_not_duplicate_backup(apply_changeset_path, mock_client, tmp_path):
-    from amazon_confirm import apply_changeset
+    from apply import apply_changeset
     bak = apply_changeset_path.with_suffix(".json.bak")
     bak.write_text('{"sentinel": "pre-existing-backup"}')
     apply_changeset(apply_changeset_path, mock_client, "budget-1", report_dir=tmp_path)
@@ -721,7 +721,7 @@ def test_apply_does_not_duplicate_backup(apply_changeset_path, mock_client, tmp_
 
 
 def test_apply_dry_run_makes_no_patch_calls(apply_changeset_path, mock_client, tmp_path):
-    from amazon_confirm import apply_changeset
+    from apply import apply_changeset
     report = apply_changeset(apply_changeset_path, mock_client, "budget-1", dry_run=True, report_dir=tmp_path)
     mock_client.update_transactions.assert_not_called()
     assert any(s.get("reason") == "dry run" for s in report.skipped)
@@ -734,7 +734,7 @@ def test_applyable_math_matches_dry_run_skip_count(apply_changeset_path, mock_cl
     If this drifts, the user sees one number at the confirmation prompt and a
     different number actually gets PATCHed. Locks down B1/Y3 invariant.
     """
-    from amazon_confirm import apply_changeset, load_changeset, summarize_changeset
+    from apply import apply_changeset, load_changeset, summarize_changeset
 
     cs = load_changeset(apply_changeset_path)
     splits = cs["amazon"]["proposed_splits"]
@@ -786,7 +786,7 @@ def _applyable_count(cs):
 
 
 def test_apply_skips_proposals_with_applied_at(apply_changeset_path, mock_client, tmp_path):
-    from amazon_confirm import apply_changeset
+    from apply import apply_changeset
     cs = _read_changeset(apply_changeset_path)
     cs["amazon"]["proposed_splits"][0]["applied_at"] = "2026-05-14T10:00:00"
     apply_changeset_path.write_text(json.dumps(cs))
@@ -801,7 +801,7 @@ def test_apply_skips_proposals_with_applied_at(apply_changeset_path, mock_client
 
 
 def test_apply_skips_proposals_with_null_category(apply_changeset_path, mock_client, tmp_path):
-    from amazon_confirm import apply_changeset
+    from apply import apply_changeset
     cs = _read_changeset(apply_changeset_path)
     cs["amazon"]["proposed_splits"][0]["subtransactions"][0]["category_id"] = None
     apply_changeset_path.write_text(json.dumps(cs))
@@ -814,7 +814,7 @@ def test_apply_skips_proposals_with_null_category(apply_changeset_path, mock_cli
 
 
 def test_apply_marks_applied_at_on_success(apply_changeset_path, mock_client, tmp_path):
-    from amazon_confirm import apply_changeset
+    from apply import apply_changeset
     apply_changeset(apply_changeset_path, mock_client, "budget-1", report_dir=tmp_path)
     cs_after = _read_changeset(apply_changeset_path)
     for proposal in cs_after["amazon"]["proposed_splits"]:
@@ -827,7 +827,7 @@ def test_apply_records_confirmed_items_into_profiles(apply_changeset_path, mock_
     The fixture maps "USB-C Cable 6ft" -> Electronics; after apply, the profiles
     file must record that as the dominant category for that item.
     """
-    from amazon_confirm import apply_changeset
+    from apply import apply_changeset
     from category_profiles import load_profiles, dominant_item_category
 
     prof_path = tmp_path / "category_profiles.json"
@@ -847,7 +847,7 @@ def test_apply_records_confirmed_items_into_profiles(apply_changeset_path, mock_
 def test_apply_records_amazon_item_rejection_into_profiles(apply_changeset_path, mock_client, tmp_path):
     """An overridden Amazon item (original_category stashed by review) flags both
     categories dirty for description refresh."""
-    from amazon_confirm import apply_changeset
+    from apply import apply_changeset
     from category_profiles import load_profiles
 
     cs = _read_changeset(apply_changeset_path)
@@ -877,7 +877,7 @@ def test_apply_records_amazon_item_rejection_into_profiles(apply_changeset_path,
 
 def test_apply_dry_run_records_nothing(apply_changeset_path, mock_client, tmp_path):
     """Dry runs apply nothing, so they must learn nothing."""
-    from amazon_confirm import apply_changeset
+    from apply import apply_changeset
 
     prof_path = tmp_path / "category_profiles.json"
     apply_changeset(
@@ -889,7 +889,7 @@ def test_apply_dry_run_records_nothing(apply_changeset_path, mock_client, tmp_pa
 
 def test_apply_does_not_record_already_applied_or_review_skipped(apply_changeset_path, mock_client, tmp_path):
     """Splits skipped this run (already-applied / review-skip) are not learned from."""
-    from amazon_confirm import apply_changeset
+    from apply import apply_changeset
     from category_profiles import load_profiles, dominant_item_category
 
     cs = _read_changeset(apply_changeset_path)
@@ -917,10 +917,10 @@ def test_apply_does_not_record_already_applied_or_review_skipped(apply_changeset
 def test_apply_learning_failure_does_not_crash_apply(apply_changeset_path, mock_client, tmp_path, caplog):
     """A profile-learning failure must never mask a successful YNAB apply."""
     import logging
-    from amazon_confirm import apply_changeset
+    from apply import apply_changeset
 
     with patch("category_profiles.record_confirmed_splits", side_effect=RuntimeError("boom")):
-        with caplog.at_level(logging.WARNING, logger="amazon_confirm"):
+        with caplog.at_level(logging.WARNING, logger="apply"):
             report = apply_changeset(
                 apply_changeset_path, mock_client, "budget-1",
                 report_dir=tmp_path, profiles_path=tmp_path / "category_profiles.json",
@@ -935,7 +935,7 @@ def test_apply_aborts_on_batch_conflict(apply_changeset_path, mock_client, tmp_p
     """Batch mode: a 409 anywhere in the chunk aborts the whole chunk.
     The pre-batch per-txn 409-continue behavior was deliberately removed
     when the endpoint moved to batch PATCH (chunks are atomic per YNAB)."""
-    from amazon_confirm import apply_changeset
+    from apply import apply_changeset
     from ynab_client import YNABConflictError
 
     mock_client.update_transactions.side_effect = YNABConflictError(409, detail="conflict")
@@ -948,7 +948,7 @@ def test_apply_aborts_on_batch_conflict(apply_changeset_path, mock_client, tmp_p
 def test_apply_aborts_on_batch_locked_400(apply_changeset_path, mock_client, tmp_path):
     """A 400 from YNAB (e.g. transaction_locked) aborts the chunk; chunks are
     atomic so we cannot continue past a validation failure."""
-    from amazon_confirm import apply_changeset
+    from apply import apply_changeset
     from ynab_client import YNABValidationError
 
     mock_client.update_transactions.side_effect = YNABValidationError(
@@ -962,7 +962,7 @@ def test_apply_aborts_on_batch_locked_400(apply_changeset_path, mock_client, tmp
 
 def test_apply_aborts_on_429(apply_changeset_path, mock_client, tmp_path):
     """A 429 on the (single) batch call aborts; nothing is applied."""
-    from amazon_confirm import apply_changeset
+    from apply import apply_changeset
     from ynab_client import YNABRateLimitError
 
     mock_client.update_transactions.side_effect = YNABRateLimitError(429, detail="too many")
@@ -977,7 +977,7 @@ def test_apply_aborts_when_rate_limit_floor_breached(apply_changeset_path, mock_
     """The rate-limit floor check now runs before each chunk. With a fixture
     that fits in one chunk and a pre-flight `remaining` below the floor, we
     abort before issuing the batch PATCH."""
-    from amazon_confirm import apply_changeset
+    from apply import apply_changeset
 
     mock_client.rate_limit_remaining.return_value = 4
     report = apply_changeset(
@@ -992,7 +992,7 @@ def test_apply_throttle_seconds_emits_deprecation_warning(apply_changeset_path, 
     """`throttle_seconds` is preserved in the signature for backwards compatibility
     but is unused in batch mode. Non-zero values emit a DeprecationWarning per the
     refined plan (avoids silent no-op which violates NO SILENT FALLBACKS)."""
-    from amazon_confirm import apply_changeset
+    from apply import apply_changeset
 
     with pytest.warns(DeprecationWarning, match="throttle_seconds"):
         apply_changeset(
@@ -1002,7 +1002,7 @@ def test_apply_throttle_seconds_emits_deprecation_warning(apply_changeset_path, 
 
 
 def test_apply_writes_summary_report(apply_changeset_path, mock_client, tmp_path):
-    from amazon_confirm import apply_changeset
+    from apply import apply_changeset
     apply_changeset(apply_changeset_path, mock_client, "budget-1", report_dir=tmp_path)
     reports = list(tmp_path.glob("enrich-confirmed-*.json"))
     assert len(reports) == 1
@@ -1013,7 +1013,7 @@ def test_apply_writes_summary_report(apply_changeset_path, mock_client, tmp_path
 
 
 def test_apply_handles_empty_proposed_splits(tmp_path, mock_client):
-    from amazon_confirm import apply_changeset
+    from apply import apply_changeset
     cs = {
         "version": 1,
         "kind": "enrich-changeset",
@@ -1041,7 +1041,7 @@ def test_apply_uses_report_dir_not_real_cache(apply_changeset_path, mock_client,
     """Regression test for #171: when report_dir is provided, the real
     data/cache/ directory must not receive any files (even if cwd is at the
     repo root)."""
-    from amazon_confirm import apply_changeset
+    from apply import apply_changeset
     repo_root = Path(__file__).resolve().parent.parent
     real_cache_before = set((repo_root / "data" / "cache").glob("enrich-confirmed-*.json")) if (repo_root / "data" / "cache").exists() else set()
     apply_changeset(apply_changeset_path, mock_client, "budget-1", report_dir=tmp_path)
@@ -1055,7 +1055,7 @@ def test_apply_propagates_client_side_sum_invariant_error(tmp_path, mock_client)
     client-side by proposal_to_patch_body and surfaces as ValueError. This is
     a bug-in-data condition that should fail loudly, not be swallowed as a
     YNAB-validation skip. (Was previously a misnamed integration test.)"""
-    from amazon_confirm import apply_changeset
+    from apply import apply_changeset
     parent_amount = -15500  # -$15.50 in milliunits
     cs = {
         "version": 1,
@@ -1234,7 +1234,7 @@ def test_summarize_changeset_null_amount_dollars_no_crash():
 
 def test_flat_proposal_to_patch_body_returns_category_only():
     """flat_proposal_to_patch_body returns only category_id field."""
-    from amazon_confirm import flat_proposal_to_patch_body
+    from apply import flat_proposal_to_patch_body
     proposal = {
         "transaction_id": "txn-123",
         "category_id": "cat-456",
@@ -1248,7 +1248,7 @@ def test_flat_proposal_to_patch_body_returns_category_only():
 
 def test_flat_proposal_to_patch_body_returns_none_when_uncategorized():
     """flat_proposal_to_patch_body returns None when category_id is None."""
-    from amazon_confirm import flat_proposal_to_patch_body
+    from apply import flat_proposal_to_patch_body
     proposal = {
         "transaction_id": "txn-123",
         "category_id": None,
@@ -1262,7 +1262,7 @@ def test_flat_proposal_to_patch_body_returns_none_when_uncategorized():
 
 
 def test_flat_proposal_auto_approved_when_amount_below_threshold():
-    from amazon_confirm import flat_proposal_to_patch_body
+    from apply import flat_proposal_to_patch_body
     proposal = {"transaction_id": "t1", "category_id": "cat-1", "amount_dollars": "-42.50"}
     body = flat_proposal_to_patch_body(proposal)
     assert body == {"category_id": "cat-1", "approved": True}
@@ -1270,14 +1270,14 @@ def test_flat_proposal_auto_approved_when_amount_below_threshold():
 
 def test_flat_proposal_not_approved_when_amount_at_threshold():
     """Exactly $100 must NOT auto-approve (strict less-than gate)."""
-    from amazon_confirm import flat_proposal_to_patch_body
+    from apply import flat_proposal_to_patch_body
     proposal = {"transaction_id": "t1", "category_id": "cat-1", "amount_dollars": "-100.00"}
     body = flat_proposal_to_patch_body(proposal)
     assert body == {"category_id": "cat-1"}
 
 
 def test_flat_proposal_not_approved_when_amount_above_threshold():
-    from amazon_confirm import flat_proposal_to_patch_body
+    from apply import flat_proposal_to_patch_body
     proposal = {"transaction_id": "t1", "category_id": "cat-1", "amount_dollars": "-369"}
     body = flat_proposal_to_patch_body(proposal)
     assert body == {"category_id": "cat-1"}
@@ -1285,7 +1285,7 @@ def test_flat_proposal_not_approved_when_amount_above_threshold():
 
 def test_flat_proposal_inflow_auto_approved_when_under_threshold():
     """Positive amounts (inflows) use |amount| so a $0.16 interest deposit auto-approves."""
-    from amazon_confirm import flat_proposal_to_patch_body
+    from apply import flat_proposal_to_patch_body
     proposal = {"transaction_id": "t1", "category_id": "cat-1", "amount_dollars": "0.16"}
     body = flat_proposal_to_patch_body(proposal)
     assert body == {"category_id": "cat-1", "approved": True}
@@ -1293,7 +1293,7 @@ def test_flat_proposal_inflow_auto_approved_when_under_threshold():
 
 def test_flat_proposal_inflow_not_approved_when_at_or_above_threshold():
     """A $7500 paycheck deposit (positive) stays unapproved."""
-    from amazon_confirm import flat_proposal_to_patch_body
+    from apply import flat_proposal_to_patch_body
     proposal = {"transaction_id": "t1", "category_id": "cat-1", "amount_dollars": "7500"}
     body = flat_proposal_to_patch_body(proposal)
     assert body == {"category_id": "cat-1"}
@@ -1301,7 +1301,7 @@ def test_flat_proposal_inflow_not_approved_when_at_or_above_threshold():
 
 def test_flat_proposal_no_amount_dollars_does_not_auto_approve():
     """Missing/None amount_dollars must fail safe: no approval."""
-    from amazon_confirm import flat_proposal_to_patch_body
+    from apply import flat_proposal_to_patch_body
     proposal_missing = {"transaction_id": "t1", "category_id": "cat-1"}
     assert flat_proposal_to_patch_body(proposal_missing) == {"category_id": "cat-1"}
     proposal_none = {"transaction_id": "t1", "category_id": "cat-1", "amount_dollars": None}
@@ -1310,7 +1310,7 @@ def test_flat_proposal_no_amount_dollars_does_not_auto_approve():
 
 def test_amazon_single_subtxn_auto_approved_when_small():
     """Amazon proposal with one subtxn (becomes flat patch body): parent amount < $100 → approved."""
-    from amazon_confirm import proposal_to_patch_body
+    from apply import proposal_to_patch_body
     proposal = {
         "transaction_id": "amzn-1",
         "parent_ynab_transaction": {"id": "amzn-1", "amount": -25000, "memo": "Order ($25)"},
@@ -1322,7 +1322,7 @@ def test_amazon_single_subtxn_auto_approved_when_small():
 
 
 def test_amazon_single_subtxn_not_approved_when_large():
-    from amazon_confirm import proposal_to_patch_body
+    from apply import proposal_to_patch_body
     proposal = {
         "transaction_id": "amzn-1",
         "parent_ynab_transaction": {"id": "amzn-1", "amount": -250000, "memo": "Order ($250)"},
@@ -1335,7 +1335,7 @@ def test_amazon_single_subtxn_not_approved_when_large():
 
 def test_amazon_split_auto_approved_when_parent_small():
     """Multi-subtxn split: gate uses PARENT amount, not max subtxn."""
-    from amazon_confirm import proposal_to_patch_body
+    from apply import proposal_to_patch_body
     proposal = {
         "transaction_id": "amzn-1",
         "parent_ynab_transaction": {"id": "amzn-1", "amount": -50000, "memo": ""},
@@ -1352,7 +1352,7 @@ def test_amazon_split_auto_approved_when_parent_small():
 
 
 def test_amazon_split_not_approved_when_parent_large():
-    from amazon_confirm import proposal_to_patch_body
+    from apply import proposal_to_patch_body
     proposal = {
         "transaction_id": "amzn-1",
         "parent_ynab_transaction": {"id": "amzn-1", "amount": -150000, "memo": ""},
@@ -1395,7 +1395,7 @@ def test_print_summary_raises_on_missing_metadata_timestamp(tmp_path):
 
     Covers both 'metadata key absent' and 'timestamp key absent within metadata'.
     """
-    from amazon_confirm import _print_summary
+    from apply import _print_summary
     fake_summary = ChangesetSummary(
         total_proposals=0, split_proposals=0, flat_proposals=0,
         skipped_uncategorized=0, applied_previously=0,
@@ -1419,7 +1419,7 @@ def _sent_updates(mock_client):
 def test_apply_processes_both_amazon_and_non_amazon(apply_changeset_path, mock_client, tmp_path):
     """apply_changeset batches both Amazon splits and categorized non_amazon flats
     into the batch endpoint."""
-    from amazon_confirm import apply_changeset
+    from apply import apply_changeset
     cs = _read_changeset(apply_changeset_path)
     expected_applyable = _applyable_count(cs)
     report = apply_changeset(apply_changeset_path, mock_client, "budget-1", report_dir=tmp_path)
@@ -1433,7 +1433,7 @@ def test_apply_processes_both_amazon_and_non_amazon(apply_changeset_path, mock_c
 def test_apply_non_amazon_flat_patch_body_is_category_only(apply_changeset_path, mock_client, tmp_path):
     """The PATCH body for a non_amazon flat contains {'id', 'category_id'} and
     optionally 'approved' (when |amount| < AUTO_APPROVE_UNDER_DOLLARS) — nothing else."""
-    from amazon_confirm import apply_changeset
+    from apply import apply_changeset
     cs = _read_changeset(apply_changeset_path)
     non_amazon_categorized_ids = {
         p["transaction_id"]
@@ -1454,7 +1454,7 @@ def test_apply_non_amazon_flat_patch_body_is_category_only(apply_changeset_path,
 
 def test_apply_persists_applied_at_to_non_amazon(apply_changeset_path, mock_client, tmp_path):
     """applied_at is written to non_amazon.proposals[j] for each successful flat PATCH."""
-    from amazon_confirm import apply_changeset
+    from apply import apply_changeset
     apply_changeset(apply_changeset_path, mock_client, "budget-1", report_dir=tmp_path)
     cs_after = _read_changeset(apply_changeset_path)
     for proposal in cs_after["non_amazon"]["proposals"]:
@@ -1467,7 +1467,7 @@ def test_apply_persists_applied_at_to_non_amazon(apply_changeset_path, mock_clie
 def test_apply_skips_uncategorized_non_amazon(apply_changeset_path, mock_client, tmp_path):
     """Uncategorized non_amazon proposals (category_id=None) are excluded from
     the batch payload, not PATCHed."""
-    from amazon_confirm import apply_changeset
+    from apply import apply_changeset
     cs = _read_changeset(apply_changeset_path)
     uncategorized_ids = {
         p["transaction_id"]
@@ -1483,7 +1483,7 @@ def test_apply_skips_uncategorized_non_amazon(apply_changeset_path, mock_client,
 def test_apply_resume_skips_non_amazon_with_applied_at(apply_changeset_path, mock_client, tmp_path):
     """A non_amazon proposal with applied_at is skipped on re-run (not included
     in the batch payload)."""
-    from amazon_confirm import apply_changeset
+    from apply import apply_changeset
     cs = _read_changeset(apply_changeset_path)
     for p in cs["non_amazon"]["proposals"]:
         if p.get("category_id") is not None:
