@@ -1,7 +1,7 @@
 """Render an enrich-changeset Markdown summary to a styled HTML sibling file
 and open it in the system default browser.
 
-Used by review.py to give the user a readable, scannable view of the proposed
+Used by decide.py to give the user a readable, scannable view of the proposed
 changeset while the interactive walkthrough runs in the terminal.
 
 Standalone-runnable for ad-hoc viewing:
@@ -178,7 +178,7 @@ def render_and_open(
     """Resolve the .md, render to .html, open in default browser. Return .html path.
 
     Defaults to including the stale-state banner since this entry point is used
-    by review.py — the user is about to make decisions whose results won't be
+    by decide.py — the user is about to make decisions whose results won't be
     reflected in the browser view. See `render_html` docstring re: escaping.
 
     Prints a refresh-tab hint to stdout — the renderer overwrites the .html
