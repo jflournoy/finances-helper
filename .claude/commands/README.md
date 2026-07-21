@@ -7,7 +7,7 @@ Commands are organized by frequency of use and purpose:
 ### All Commands
 
 **YNAB / Amazon enrich pipeline:**
-- `enrich-run` - Run `enrich.py` over a window; produce a changeset (read-only against YNAB)
+- `enrich-run` - Run `tag.py` over a window; produce a changeset (read-only against YNAB)
 - `confirm-review` - Dry-run the latest changeset to validate before writing
 - `confirm-apply` - PATCH the latest changeset to YNAB (writes real money; prompts before applying)
 

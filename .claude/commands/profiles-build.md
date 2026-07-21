@@ -32,11 +32,11 @@ This makes Claude calls (one batched call per build) and writes only to
 
    For `rebuild`:
    ```bash
-   uv run python enrich.py --rebuild-profiles
+   uv run python tag.py --rebuild-profiles
    ```
    For `refresh`:
    ```bash
-   uv run python enrich.py --refresh-profiles
+   uv run python tag.py --refresh-profiles
    ```
 
 3. Run the command. Capture the exit code.
@@ -46,7 +46,7 @@ This makes Claude calls (one batched call per build) and writes only to
      state how many category descriptions were (re)generated (read it from the
      command's stdout — it prints "Generated category descriptions for N
      categories." or "No categories needed description regeneration.").
-   - On exit 1: print "enrich.py: configuration/env error — check .env
+   - On exit 1: print "tag.py: configuration/env error — check .env
      (YNAB_API_TOKEN, ANTHROPIC_API_KEY, YNAB_DEFAULT_BUDGET)".
    - On other non-zero: print the exit code and surface stderr.
 

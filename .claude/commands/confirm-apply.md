@@ -1,6 +1,6 @@
 ---
 allowed-tools: [Bash]
-description: Apply the latest reviewed changeset to YNAB via amazon_confirm.py (writes real money)
+description: Apply the latest reviewed changeset to YNAB via apply.py (writes real money)
 ---
 
 # /confirm-apply
@@ -30,7 +30,7 @@ This is a **two-phase, user-driven workflow**. The pre-flight runs from here; th
 3. Run the dry-run pre-flight from here. It's non-interactive (no prompts, no writes) and safe:
 
    ```bash
-   uv run python amazon_confirm.py <PATH> --dry-run --yes
+   uv run python apply.py <PATH> --dry-run --yes
    ```
 
    - Exit 0: continue to Phase 2.
@@ -39,7 +39,7 @@ This is a **two-phase, user-driven workflow**. The pre-flight runs from here; th
 
 ### Phase 2 — Hand off the apply (user-side)
 
-The `amazon_confirm.py` apply step prompts `Apply N proposals to budget '<name>'? [y/N]:` before any writes. That prompt is the last safety net for real money and must be answered by the user in their own terminal. Don't run it from here — without a TTY the prompt EOFs and the script aborts.
+The `apply.py` apply step prompts `Apply N proposals to budget '<name>'? [y/N]:` before any writes. That prompt is the last safety net for real money and must be answered by the user in their own terminal. Don't run it from here — without a TTY the prompt EOFs and the script aborts.
 
 1. Print the by-category summary from the dry-run output so the user can sanity-check the totals before they confirm.
 
@@ -49,12 +49,12 @@ The `amazon_confirm.py` apply step prompts `Apply N proposals to budget '<name>'
    Pre-flight passed. The apply step needs your terminal because it will prompt
    for [y/N] before writing to YNAB. Run this in your shell:
 
-       uv run python amazon_confirm.py <PATH>
+       uv run python apply.py <PATH>
 
    When it's done (or if it aborts), tell me and I'll surface the report.
    ```
 
-3. Stop and wait. **Do not invoke `amazon_confirm.py` without `--dry-run` via Bash.** The interactive `[y/N]` EOFs in this environment and the run aborts cleanly — which is safe, but wastes the user's setup.
+3. Stop and wait. **Do not invoke `apply.py` without `--dry-run` via Bash.** The interactive `[y/N]` EOFs in this environment and the run aborts cleanly — which is safe, but wastes the user's setup.
 
 ### Phase 3 — Verify the report (after the user reports back)
 
@@ -69,7 +69,7 @@ When the user says it's done:
 
 ## Resume semantics
 
-`amazon_confirm.py` writes an `applied_at` timestamp into each proposal on success. If the run is interrupted, re-running `/confirm-apply` picks up where it left off — already-applied proposals are skipped, only the rest are PATCHed.
+`apply.py` writes an `applied_at` timestamp into each proposal on success. If the run is interrupted, re-running `/confirm-apply` picks up where it left off — already-applied proposals are skipped, only the rest are PATCHed.
 
 A `<changeset>.json.bak` of the original (pre-mutation) file is created on first apply. If something goes badly wrong, `mv <changeset>.json.bak <changeset>.json` restores it.
 
@@ -81,7 +81,7 @@ A `<changeset>.json.bak` of the original (pre-mutation) file is created on first
 
 ## Do NOT
 
-- Run `amazon_confirm.py` without `--dry-run` from this session. The `[y/N]` will EOF and abort.
+- Run `apply.py` without `--dry-run` from this session. The `[y/N]` will EOF and abort.
 - Pass `--yes` to the real apply. The interactive prompt is the last safety net.
 - Edit the changeset between pre-flight and apply. If the user wants changes, re-run `/enrich-run` or edit the reviewed sidecar deliberately.
 - Suggest deleting the `.bak` file.

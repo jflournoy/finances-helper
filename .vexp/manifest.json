@@ -92,8 +92,8 @@
     "view_changeset.py": "e714bfe80ef30b90cc78563dfccc92fbe658837d817b8cd2243c8e1276f9cae1",
     "ynab_client.py": "c2a132a89eacfddcb14121a77e599043a49f3855e674c181daa2a916bff0e855"
   },
-  "indexed_at_commit": "177e8081833e72b7a64b2d63786e95dfa25d259e",
-  "indexed_at_timestamp": "2026-07-21T21:45:41.828175274+00:00",
+  "indexed_at_commit": "446b820bcb4a165d001dabca1a25f15105be3b56",
+  "indexed_at_timestamp": "2026-07-21T21:45:51.038154830+00:00",
   "schema_version": 3,
   "stats": {
     "total_edges": 2289,

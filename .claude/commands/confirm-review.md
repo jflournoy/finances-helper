@@ -7,7 +7,7 @@ description: Interactively review the latest enrich-changeset before /confirm-ap
 
 Prepare the interactive review of the latest enrich-changeset, hand the run off to the user's terminal, then pre-flight the resulting sidecar so `/confirm-apply` can write to YNAB cleanly.
 
-`review.py` is **deliberately interactive in your terminal** — it opens a styled HTML view of the changeset in the browser, then prompts proposal-by-proposal for the risky tiers (Amazon splits, fuzzy/Claude/amazon-wf). History-tier proposals get one bulk-accept prompt. You can accept, recategorize, or skip each item; quitting mid-walk saves partial state for resume. It will not run cleanly inside this assistant session — it needs a real TTY, and the human-in-the-loop decisions need to be yours.
+`decide.py` is **deliberately interactive in your terminal** — it opens a styled HTML view of the changeset in the browser, then prompts proposal-by-proposal for the risky tiers (Amazon splits, fuzzy/Claude/amazon-wf). History-tier proposals get one bulk-accept prompt. You can accept, recategorize, or skip each item; quitting mid-walk saves partial state for resume. It will not run cleanly inside this assistant session — it needs a real TTY, and the human-in-the-loop decisions need to be yours.
 
 ## Arguments
 
@@ -15,7 +15,7 @@ Prepare the interactive review of the latest enrich-changeset, hand the run off 
 
 ## Your Task
 
-This is a **two-phase, user-driven workflow**. Do not try to run `review.py` yourself — drive the user through it.
+This is a **two-phase, user-driven workflow**. Do not try to run `decide.py` yourself — drive the user through it.
 
 ### Phase 1 — Hand off the review
 
@@ -29,24 +29,24 @@ This is a **two-phase, user-driven workflow**. Do not try to run `review.py` you
    ```
    The review step is interactive — please run this in your terminal:
 
-       uv run python review.py <PATH>
+       uv run python decide.py <PATH>
 
    It will open the HTML view in your browser and prompt you proposal-by-proposal.
    When you're done (or if you quit mid-walk), tell me and I'll pre-flight the sidecar.
    ```
 
-3. Stop and wait for the user. **Do not invoke `review.py` via Bash.** The TTY-less environment will EOF the first prompt and abort the script before any decisions are recorded.
+3. Stop and wait for the user. **Do not invoke `decide.py` via Bash.** The TTY-less environment will EOF the first prompt and abort the script before any decisions are recorded.
 
 ### Phase 2 — Pre-flight the sidecar (after the user reports back)
 
 When the user says they're done (or you see a fresh `-reviewed.json` appear):
 
-1. Resolve the sidecar path: newest `data/cache/enrich-changeset-*-reviewed.json` whose mtime is newer than the input changeset. If none exists, print "No reviewed sidecar found — `review.py` may have exited before any decisions were saved." and stop.
+1. Resolve the sidecar path: newest `data/cache/enrich-changeset-*-reviewed.json` whose mtime is newer than the input changeset. If none exists, print "No reviewed sidecar found — `decide.py` may have exited before any decisions were saved." and stop.
 
 2. **Echo and run** the dry-run pre-flight on the sidecar. This is non-interactive and safe to run from here:
 
    ```bash
-   uv run python amazon_confirm.py data/cache/enrich-changeset-<TS>-reviewed.json --dry-run --yes
+   uv run python apply.py data/cache/enrich-changeset-<TS>-reviewed.json --dry-run --yes
    ```
 
 3. Pre-flight exit handling:
@@ -56,13 +56,13 @@ When the user says they're done (or you see a fresh `-reviewed.json` appear):
 
 ## Why this is split across the user's terminal and yours
 
-- **The decisions must be the user's.** `review.py` is the only human-in-the-loop step between auto-categorization and real-money writes. Running it for them would defeat the point.
+- **The decisions must be the user's.** `decide.py` is the only human-in-the-loop step between auto-categorization and real-money writes. Running it for them would defeat the point.
 - **The script needs a TTY.** It uses `input()` and opens a browser tab; both require an interactive shell.
 - **The pre-flight does not need a TTY.** `--dry-run --yes` is structural validation only — no writes, no prompts — so it runs cleanly from this session and is the right job for the assistant to handle.
 
 ## Do NOT
 
-- Try to run `review.py` via Bash. It will EOF on the first prompt, exit 1, and produce no sidecar.
-- Pass any flags to `review.py` (it's intentionally argument-light).
+- Try to run `decide.py` via Bash. It will EOF on the first prompt, exit 1, and produce no sidecar.
+- Pass any flags to `decide.py` (it's intentionally argument-light).
 - Modify the input changeset file. The `-reviewed.json` sidecar is the source of truth after review.
 - Skip the pre-flight. The dry-run catches schema/env errors that would otherwise surface mid-apply.
