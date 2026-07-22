@@ -706,6 +706,11 @@ def match_shipments_to_transactions(
     resolved = {}  # index → (txn, date_delta)
     # Track unresolved by index (not by order_id, since multiple shipments can share order_id)
     unresolved_indices = set(range(len(candidates)))
+    # Indices dropped by Phase 2 for having zero candidates. These leave
+    # unresolved_indices immediately, so Phase 4's zero-candidate check (which
+    # only inspects what's still in unresolved_indices) can't see them — track
+    # separately or they vanish from matched/unmatched_shipments/excluded_shipments.
+    zero_candidate_removed_indices = set()
 
     max_iterations = 100
     iteration = 0
@@ -726,6 +731,7 @@ def match_shipments_to_transactions(
 
             if len(cands) == 0:
                 # No match
+                zero_candidate_removed_indices.add(idx)
                 unresolved_indices.remove(idx)
                 changed = True
             elif len(cands) == 1:
@@ -812,8 +818,14 @@ def match_shipments_to_transactions(
                 reason = "no matching shipment in dump"
             unmatched_ynab.append((txn, reason))
 
-    # Unmatched shipments = those with zero candidates OR Case B contention
-    zero_candidate_indices = [idx for idx in unresolved_indices if len(candidates[idx][1]) == 0]
+    # Unmatched shipments = those with zero candidates OR Case B contention.
+    # Zero-candidate shipments come from two places: any still sitting in
+    # unresolved_indices with no candidates (shouldn't happen post-loop, but
+    # kept for safety), plus every index Phase 2 already evicted for having
+    # zero candidates (zero_candidate_removed_indices) — those left
+    # unresolved_indices immediately and would otherwise be lost.
+    zero_candidate_indices = {idx for idx in unresolved_indices if len(candidates[idx][1]) == 0}
+    zero_candidate_indices |= zero_candidate_removed_indices
     zero_candidate_shipments = [candidates[idx][0] for idx in zero_candidate_indices]
     case_b_unmatched = [s for s, _ in case_b_shipments]
     unmatched_shipments = zero_candidate_shipments + case_b_unmatched

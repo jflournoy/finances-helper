@@ -1371,6 +1371,68 @@ class TestMatchShipmentsToTransactions:
         # Check for logger.error
         assert any(record.levelname == "ERROR" and "contended" in record.message.lower() for record in caplog.records)
 
+    def test_match_shipment_with_no_candidates_from_the_start_is_unmatched(self):
+        """A shipment whose amount never matches any txn must appear in
+        unmatched_shipments, not vanish silently.
+
+        Regression test: Phase 2's singleton-resolution loop removed
+        zero-candidate shipments from unresolved_indices immediately, but
+        Phase 4 only classified shipments still present in unresolved_indices
+        as zero-candidate. A shipment with zero candidates from the very
+        first pass was gone from unresolved_indices before Phase 4 ran, so it
+        was reported in none of matched/unmatched_shipments/excluded_shipments.
+        """
+        matched_shipment = AmazonShipment(
+            order_id="111-MATCHED",
+            ship_date=date(2024, 1, 15),
+            payment_method_raw="Visa - 0804",
+            payment_method_last4="0804",
+            is_split_tender=False,
+            currency="USD",
+            item_subtotal=Decimal("50.00"),
+            tax=Decimal("0.00"),
+            shipping=Decimal("0.00"),
+            discounts=Decimal("0.00"),
+            total_amount=Decimal("50.00"),
+            items=[],
+            shipment_status="Shipped",
+        )
+        orphan_shipment = AmazonShipment(
+            order_id="111-ORPHAN",
+            ship_date=date(2024, 1, 15),
+            payment_method_raw="Visa - 0804",
+            payment_method_last4="0804",
+            is_split_tender=False,
+            currency="USD",
+            item_subtotal=Decimal("196.70"),
+            tax=Decimal("0.00"),
+            shipping=Decimal("0.00"),
+            discounts=Decimal("0.00"),
+            total_amount=Decimal("196.70"),
+            items=[],
+            shipment_status="Shipped",
+        )
+
+        txn = {
+            "id": "txn-001",
+            "account_id": "account-1",
+            "account_name": "Visa",
+            "date": "2024-01-15",
+            "amount": -50000,
+            "payee_name": "Amazon",
+            "category_id": None,
+            "cleared": "uncleared",
+            "deleted": False,
+        }
+
+        result = match_shipments_to_transactions([txn], [matched_shipment, orphan_shipment])
+
+        assert len(result.matched) == 1
+        assert result.matched[0].shipment.order_id == "111-MATCHED"
+        assert len(result.unmatched_ynab) == 0
+        order_ids = [s.order_id for s in result.unmatched_shipments]
+        assert order_ids == ["111-ORPHAN"]
+
     def test_match_decimal_amount_equality(self):
         """Boundary: Decimal('37.09') shipment matches YNAB milliunit -37090."""
         shipment = AmazonShipment(
