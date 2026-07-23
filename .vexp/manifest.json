@@ -69,7 +69,7 @@
     "scripts/update_amazon_orders.py": "fe6261d0ac1c10e9abb359ac907cae3b78795981d6d4db8bbd4917dcba15a723",
     "setup.py": "194a04786e29a3d0eaf94f7e996e67e8c2e278b19a30b5014ae52db6045bb835",
     "spending_advisor.py": "a80970c3c723e618381bebab842d50695551a79aee16170580f49a12bc8285b1",
-    "tag.py": "21d961121555bd58c27e6a899ff6b868bea4bf836c81087b72a41d30700dffa4",
+    "tag.py": "7a56c967d40770ae85777665f0ed8baa3ef3a9b6179ebd7cbba354d161b86f9d",
     "tests/__init__.py": "af1349b9f5f9a1a6a0404dea36dcc9499bcb25c9adc112b7cc9a93cae41f3262",
     "tests/conftest.py": "b33efe44deb1518fdd5bcad609ada689a8689fd7bf5a0aaff171b1f735da457e",
     "tests/test_amazon_matcher.py": "a38e08a5f99b6c7627d3b0220a4dc044fc80932eb872fed930d9e97621afe81c",
@@ -85,20 +85,20 @@
     "tests/test_payee_resolver.py": "5cbd345333c1f2a9b2a5b0568918d7c52cdd1b1737252e454eafb12a55df4ad8",
     "tests/test_spend_advice_script.py": "1b6588670ed949a73f1433e3b2aedc7ead7756eaff5cc66d9f77731398568a73",
     "tests/test_spending_advisor.py": "9ab242d22cef953fe2a8cbe8b82b133472770636bb88d0c8ace03fd4fa9fb1d4",
-    "tests/test_tag.py": "c5b2e520b1d503a3fccfde8d84e2303528e5961116ba088832714ff801e3c218",
+    "tests/test_tag.py": "a022d3269c1d7aa4e64f57bd6e9b9f50dee46738d260da80ea9036d4bbf2b73d",
     "tests/test_view_changeset.py": "370c52240d9e3748488dd7caf1cb217c4fe2057196fcb4fd6c9e092a379ed929",
     "tests/test_ynab_client.py": "74ede9ee35e763b6010dc5760b884d9372a7e6c921cef2cfde38293af3f83148",
     "tests/test_ynab_client_integration.py": "5ee2c7aa44a41d919e6fdc12d87c909be4127d835dd038e379675e7ed8b026e3",
     "view_changeset.py": "e714bfe80ef30b90cc78563dfccc92fbe658837d817b8cd2243c8e1276f9cae1",
     "ynab_client.py": "c2a132a89eacfddcb14121a77e599043a49f3855e674c181daa2a916bff0e855"
   },
-  "indexed_at_commit": "f169a5b8d9cf4ee511c1bd599817815cf09e1083",
-  "indexed_at_timestamp": "2026-07-22T23:59:04.582196869+00:00",
+  "indexed_at_commit": "062f62bd12c01d4a80a9e4cf033997a315b29780",
+  "indexed_at_timestamp": "2026-07-23T00:08:12.430664545+00:00",
   "schema_version": 3,
   "stats": {
-    "total_edges": 2367,
+    "total_edges": 2368,
     "total_files": 91,
-    "total_nodes": 1724
+    "total_nodes": 1725
   },
   "vexp_version": "2.2.4"
 }

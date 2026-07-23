@@ -56,6 +56,9 @@ def _amount_dollars_str(txn: dict) -> str | None:
     )
 
 
+NEAR_MISS_DATE_WINDOW_DAYS = 14
+
+
 def _closest_unmatched_shipment(txn: dict, unmatched_shipments: list) -> dict | None:
     """Find the unmatched shipment closest to `txn` by amount, tiebreaking on date.
 
@@ -65,7 +68,13 @@ def _closest_unmatched_shipment(txn: dict, unmatched_shipments: list) -> dict | 
     themselves went unmatched; a consumed shipment is an exact match to some
     other txn, not a near-miss for this one.
 
-    Returns None if there are no unmatched shipments or the txn has no date.
+    Candidates outside NEAR_MISS_DATE_WINDOW_DAYS are excluded before ranking
+    by amount — on a large dump, an amount-only match can be weeks or months
+    away and is more misleading than useful (issue found via a real dump with
+    ~2900 shipments: closest-by-amount picks landed 15-68 days out).
+
+    Returns None if there are no unmatched shipments, the txn has no date, or
+    none of the unmatched shipments fall within the date window.
     """
     if not unmatched_shipments:
         return None
@@ -80,18 +89,25 @@ def _closest_unmatched_shipment(txn: dict, unmatched_shipments: list) -> dict | 
         return None
     txn_amount = abs(Decimal(milliunits)) / Decimal(1000)
 
-    def _distance(shipment):
-        amount_delta = abs(txn_amount - shipment.total_amount)
-        date_delta = abs((shipment.ship_date - txn_date).days) if shipment.ship_date else 999999
-        return (amount_delta, date_delta)
+    def _date_delta_days(shipment):
+        if shipment.ship_date is None:
+            return None
+        return abs((shipment.ship_date - txn_date).days)
 
-    closest = min(unmatched_shipments, key=_distance)
+    in_window = [
+        s for s in unmatched_shipments
+        if (d := _date_delta_days(s)) is not None and d <= NEAR_MISS_DATE_WINDOW_DAYS
+    ]
+    if not in_window:
+        return None
+
+    closest = min(in_window, key=lambda s: (abs(txn_amount - s.total_amount), _date_delta_days(s)))
     amount_delta = abs(txn_amount - closest.total_amount)
-    date_delta = (closest.ship_date - txn_date).days if closest.ship_date else None
+    date_delta = (closest.ship_date - txn_date).days
 
     return {
         "order_id": closest.order_id,
-        "ship_date": closest.ship_date.isoformat() if closest.ship_date else None,
+        "ship_date": closest.ship_date.isoformat(),
         "amount_dollars": format(closest.total_amount, "f"),
         "amount_delta_dollars": format(amount_delta, "f"),
         "date_delta_days": date_delta,

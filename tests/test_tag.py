@@ -1045,6 +1045,68 @@ class TestWriteUnifiedChangeset:
         unmatched_list = json.loads(json_path.read_text())["amazon"]["unmatched_ynab"]
         assert unmatched_list[0]["closest_shipment"] is None
 
+    def test_write_unified_changeset_unmatched_amazon_ignores_dollar_close_but_far_away_shipment(self, tmp_path):
+        """closest_shipment must not suggest a shipment weeks/months away just
+        because its amount happens to be dollar-close.
+
+        Regression: on a real multi-thousand-shipment dump, the naive
+        amount-first/date-tiebreak distance picked shipments 15-68 days away
+        because nothing closer in time happened to be closer in price. A
+        near-miss hint that's temporally implausible is actively misleading.
+        """
+        from tag import write_unified_changeset
+        from amazon_matcher import AmazonShipment, MatchResult
+        from datetime import datetime
+
+        out_dir = tmp_path / "changesets"
+        now = datetime(2026, 4, 27, 14, 30, 0)
+
+        far_but_dollar_close = AmazonShipment(
+            order_id="111-FAR",
+            ship_date=datetime(2026, 5, 15).date(),  # 46 days from txn date
+            payment_method_raw="Visa - XXXX",
+            payment_method_last4="0804",
+            is_split_tender=False,
+            currency="USD",
+            item_subtotal=Decimal("25.00"),
+            tax=Decimal("0.05"),
+            shipping=Decimal("0"),
+            discounts=Decimal("0"),
+            total_amount=Decimal("25.05"),
+            items=[],
+            shipment_status="Shipped",
+        )
+
+        unmatched = [
+            (
+                {"id": "t1", "payee_name": "Amazon", "date": "2026-03-30", "amount": -25050, "memo": None},
+                "no matching shipment in dump",
+            ),
+        ]
+        match_result = MatchResult(
+            matched=[], unmatched_ynab=[], unmatched_shipments=[far_but_dollar_close], excluded_shipments=[], parse_errors=[],
+        )
+
+        _, json_path = write_unified_changeset(
+            flat_results=[],
+            skipped=[],
+            unmatched_amazon=unmatched,
+            split_proposals=[],
+            source_txns=[],
+            budget_id="b123",
+            since_date="2026-03-28",
+            days_back=30,
+            K=312,
+            confidence_threshold=0.0096,
+            dump_path=None,
+            out_dir=out_dir,
+            match_result=match_result,
+            now=now,
+        )
+
+        unmatched_list = json.loads(json_path.read_text())["amazon"]["unmatched_ynab"]
+        assert unmatched_list[0]["closest_shipment"] is None
+
     def test_write_unified_changeset_markdown_unmatched_shows_memo_and_closest_shipment(self, tmp_path):
         """Markdown 'Unmatched Amazon txns' section shows memo and near-miss hint per txn."""
         from tag import write_unified_changeset
