@@ -1,4 +1,4 @@
-"""Interactive review of an enrich-changeset before /confirm-apply.
+"""Interactive review of an enrich-changeset before /apply.
 
 Walks the user through risky proposals (Amazon splits, fuzzy/Claude tier
 non-Amazon proposals), bulk-accepts the safe ones (history tier), and writes
@@ -44,7 +44,7 @@ def _newest_changeset_json() -> Path:
     candidates = [c for c in candidates if not c.stem.endswith("-reviewed")]
     if not candidates:
         raise FileNotFoundError(
-            "no enrich-changeset-*.json found in data/cache/. Run /enrich-run first."
+            "no enrich-changeset-*.json found in data/cache/. Run /tag first."
         )
     return candidates[0]
 
@@ -539,7 +539,7 @@ def run_review(
     _print_summary(changeset)
     print()
     print(f"Reviewed changeset written: {sidecar_path}")
-    print(f"Next: /confirm-apply (or `uv run python apply.py {sidecar_path} --yes`)")
+    print(f"Next: /apply (or `uv run python apply.py {sidecar_path} --yes`)")
     return 0
 
 

@@ -201,7 +201,7 @@ def _newest_changeset_md() -> Path:
     )
     if not candidates:
         raise FileNotFoundError(
-            "no enrich-changeset-*.md found in data/cache/. Run /enrich-run first."
+            "no enrich-changeset-*.md found in data/cache/. Run /tag first."
         )
     return candidates[0]
 

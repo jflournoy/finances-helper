@@ -1,11 +1,11 @@
 ---
 allowed-tools: [Bash]
-description: Interactively review the latest enrich-changeset before /confirm-apply (no YNAB writes)
+description: Interactively review the latest enrich-changeset before /apply (no YNAB writes)
 ---
 
-# /confirm-review
+# /decide
 
-Prepare the interactive review of the latest enrich-changeset, hand the run off to the user's terminal, then pre-flight the resulting sidecar so `/confirm-apply` can write to YNAB cleanly.
+Prepare the interactive review of the latest enrich-changeset, hand the run off to the user's terminal, then pre-flight the resulting sidecar so `/apply` can write to YNAB cleanly.
 
 `decide.py` is **deliberately interactive in your terminal** — it opens a styled HTML view of the changeset in the browser, then prompts proposal-by-proposal for the risky tiers (Amazon splits, fuzzy/Claude/amazon-wf). History-tier proposals get one bulk-accept prompt. You can accept, recategorize, or skip each item; quitting mid-walk saves partial state for resume. It will not run cleanly inside this assistant session — it needs a real TTY, and the human-in-the-loop decisions need to be yours.
 
@@ -22,7 +22,7 @@ This is a **two-phase, user-driven workflow**. Do not try to run `decide.py` you
 1. Resolve the input changeset path:
    - If `$ARGUMENTS` is non-empty, use it.
    - Otherwise: `ls -t data/cache/enrich-changeset-*.json 2>/dev/null | grep -v -- '-reviewed.json' | head -1`.
-   - If none exists, print "No changeset found. Run `/enrich-run` first." and stop.
+   - If none exists, print "No changeset found. Run `/tag` first." and stop.
 
 2. Print the exact command for the user to run in their own terminal, plus a short explanation. Example output:
 
@@ -50,7 +50,7 @@ When the user says they're done (or you see a fresh `-reviewed.json` appear):
    ```
 
 3. Pre-flight exit handling:
-   - Exit 0: print "Reviewed and pre-flighted. Run `/confirm-apply` to write to YNAB."
+   - Exit 0: print "Reviewed and pre-flighted. Run `/apply` to write to YNAB."
    - Exit 2: `YNAB_SANDBOX_MODE=1` is set. Tell the user to `unset YNAB_SANDBOX_MODE` (or comment the line in `.env`) and retry. Do NOT strip it from the subprocess env — sandbox mode is a deliberate safety setting.
    - Exit 3: pre-flight failure (missing env, bad token, malformed changeset). Surface stderr verbatim.
 

@@ -48,7 +48,7 @@ Every write to YNAB goes through an explicit human review step. Nothing is writt
 The Amazon + categorization pipeline is a three-step flow. Each step has a thin
 slash-command wrapper (shown in parentheses) and an underlying CLI you can run directly.
 
-### 1. Enrich & categorize  (`/enrich-run`)
+### 1. Enrich & categorize  (`/tag`)
 
 ```bash
 uv run python tag.py --days 30
@@ -78,7 +78,7 @@ they are **not** regenerated on every run:
 This **does not write to YNAB**. It produces a reviewable changeset under
 `data/cache/enrich-changeset-*.json` (+ a Markdown summary).
 
-### 2. Review  (`/confirm-review`)
+### 2. Review  (`/decide`)
 
 ```bash
 uv run python decide.py data/cache/enrich-changeset-<timestamp>.json
@@ -89,7 +89,7 @@ risky proposals (Amazon splits, fuzzy/Claude matches) one at a time — accept,
 recategorize, or skip. History-tier matches get a single bulk-accept. Your decisions
 are saved to a `-reviewed.json` sidecar. Quitting mid-walk saves partial progress.
 
-### 3. Apply  (`/confirm-apply`)
+### 3. Apply  (`/apply`)
 
 ```bash
 uv run python apply.py data/cache/enrich-changeset-<timestamp>-reviewed.json --dry-run --yes
@@ -151,7 +151,7 @@ finances-helper/
 ├── view_changeset.py       # Changeset inspection helper
 ├── scripts/
 │   └── spend_advice.py     # Spending-advice CLI
-├── .claude/commands/       # Slash-command wrappers (/enrich-run, /confirm-*, /spend-advice, …)
+├── .claude/commands/       # Slash-command wrappers (/tag, /decide, /apply, /spend-advice, …)
 ├── tests/                  # Unit + integration tests (fixtures in data/fixtures/)
 └── data/
     ├── imports/            # Drop Amazon order-history zips here

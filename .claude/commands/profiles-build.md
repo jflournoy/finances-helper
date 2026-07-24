@@ -51,7 +51,7 @@ This makes Claude calls (one batched call per build) and writes only to
    - On other non-zero: print the exit code and surface stderr.
 
 5. Print a one-line reminder: "Profiles now inform both Claude tiers on the next
-   `/enrich-run`. Re-run `/profiles-build refresh` after you override Claude's
+   `/tag`. Re-run `/profiles-build refresh` after you override Claude's
    guesses during review."
 
 ## Why echo the command
@@ -62,6 +62,6 @@ invocation before running it so the user can run it themselves next time.
 ## Do NOT
 
 - Pass any flag other than `--rebuild-profiles` / `--refresh-profiles`.
-- Run a full `/enrich-run` or write to YNAB — this only builds the profile store.
+- Run a full `/tag` or write to YNAB — this only builds the profile store.
 - Modify any file other than via the command itself (it writes
   `data/cache/category_profiles.json` and may refresh the payee cache).
