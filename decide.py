@@ -26,6 +26,7 @@ from pathlib import Path
 from dotenv import load_dotenv
 from thefuzz import process as fuzz_process
 
+from amazon_matcher import extract_order_history_csv, parse_order_history
 from categorizer import load_payee_cache, record_categorization, save_payee_cache
 from changeset_review import REVIEW_SKIP_SENTINEL_PREFIX, is_review_skip
 from view_changeset import render_and_open
@@ -120,6 +121,56 @@ def _pick_category(categories: list[dict], current_name: str | None) -> dict | N
             print("  invalid pick")
             continue
         return by_name[matches[int(choice) - 1][0]]
+
+
+def _build_shipment_item_index(dump_path: str | None) -> tuple[dict, str | None]:
+    """Parse an Amazon dump once into a {(order_id, ship_date_iso): AmazonShipment} index.
+
+    Used to look up item-level detail for a near-miss candidate without
+    re-parsing the (potentially 10k+ row) dump per transaction.
+
+    Args:
+        dump_path: changeset["metadata"]["dump_path"], as recorded when the
+            changeset was built. May no longer exist (e.g. renamed/deleted).
+
+    Returns:
+        (index, warning). index is {} if dump_path is missing/unreadable —
+        callers must handle a miss by falling back to order_id/ship_date-only
+        display, not by silently trying a different dump (a re-downloaded
+        dump can have different contents than what the changeset was built
+        against, which would mislead a real-money categorization decision).
+        warning is a user-facing string explaining why the index is empty,
+        or None if it built successfully.
+    """
+    if not dump_path:
+        return {}, "changeset has no recorded dump_path — showing order IDs only."
+
+    path = Path(dump_path)
+    if not path.exists():
+        return {}, f"dump {dump_path} (recorded in this changeset) no longer exists — showing order IDs only."
+
+    try:
+        csv_text = extract_order_history_csv(path)
+        shipments, _parse_errors = parse_order_history(csv_text)
+    except Exception as e:
+        return {}, f"could not parse dump {dump_path}: {e} — showing order IDs only."
+
+    index = {
+        (s.order_id, s.ship_date.isoformat() if s.ship_date else None): s
+        for s in shipments
+    }
+    return index, None
+
+
+def _amazon_order_url(order_id: str) -> str:
+    """Best-effort link to an Amazon order's detail page.
+
+    Not load-bearing: Amazon's URL format has changed before and isn't
+    verified here. Callers must also print the raw order_id so the user can
+    fall back to pasting it into Amazon's own order search if this link is
+    stale.
+    """
+    return f"https://www.amazon.com/gp/css/order-details?orderID={order_id}"
 
 
 def _prompt_choice(prompt: str, valid: str) -> str:
@@ -293,6 +344,87 @@ def _walk_non_amazon(
             _mark_recategorized(p, new_cat)
             print(f"  → {new_cat['name']}")
             _maybe_prompt_boost(p, enabled=boost_enabled)
+    return None
+
+
+def _walk_unmatched_near_misses(
+    changeset: dict,
+    categories: list[dict],
+    item_index: dict,
+    item_index_warning: str | None,
+) -> str | None:
+    """Walk unmatched Amazon txns that have a near-miss shipment candidate.
+
+    Only entries with a non-null closest_shipment are shown — an unmatched
+    txn with no candidate in the date window has nothing useful to offer
+    here. For each: show the txn, the candidate shipment and its items (if
+    the dump could be parsed), and let the user open the order in Amazon,
+    categorize the txn directly (written into non_amazon.proposals so
+    apply.py's existing flat-proposal path PATCHes it), or skip.
+
+    Skipped entries get a `review` block (same shape as the other walks) so
+    resume doesn't re-prompt for them. Returns 'quit' if the user quits,
+    else None.
+    """
+    unmatched = changeset["amazon"]["unmatched_ynab"]
+    candidates = [u for u in unmatched if u.get("closest_shipment") and not _has_review_decision(u)]
+    if not candidates:
+        return None
+
+    print()
+    print(f"=== Unmatched Amazon txns with a near-miss candidate ({len(candidates)}) ===")
+    if item_index_warning:
+        print(f"  Note: {item_index_warning}")
+
+    for i, u in enumerate(candidates, start=1):
+        closest = u["closest_shipment"]
+        print()
+        print(f"[{i}/{len(candidates)}] {u['payee_name']}  ${u['amount_dollars']}  {u['date']}")
+        print(
+            f"  Near-miss: order {closest['order_id']}, shipped {closest['ship_date']}, "
+            f"${closest['amount_dollars']} (Δ${closest['amount_delta_dollars']}, "
+            f"Δ{closest['date_delta_days']}d)"
+        )
+        shipment = item_index.get((closest["order_id"], closest["ship_date"]))
+        if shipment is not None and shipment.items:
+            print("  Items:")
+            for item in shipment.items:
+                print(f"    - {item.product_name}")
+        print(f"  Open in Amazon: {_amazon_order_url(closest['order_id'])}")
+
+        choice = _prompt_choice("[o]pen  [c]ategorize  [s]kip  [q]uit", "ocsq")
+        if choice == "q":
+            return "quit"
+        if choice == "o":
+            import webbrowser
+            webbrowser.open(_amazon_order_url(closest["order_id"]))
+            choice = _prompt_choice("  [c]ategorize  [s]kip  [q]uit", "csq")
+            if choice == "q":
+                return "quit"
+        if choice == "s":
+            _mark_skipped(u)
+            continue
+        if choice == "c":
+            new_cat = _pick_category(categories, None)
+            if new_cat is None:
+                print("  cancelled — leaving unreviewed; come back later")
+                continue
+            proposal = {
+                "transaction_id": u["transaction_id"],
+                "payee_name": u["payee_name"],
+                "amount_dollars": u["amount_dollars"],
+                "date": u["date"],
+                "category_id": new_cat["id"],
+                "category_name": new_cat["name"],
+                "tier": "near-miss",
+                "confidence": 1.0,
+                "rationale": f"user-confirmed near-miss match to Amazon order {closest['order_id']}",
+                "prior_strength": None,
+            }
+            _mark_accepted(proposal)
+            changeset["non_amazon"]["proposals"].append(proposal)
+            unmatched.remove(u)
+            print(f"  → {new_cat['name']}")
     return None
 
 
@@ -472,6 +604,10 @@ def run_review(
     splits = changeset["amazon"]["proposed_splits"]
     proposals = changeset["non_amazon"]["proposals"]
     claude, fuzzy, history, other = _partition_non_amazon(proposals)
+    unmatched = changeset["amazon"]["unmatched_ynab"]
+    near_miss_count = sum(
+        1 for u in unmatched if u.get("closest_shipment") and not _has_review_decision(u)
+    )
 
     print()
     print("Plan:")
@@ -480,6 +616,7 @@ def run_review(
     print(f"  Fuzzy-tier to walk:           {sum(1 for p in fuzzy if not _has_review_decision(p))} / {len(fuzzy)}")
     print(f"  Other-tier to walk:           {sum(1 for p in other if not _has_review_decision(p))} / {len(other)}")
     print(f"  History-tier to bulk-accept:  {sum(1 for p in history if not _has_review_decision(p))} / {len(history)}")
+    print(f"  Unmatched near-misses to try: {near_miss_count} / {len(unmatched)}")
     print()
     proceed = input("Proceed? [Y/n]: ").strip().lower()
     if proceed and proceed not in ("y", "yes"):
@@ -525,6 +662,24 @@ def run_review(
                 history, "History-tier (walk-through)", categories,
                 boost_enabled=boost_enabled,
             )
+            if result == "quit":
+                _save_reviewed(changeset, sidecar_path)
+                print(f"Saved partial state to {sidecar_path}")
+                return 0
+
+    if near_miss_count:
+        print()
+        print(f"{near_miss_count} unmatched Amazon txn(s) have a near-miss shipment candidate.")
+        choice = _prompt_choice("Try to match near misses?  [y]es  [n]o  [q]uit", "ynq")
+        if choice == "q":
+            _save_reviewed(changeset, sidecar_path)
+            print(f"Saved partial state to {sidecar_path}")
+            return 0
+        if choice == "y":
+            item_index, item_index_warning = _build_shipment_item_index(
+                changeset.get("metadata", {}).get("dump_path")
+            )
+            result = _walk_unmatched_near_misses(changeset, categories, item_index, item_index_warning)
             if result == "quit":
                 _save_reviewed(changeset, sidecar_path)
                 print(f"Saved partial state to {sidecar_path}")

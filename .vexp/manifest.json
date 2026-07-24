@@ -43,7 +43,7 @@
     "categorizer.py": "8f5b3deabec73d1535f0ca74ac7b20a450029f5f5263c773be5594c7f05d4165",
     "category_profiles.py": "b283bb190df576a5bdca4ee70d0fdd826a805061a860027d9847729aef7eab06",
     "changeset_review.py": "59e0b6a1cba188a0aef0f8c36cc9bc532c9eee97a134692cfcb54642d8d6c1f9",
-    "decide.py": "64e27d65cfc7ebd2294151476e8549073fdc72c8c3527bb665c3cf4ede2535b2",
+    "decide.py": "ba4b2c5413f5e339104efc24a1ecd7cdf63230e44ef2c8ef081c4789c2080043",
     "docs/reflective-advisor-plan.md": "30cd30f079cfe001d45fbd930247e4ec92e95779f3811fac56ef6c76a971ae1e",
     "insights.py": "1ecaacf08d537a65c073e378a47c87075452bef9117790aacbbe17eae27e612a",
     "payee_resolver.py": "d7022d3718f2bc1fb54ac68652b2454aef5b801a1a45875fe2536015113aebf5",
@@ -92,13 +92,13 @@
     "view_changeset.py": "363bbcaeda6eae7c819c24a78c5d595ab7c2685f560e84568d833ad59214b9d2",
     "ynab_client.py": "c2a132a89eacfddcb14121a77e599043a49f3855e674c181daa2a916bff0e855"
   },
-  "indexed_at_commit": "b0ba3dc06d9c155b3cba9f8b73ba4c5b0bf2e503",
-  "indexed_at_timestamp": "2026-07-24T18:25:40.984760933+00:00",
+  "indexed_at_commit": "0476ec5965058a49427365843e3e67242a2ccfc2",
+  "indexed_at_timestamp": "2026-07-24T18:59:45.398438864+00:00",
   "schema_version": 3,
   "stats": {
-    "total_edges": 2396,
+    "total_edges": 2320,
     "total_files": 91,
-    "total_nodes": 1738
+    "total_nodes": 1741
   },
   "vexp_version": "2.2.4"
 }

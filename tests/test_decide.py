@@ -314,3 +314,201 @@ def test_apply_boosts_accumulates_on_existing_entry(tmp_path):
     saved = json.loads(cache_path.read_text())
     assert saved["starbucks"]["total"] == 3 + decide.BOOST_STRENGTH_NORMAL
     assert saved["starbucks"]["categories"]["cat-dining"]["count"] == 3 + decide.BOOST_STRENGTH_NORMAL
+
+
+# ============================================================================
+# Near-miss walk: order URL, dump item index, and the interactive walk
+# ============================================================================
+
+
+def _make_unmatched(**kw) -> dict:
+    base = {
+        "transaction_id": "tx-unmatched-1",
+        "payee_name": "Amazon",
+        "amount_dollars": "-193.92",
+        "date": "2026-06-29",
+        "memo": None,
+        "reason": "no matching shipment in dump",
+        "closest_shipment": {
+            "order_id": "111-0781058-6001837",
+            "ship_date": "2026-06-29",
+            "amount_dollars": "196.70",
+            "amount_delta_dollars": "2.78",
+            "date_delta_days": 0,
+        },
+    }
+    base.update(kw)
+    return base
+
+
+def test_amazon_order_url_contains_order_id():
+    url = decide._amazon_order_url("111-0781058-6001837")
+    assert "111-0781058-6001837" in url
+    assert url.startswith("https://")
+
+
+def _write_sample_dump_zip(tmp_path: Path) -> Path:
+    from zipfile import ZipFile
+
+    csv_text = Path("data/fixtures/amazon_order_history_sample.csv").read_text()
+    zip_path = tmp_path / "amazon-order-history-2024-01-01.zip"
+    with ZipFile(zip_path, "w") as zf:
+        zf.writestr("Your Amazon Orders/Order History.csv", csv_text)
+    return zip_path
+
+
+def test_build_shipment_item_index_missing_dump_path_returns_warning():
+    index, warning = decide._build_shipment_item_index(None)
+    assert index == {}
+    assert warning is not None
+    assert "no recorded dump_path" in warning
+
+
+def test_build_shipment_item_index_missing_file_returns_warning(tmp_path):
+    missing = tmp_path / "does-not-exist.zip"
+    index, warning = decide._build_shipment_item_index(str(missing))
+    assert index == {}
+    assert warning is not None
+    assert "no longer exists" in warning
+
+
+def test_build_shipment_item_index_parses_real_dump(tmp_path):
+    zip_path = _write_sample_dump_zip(tmp_path)
+    index, warning = decide._build_shipment_item_index(str(zip_path))
+    assert warning is None
+    assert len(index) > 0
+    # Sample fixture's first order: 111-0000001-0000001, shipped 2024-01-16
+    key = ("111-0000001-0000001", "2024-01-16")
+    assert key in index
+    assert index[key].items[0].product_name == "Test Widget"
+
+
+def test_walk_unmatched_near_misses_skips_entries_without_closest_shipment():
+    """Only entries with a near-miss candidate are shown/walkable."""
+    changeset = {
+        "amazon": {
+            "unmatched_ynab": [_make_unmatched(closest_shipment=None)],
+            "proposed_splits": [],
+        },
+        "non_amazon": {"proposals": []},
+    }
+    result = decide._walk_unmatched_near_misses(changeset, categories=[], item_index={}, item_index_warning=None)
+    assert result is None
+    assert len(changeset["amazon"]["unmatched_ynab"]) == 1
+    assert len(changeset["non_amazon"]["proposals"]) == 0
+
+
+def test_walk_unmatched_near_misses_categorize_moves_to_non_amazon_proposals(monkeypatch):
+    u = _make_unmatched()
+    changeset = {
+        "amazon": {"unmatched_ynab": [u], "proposed_splits": []},
+        "non_amazon": {"proposals": []},
+    }
+    monkeypatch.setattr(decide, "_prompt_choice", lambda *a, **k: "c")
+    monkeypatch.setattr(decide, "_pick_category", lambda *a, **k: {"id": "cat-electronics", "name": "Electronics"})
+
+    result = decide._walk_unmatched_near_misses(changeset, categories=[], item_index={}, item_index_warning=None)
+
+    assert result is None
+    assert changeset["amazon"]["unmatched_ynab"] == []
+    proposals = changeset["non_amazon"]["proposals"]
+    assert len(proposals) == 1
+    proposal = proposals[0]
+    assert proposal["transaction_id"] == "tx-unmatched-1"
+    assert proposal["category_id"] == "cat-electronics"
+    assert proposal["category_name"] == "Electronics"
+    assert proposal["tier"] == "near-miss"
+    assert proposal["confidence"] == 1.0
+    assert proposal["amount_dollars"] == "-193.92"
+    assert "111-0781058-6001837" in proposal["rationale"]
+    assert decide._has_review_decision(proposal)
+
+
+def test_walk_unmatched_near_misses_categorize_cancel_leaves_unmatched(monkeypatch):
+    """Bailing out of the category picker leaves the entry unreviewed for next time."""
+    u = _make_unmatched()
+    changeset = {
+        "amazon": {"unmatched_ynab": [u], "proposed_splits": []},
+        "non_amazon": {"proposals": []},
+    }
+    monkeypatch.setattr(decide, "_prompt_choice", lambda *a, **k: "c")
+    monkeypatch.setattr(decide, "_pick_category", lambda *a, **k: None)
+
+    result = decide._walk_unmatched_near_misses(changeset, categories=[], item_index={}, item_index_warning=None)
+
+    assert result is None
+    assert changeset["amazon"]["unmatched_ynab"] == [u]
+    assert changeset["non_amazon"]["proposals"] == []
+    assert not decide._has_review_decision(u)
+
+
+def test_walk_unmatched_near_misses_skip_marks_reviewed_without_moving(monkeypatch):
+    u = _make_unmatched()
+    changeset = {
+        "amazon": {"unmatched_ynab": [u], "proposed_splits": []},
+        "non_amazon": {"proposals": []},
+    }
+    monkeypatch.setattr(decide, "_prompt_choice", lambda *a, **k: "s")
+
+    result = decide._walk_unmatched_near_misses(changeset, categories=[], item_index={}, item_index_warning=None)
+
+    assert result is None
+    assert changeset["amazon"]["unmatched_ynab"] == [u]
+    assert decide._has_review_decision(u)
+    assert changeset["non_amazon"]["proposals"] == []
+
+
+def test_walk_unmatched_near_misses_quit_returns_quit(monkeypatch):
+    u = _make_unmatched()
+    changeset = {
+        "amazon": {"unmatched_ynab": [u], "proposed_splits": []},
+        "non_amazon": {"proposals": []},
+    }
+    monkeypatch.setattr(decide, "_prompt_choice", lambda *a, **k: "q")
+
+    result = decide._walk_unmatched_near_misses(changeset, categories=[], item_index={}, item_index_warning=None)
+
+    assert result == "quit"
+    assert not decide._has_review_decision(u)
+
+
+def test_walk_unmatched_near_misses_already_reviewed_entries_are_skipped():
+    """A previously skipped/categorized entry doesn't re-prompt on resume."""
+    u = _make_unmatched()
+    decide._mark_skipped(u)
+    changeset = {
+        "amazon": {"unmatched_ynab": [u], "proposed_splits": []},
+        "non_amazon": {"proposals": []},
+    }
+    # No prompt monkeypatch — if the walk tried to prompt, this would fail
+    # since input() isn't available in the test environment.
+    result = decide._walk_unmatched_near_misses(changeset, categories=[], item_index={}, item_index_warning=None)
+    assert result is None
+
+
+def test_near_miss_proposal_schema_satisfies_apply_load_changeset(tmp_path, monkeypatch):
+    """The synthetic near-miss proposal must satisfy apply.py's real validation
+    and produce a valid category-only PATCH body — the integration seam this
+    feature depends on.
+    """
+    import apply
+
+    u = _make_unmatched()
+    changeset = {
+        "version": 1,
+        "kind": "enrich-changeset",
+        "metadata": {"timestamp": "2026-07-23T00:00:00", "budget_id": "b123"},
+        "amazon": {"unmatched_ynab": [u], "proposed_splits": []},
+        "non_amazon": {"proposals": []},
+    }
+    monkeypatch.setattr(decide, "_prompt_choice", lambda *a, **k: "c")
+    monkeypatch.setattr(decide, "_pick_category", lambda *a, **k: {"id": "cat-electronics", "name": "Electronics"})
+    decide._walk_unmatched_near_misses(changeset, categories=[], item_index={}, item_index_warning=None)
+
+    sidecar_path = tmp_path / "changeset-reviewed.json"
+    sidecar_path.write_text(json.dumps(changeset))
+
+    loaded = apply.load_changeset(sidecar_path)
+    proposal = loaded["non_amazon"]["proposals"][0]
+    body = apply.flat_proposal_to_patch_body(proposal)
+    assert body == {"category_id": "cat-electronics"}
