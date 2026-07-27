@@ -14,7 +14,7 @@ from ynab_client import YNABClient, filter_uncategorized_writable
 from categorizer import (
     load_payee_cache, save_payee_cache, build_cache_from_transactions,
     count_categories_from_transactions, count_categories, compute_confidence_threshold,
-    filter_categories_by_usage, categorize_transactions, update_cache_from_claude_results,
+    filter_categories_by_usage, categorize_transactions,
 )
 from amazon_matcher import (
     is_amazon_payee, is_whole_foods_payee, find_latest_dump, extract_order_history_csv,
@@ -854,10 +854,6 @@ def main(argv=None):
         amazon_matches=match_result,
         profiles=profiles,
     )
-
-    # Update cache with Claude-tier results
-    update_cache_from_claude_results(cache, writable, flat_results)
-    save_payee_cache(cache)
 
     # Write unified changeset
     md_path, json_path = write_unified_changeset(

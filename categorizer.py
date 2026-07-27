@@ -1372,26 +1372,11 @@ def main():
         reason = f" ({result.rationale})" if result.tier == "claude" else ""
         print(f"[{tier_label}] {result.transaction_id} -> {result.category_name} (confidence: {conf}){reason}")
 
-    # Update cache with new payees from Claude
-    for result in results:
-        if result.tier == "claude":
-            txn = next((t for t in uncategorized if t["id"] == result.transaction_id), None)
-            if txn:
-                import_names = []
-                for field in ("import_payee_name", "import_payee_name_original"):
-                    val = txn.get(field)
-                    if val:
-                        import_names.append(val)
-                record_categorization(
-                    cache, txn["payee_name"],
-                    result.category_id, result.category_name,
-                    source="claude",
-                    prior_strength=result.prior_strength or 1,
-                    import_names=import_names or None,
-                )
-
-    save_payee_cache(cache)
-    print(f"\nCache updated with {sum(1 for r in results if r.tier == 'claude')} new payees")
+    # Note: the payee cache is intentionally NOT updated here. Writing Claude's
+    # proposed (unconfirmed) prior_strength guesses to the cache before any
+    # human review produces misleading "history" hits for payees seen only
+    # once. The cache is updated from YNAB truth only after a categorization
+    # is actually applied (see apply.py's rebuild-from-YNAB step).
 
 
 if __name__ == "__main__":

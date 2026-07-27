@@ -914,6 +914,63 @@ def test_apply_does_not_record_already_applied_or_review_skipped(apply_changeset
         assert dominant_item_category(profiles, "Organic Peanut Butter") == (None, None)
 
 
+def test_apply_rebuilds_payee_cache_from_ynab_after_apply(apply_changeset_path, mock_client, tmp_path):
+    """After a successful apply, the payee cache is rebuilt from YNAB truth —
+    not incrementally accumulated from proposals — so a payee bought once
+    always shows a real count of one."""
+    from apply import apply_changeset
+    from categorizer import load_payee_cache
+
+    mock_client.get_transactions.return_value = (
+        [{"id": "t1", "payee_name": "VitalSource", "category_id": "cccccccc-0000-0000-0000-000000000001", "category_name": "Groceries"}],
+        0,
+    )
+
+    cache_path = tmp_path / "payee_lookup.json"
+    apply_changeset(
+        apply_changeset_path, mock_client, "budget-1",
+        report_dir=tmp_path, profiles_path=tmp_path / "category_profiles.json",
+        payee_cache_path=cache_path,
+    )
+
+    assert cache_path.exists()
+    cache = load_payee_cache(str(cache_path))
+    assert cache["vitalsource"]["total"] == 1
+    mock_client.get_transactions.assert_called_once_with("budget-1")
+
+
+def test_apply_dry_run_does_not_rebuild_payee_cache(apply_changeset_path, mock_client, tmp_path):
+    """Dry runs apply nothing, so the payee cache must not be touched."""
+    from apply import apply_changeset
+
+    cache_path = tmp_path / "payee_lookup.json"
+    apply_changeset(
+        apply_changeset_path, mock_client, "budget-1",
+        dry_run=True, report_dir=tmp_path, payee_cache_path=cache_path,
+    )
+    assert not cache_path.exists()
+    mock_client.get_transactions.assert_not_called()
+
+
+def test_apply_cache_rebuild_failure_does_not_crash_apply(apply_changeset_path, mock_client, tmp_path, caplog):
+    """A payee-cache rebuild failure must never mask a successful YNAB apply."""
+    import logging
+    from apply import apply_changeset
+
+    mock_client.get_transactions.side_effect = RuntimeError("boom")
+
+    cache_path = tmp_path / "payee_lookup.json"
+    with caplog.at_level(logging.WARNING, logger="apply"):
+        report = apply_changeset(
+            apply_changeset_path, mock_client, "budget-1",
+            report_dir=tmp_path, payee_cache_path=cache_path,
+        )
+
+    assert len(report.applied) > 0
+    assert not cache_path.exists()
+    assert any("Failed to rebuild payee cache" in r.message for r in caplog.records)
+
+
 def test_apply_learning_failure_does_not_crash_apply(apply_changeset_path, mock_client, tmp_path, caplog):
     """A profile-learning failure must never mask a successful YNAB apply."""
     import logging

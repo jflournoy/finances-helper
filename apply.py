@@ -371,6 +371,7 @@ def apply_changeset(
     rate_limit_floor: int = 5,
     report_dir: Path = Path("data/cache"),
     profiles_path: Path | None = None,
+    payee_cache_path: Path | None = None,
 ) -> ApplyReport:
     """Apply changeset proposals to YNAB.
 
@@ -392,6 +393,12 @@ def apply_changeset(
             CLI (report_dir=data/cache) updates the live store, while tests that
             isolate report_dir to tmp_path automatically isolate profiles too.
             Learning is skipped on dry runs.
+        payee_cache_path: Path to the payee frequency cache. After a successful
+            apply, the cache is rebuilt from YNAB's own categorized transactions
+            (ground truth) rather than incrementally accumulated from proposals —
+            so a payee bought once always shows a count of one, never an inflated
+            guess from an earlier, unconfirmed run. Defaults to
+            ``report_dir / "payee_lookup.json"``. Skipped on dry runs.
 
     Returns:
         ApplyReport with detailed results.
@@ -568,6 +575,33 @@ def apply_changeset(
                 "Failed to update category profiles (%s): %s. YNAB apply "
                 "succeeded; profile learning skipped this run.",
                 prof_path, e,
+            )
+
+    # Rebuild the payee frequency cache from YNAB truth so it reflects only
+    # confirmed, applied categorizations — never a proposed-but-unreviewed
+    # Claude guess. Failures here must never mask a successful YNAB apply,
+    # so we log loudly but do not raise.
+    if applied_amazon_splits or applied_non_amazon:
+        from categorizer import build_cache_from_transactions, save_payee_cache
+
+        cache_path = str(
+            payee_cache_path if payee_cache_path is not None
+            else report_dir / "payee_lookup.json"
+        )
+        try:
+            all_txns, _ = client.get_transactions(budget_id)
+            cache = build_cache_from_transactions(all_txns)
+            save_payee_cache(cache, cache_path)
+            payee_count = sum(1 for k in cache if k != "_version")
+            logger.info(
+                "Payee cache rebuilt from YNAB (%s): %d payees",
+                cache_path, payee_count,
+            )
+        except Exception as e:
+            logger.warning(
+                "Failed to rebuild payee cache (%s): %s. YNAB apply "
+                "succeeded; cache rebuild skipped this run.",
+                cache_path, e,
             )
 
     timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")

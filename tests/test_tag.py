@@ -2674,15 +2674,11 @@ class TestITEnrich:
         assert "Unmatched:" in captured.out, "Assertion #15: unmatched label"
         assert "Changeset:" in captured.out, "Assertion #15: changeset label"
 
-        # Assertion #16: Cache contains entry for novel Claude payee (Novel Store)
+        # Assertion #16: tag.py must NOT write proposed (unconfirmed) Claude-tier
+        # results to the payee cache. Writing here — before any human review —
+        # is what produced misleading "history" hits for payees seen only once.
+        # The cache is only updated later, from YNAB truth, once a categorization
+        # is actually applied (see apply.py).
         cache_path = cache_dir / "payee_lookup.json"
-        assert cache_path.exists(), "Assertion #16: cache file exists"
-        cache_content = json.loads(cache_path.read_text())
-        # Novel Store should have been added by Claude and cached
-        assert "Novel Store" in cache_content or any("novel" in k.lower() for k in cache_content.keys()), \
-            f"Assertion #16: Novel Store or variant in cache (got {list(cache_content.keys())[:5]})"
-
-        # Assertion #17: Cache does NOT contain Amazon item subcategories
-        # (Item-level results should not update payee cache)
-        amazon_item_keys = [k for k in cache_content.keys() if k.startswith("Amazon") and "_item_" in k]
-        assert len(amazon_item_keys) == 0, f"Assertion #17: no Amazon item keys in cache (found {amazon_item_keys})"
+        assert not cache_path.exists(), \
+            f"Assertion #16: tag.py must not write to the payee cache (found {cache_path})"

@@ -1122,7 +1122,6 @@ def test_main_bootstraps_empty_cache(monkeypatch, tmp_path, capsys):
     out = capsys.readouterr().out
     assert "Cache is empty" in out
     assert "Proposed categorizations" in out
-    assert "Cache updated" in out
 
 
 def test_main_full_run_with_existing_cache(monkeypatch, tmp_path, capsys):
@@ -1160,10 +1159,15 @@ def test_main_full_run_with_existing_cache(monkeypatch, tmp_path, capsys):
     out = capsys.readouterr().out
     assert "Proposed categorizations (1 transactions)" in out
     assert "[HISTORY]" in out
-    assert "Cache updated with 0 new payees" in out
 
 
-def test_main_updates_cache_with_claude_results(monkeypatch, tmp_path):
+def test_main_does_not_write_unconfirmed_claude_results_to_cache(monkeypatch, tmp_path):
+    """Claude's proposed (unconfirmed) prior_strength must not land in the cache.
+
+    Writing here, before any human review, previously produced misleading
+    "history" hits for payees seen only once (e.g. a single VitalSource
+    purchase showing up as an established pattern on the next run).
+    """
     monkeypatch.setenv("YNAB_API_TOKEN", "token")
     monkeypatch.setenv("ANTHROPIC_API_KEY", "key")
     monkeypatch.chdir(tmp_path)
@@ -1195,11 +1199,8 @@ def test_main_updates_cache_with_claude_results(monkeypatch, tmp_path):
                 with patch("categorizer.categorize_transactions", return_value=([claude_result], [], [], [])):
                     main()
 
-    # Verify cache was updated with the claude result (v2 format)
     saved_cache = json.loads((cache_dir / "payee_lookup.json").read_text())
-    assert "newplace" in saved_cache
-    assert saved_cache["newplace"]["categories"]["c2"]["name"] == "Dining"
-    assert saved_cache["newplace"]["total"] == 1
+    assert "newplace" not in saved_cache
 
 
 def test_main_triggers_rebuild_on_v1_migration(monkeypatch, tmp_path, capsys):
