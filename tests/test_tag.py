@@ -1165,6 +1165,78 @@ class TestWriteUnifiedChangeset:
         unmatched_list = json.loads(json_path.read_text())["amazon"]["unmatched_ynab"]
         assert unmatched_list[0]["candidate_shipments"] == []
 
+    def test_write_unified_changeset_unmatched_amazon_never_offers_shipment_matched_to_another_txn(self, tmp_path):
+        """A shipment that exactly matches some OTHER transaction must never
+        appear as a near-miss candidate for a different unmatched transaction
+        -- even if its amount happens to be numerically close to that other
+        txn's amount too. Exercises the real match_shipments_to_transactions
+        end-to-end (not a hand-built MatchResult) so this is a true
+        regression test of the matched/unmatched split, not just of
+        candidate filtering logic downstream of it.
+        """
+        from tag import write_unified_changeset
+        from amazon_matcher import AmazonShipment, match_shipments_to_transactions
+        from datetime import datetime
+
+        out_dir = tmp_path / "changesets"
+        now = datetime(2026, 4, 27, 14, 30, 0)
+
+        # This shipment exactly matches txn_a ($50.00, same day) and should
+        # be fully consumed by that match -- never offered to txn_b, even
+        # though txn_b ships/dates identically and is only a few dollars off.
+        claimed_shipment = AmazonShipment(
+            order_id="111-CLAIMED",
+            ship_date=datetime(2026, 6, 29).date(),
+            payment_method_raw="Visa - XXXX",
+            payment_method_last4="0804",
+            is_split_tender=False,
+            currency="USD",
+            item_subtotal=Decimal("50.00"),
+            tax=Decimal("0"),
+            shipping=Decimal("0"),
+            discounts=Decimal("0"),
+            total_amount=Decimal("50.00"),
+            items=[],
+            shipment_status="Shipped",
+        )
+        txn_a = {"id": "txn-a", "date": "2026-06-29", "amount": -50000, "payee_name": "Amazon"}
+        txn_b = {"id": "txn-b", "date": "2026-06-29", "amount": -47000, "payee_name": "Amazon"}
+
+        match_result = match_shipments_to_transactions(
+            [txn_a, txn_b], [claimed_shipment], date_window_days=3
+        )
+        assert len(match_result.matched) == 1
+        assert match_result.matched[0].shipment.order_id == "111-CLAIMED"
+        assert match_result.matched[0].ynab_txn["id"] == "txn-a"
+
+        unmatched_amazon = [(t, r) for t, r in match_result.unmatched_ynab]
+        assert [t["id"] for t, _ in unmatched_amazon] == ["txn-b"]
+
+        _, json_path = write_unified_changeset(
+            flat_results=[],
+            skipped=[],
+            unmatched_amazon=unmatched_amazon,
+            split_proposals=[],
+            source_txns=[],
+            budget_id="b123",
+            since_date="2026-03-28",
+            days_back=30,
+            K=312,
+            confidence_threshold=0.0096,
+            dump_path=None,
+            out_dir=out_dir,
+            match_result=match_result,
+            now=now,
+        )
+
+        unmatched_list = json.loads(json_path.read_text())["amazon"]["unmatched_ynab"]
+        assert len(unmatched_list) == 1
+        assert unmatched_list[0]["transaction_id"] == "txn-b"
+        # The claimed shipment must NOT appear as a candidate for txn-b.
+        candidate_order_ids = [c["order_id"] for c in unmatched_list[0]["candidate_shipments"]]
+        assert "111-CLAIMED" not in candidate_order_ids
+        assert candidate_order_ids == []
+
     def test_write_unified_changeset_unmatched_amazon_no_candidates_when_none_unmatched(self, tmp_path):
         """candidate_shipments is [] when there are no unmatched shipments to compare against."""
         from tag import write_unified_changeset
