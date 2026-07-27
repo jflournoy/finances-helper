@@ -381,10 +381,10 @@ def _walk_unmatched_near_misses(
     offer here. For each: list every candidate (shipped within the matcher's
     date window, not Whole Foods, amount deliberately not used to narrow or
     rank them — see tag.py's _candidate_unmatched_shipments) with its items
-    (if the dump could be parsed), and let the user open one in Amazon,
-    categorize the txn against one of them (written into
-    non_amazon.proposals so apply.py's existing flat-proposal path PATCHes
-    it), or skip.
+    (if the dump could be parsed), and let the user open candidates in
+    Amazon (repeatedly — opening doesn't consume the turn), choose one to
+    categorize the txn against (written into non_amazon.proposals so
+    apply.py's existing flat-proposal path PATCHes it), or skip.
 
     A shipment claimed for one txn is removed from every other txn's
     candidate list for the rest of this walk — it can't be two people's
@@ -421,18 +421,18 @@ def _walk_unmatched_near_misses(
                 for item in shipment.items:
                     print(f"       - {item.product_name}")
 
-        choice = _prompt_choice("[o]pen a candidate  [c]ategorize against one  [s]kip  [q]uit", "ocsq")
-        if choice == "q":
-            return "quit"
-        if choice == "o":
-            pick = _prompt_choice(
-                f"  which candidate to open (1-{len(candidates)})",
-                "".join(str(n) for n in range(1, len(candidates) + 1)),
-            )
-            webbrowser.open(_amazon_order_url(candidates[int(pick) - 1]["order_id"]))
-            choice = _prompt_choice("  [c]ategorize  [s]kip  [q]uit", "csq")
+        while True:
+            choice = _prompt_choice("[o]pen a candidate  [c]hoose candidate  [s]kip  [q]uit", "ocsq")
             if choice == "q":
                 return "quit"
+            if choice == "o":
+                pick = _prompt_choice(
+                    f"  which candidate to open (1-{len(candidates)})",
+                    "".join(str(n) for n in range(1, len(candidates) + 1)),
+                )
+                webbrowser.open(_amazon_order_url(candidates[int(pick) - 1]["order_id"]))
+                continue
+            break
         if choice == "s":
             _mark_skipped(u)
             continue

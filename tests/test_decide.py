@@ -452,6 +452,50 @@ def test_walk_unmatched_near_misses_categorize_multiple_candidates_prompts_for_p
     assert proposal["near_miss_order_id"] == "111-SECOND"
 
 
+def test_walk_unmatched_near_misses_open_loops_back_to_full_menu(monkeypatch):
+    """Opening a candidate must not consume the turn -- the user can open
+    multiple candidates (or the same one again) before choosing or skipping.
+    """
+    u = _make_unmatched(candidate_shipments=[
+        _make_candidate(order_id="111-FIRST"),
+        _make_candidate(order_id="111-SECOND"),
+    ])
+    changeset = {
+        "amazon": {"unmatched_ynab": [u], "proposed_splits": []},
+        "non_amazon": {"proposals": []},
+    }
+    opened = []
+    monkeypatch.setattr(decide.webbrowser, "open", lambda url: opened.append(url))
+    responses = iter(["o", "1", "o", "2", "c", "2"])
+    monkeypatch.setattr(decide, "_prompt_choice", lambda *a, **k: next(responses))
+    monkeypatch.setattr(decide, "_pick_category", lambda *a, **k: {"id": "cat-electronics", "name": "Electronics"})
+
+    result = decide._walk_unmatched_near_misses(changeset, categories=[], item_index={}, item_index_warning=None)
+
+    assert result is None
+    assert len(opened) == 2
+    assert "111-FIRST" in opened[0]
+    assert "111-SECOND" in opened[1]
+    proposal = changeset["non_amazon"]["proposals"][0]
+    assert proposal["near_miss_order_id"] == "111-SECOND"
+
+
+def test_walk_unmatched_near_misses_quit_after_open_returns_quit(monkeypatch):
+    u = _make_unmatched()
+    changeset = {
+        "amazon": {"unmatched_ynab": [u], "proposed_splits": []},
+        "non_amazon": {"proposals": []},
+    }
+    monkeypatch.setattr(decide.webbrowser, "open", lambda url: None)
+    responses = iter(["o", "1", "q"])
+    monkeypatch.setattr(decide, "_prompt_choice", lambda *a, **k: next(responses))
+
+    result = decide._walk_unmatched_near_misses(changeset, categories=[], item_index={}, item_index_warning=None)
+
+    assert result == "quit"
+    assert not decide._has_review_decision(u)
+
+
 def test_walk_unmatched_near_misses_claimed_candidate_excluded_from_later_entries(monkeypatch):
     """Once a candidate shipment is claimed for one txn, it's not offered to
     another txn in the same walk -- it can't be two people's near-miss.

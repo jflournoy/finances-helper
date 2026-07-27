@@ -43,7 +43,7 @@
     "categorizer.py": "394e5d2499f397080e467b55cf85b92faa2b92c0e7552f599fe6a88a370d2e29",
     "category_profiles.py": "b283bb190df576a5bdca4ee70d0fdd826a805061a860027d9847729aef7eab06",
     "changeset_review.py": "59e0b6a1cba188a0aef0f8c36cc9bc532c9eee97a134692cfcb54642d8d6c1f9",
-    "decide.py": "f2ca2921103d467c33f2a613e28ba9f8a207f3d07f4df9aac1720ef22b138b96",
+    "decide.py": "1c627887b69b73ba6796397e4f0f68e7b8174e73e8d7b9fea5cee48b179f894d",
     "docs/reflective-advisor-plan.md": "30cd30f079cfe001d45fbd930247e4ec92e95779f3811fac56ef6c76a971ae1e",
     "insights.py": "1ecaacf08d537a65c073e378a47c87075452bef9117790aacbbe17eae27e612a",
     "payee_resolver.py": "d7022d3718f2bc1fb54ac68652b2454aef5b801a1a45875fe2536015113aebf5",
@@ -80,7 +80,7 @@
     "tests/test_categorizer.py": "ac8ce79a64219b6c2327a775f5ec34c88fb4bd7d99e08225ab8bc23a67c9aefb",
     "tests/test_categorizer_resolution.py": "c3ddab87fb89a26a3d5243d7458c68e3063dc498da29e75219dfd2c71488b25c",
     "tests/test_category_profiles.py": "cfbd91a1c99e3331e0c8d466fd1249f88f7785cad526a91954d5e047a3135203",
-    "tests/test_decide.py": "bea52653b26ee58133c0f27be71a9fd550e106698d78154d0410f28eae8a1498",
+    "tests/test_decide.py": "2cc780587bac0e63fa06acd3541cfa245f4977164667ef938c8c1e994f8eb010",
     "tests/test_insights.py": "ebe182f6f3f5854a020dca33e5c82a4a00cfd8a773029468d335e623c08ab587",
     "tests/test_payee_resolver.py": "5cbd345333c1f2a9b2a5b0568918d7c52cdd1b1737252e454eafb12a55df4ad8",
     "tests/test_spend_advice_script.py": "1b6588670ed949a73f1433e3b2aedc7ead7756eaff5cc66d9f77731398568a73",
@@ -92,13 +92,13 @@
     "view_changeset.py": "363bbcaeda6eae7c819c24a78c5d595ab7c2685f560e84568d833ad59214b9d2",
     "ynab_client.py": "c2a132a89eacfddcb14121a77e599043a49f3855e674c181daa2a916bff0e855"
   },
-  "indexed_at_commit": "e8b1cf33477728a720e0aae49da77cd9b135714c",
-  "indexed_at_timestamp": "2026-07-27T18:26:13.636170074+00:00",
+  "indexed_at_commit": "105bc1c617cdff767887300dae1da7aef14c6f10",
+  "indexed_at_timestamp": "2026-07-27T23:12:29.409066803+00:00",
   "schema_version": 3,
   "stats": {
-    "total_edges": 2448,
+    "total_edges": 2453,
     "total_files": 91,
-    "total_nodes": 1752
+    "total_nodes": 1754
   },
   "vexp_version": "2.2.4"
 }
