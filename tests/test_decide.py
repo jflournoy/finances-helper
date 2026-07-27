@@ -321,6 +321,18 @@ def test_apply_boosts_accumulates_on_existing_entry(tmp_path):
 # ============================================================================
 
 
+def _make_candidate(**kw) -> dict:
+    base = {
+        "order_id": "111-0781058-6001837",
+        "ship_date": "2026-06-29",
+        "amount_dollars": "196.70",
+        "amount_delta_dollars": "2.78",
+        "date_delta_days": 0,
+    }
+    base.update(kw)
+    return base
+
+
 def _make_unmatched(**kw) -> dict:
     base = {
         "transaction_id": "tx-unmatched-1",
@@ -329,13 +341,7 @@ def _make_unmatched(**kw) -> dict:
         "date": "2026-06-29",
         "memo": None,
         "reason": "no matching shipment in dump",
-        "closest_shipment": {
-            "order_id": "111-0781058-6001837",
-            "ship_date": "2026-06-29",
-            "amount_dollars": "196.70",
-            "amount_delta_dollars": "2.78",
-            "date_delta_days": 0,
-        },
+        "candidate_shipments": [_make_candidate()],
     }
     base.update(kw)
     return base
@@ -383,11 +389,11 @@ def test_build_shipment_item_index_parses_real_dump(tmp_path):
     assert index[key].items[0].product_name == "Test Widget"
 
 
-def test_walk_unmatched_near_misses_skips_entries_without_closest_shipment():
-    """Only entries with a near-miss candidate are shown/walkable."""
+def test_walk_unmatched_near_misses_skips_entries_without_candidates():
+    """Only entries with near-miss candidates are shown/walkable."""
     changeset = {
         "amazon": {
-            "unmatched_ynab": [_make_unmatched(closest_shipment=None)],
+            "unmatched_ynab": [_make_unmatched(candidate_shipments=[])],
             "proposed_splits": [],
         },
         "non_amazon": {"proposals": []},
@@ -398,7 +404,8 @@ def test_walk_unmatched_near_misses_skips_entries_without_closest_shipment():
     assert len(changeset["non_amazon"]["proposals"]) == 0
 
 
-def test_walk_unmatched_near_misses_categorize_moves_to_non_amazon_proposals(monkeypatch):
+def test_walk_unmatched_near_misses_categorize_single_candidate_moves_to_non_amazon_proposals(monkeypatch):
+    """With exactly one candidate, categorize skips the pick-a-number prompt."""
     u = _make_unmatched()
     changeset = {
         "amazon": {"unmatched_ynab": [u], "proposed_splits": []},
@@ -421,7 +428,64 @@ def test_walk_unmatched_near_misses_categorize_moves_to_non_amazon_proposals(mon
     assert proposal["confidence"] == 1.0
     assert proposal["amount_dollars"] == "-193.92"
     assert "111-0781058-6001837" in proposal["rationale"]
+    assert proposal["near_miss_order_id"] == "111-0781058-6001837"
     assert decide._has_review_decision(proposal)
+
+
+def test_walk_unmatched_near_misses_categorize_multiple_candidates_prompts_for_pick(monkeypatch):
+    """With multiple candidates, categorize asks which one before the category picker."""
+    u = _make_unmatched(candidate_shipments=[
+        _make_candidate(order_id="111-FIRST"),
+        _make_candidate(order_id="111-SECOND"),
+    ])
+    changeset = {
+        "amazon": {"unmatched_ynab": [u], "proposed_splits": []},
+        "non_amazon": {"proposals": []},
+    }
+    responses = iter(["c", "2"])
+    monkeypatch.setattr(decide, "_prompt_choice", lambda *a, **k: next(responses))
+    monkeypatch.setattr(decide, "_pick_category", lambda *a, **k: {"id": "cat-electronics", "name": "Electronics"})
+
+    decide._walk_unmatched_near_misses(changeset, categories=[], item_index={}, item_index_warning=None)
+
+    proposal = changeset["non_amazon"]["proposals"][0]
+    assert proposal["near_miss_order_id"] == "111-SECOND"
+
+
+def test_walk_unmatched_near_misses_claimed_candidate_excluded_from_later_entries(monkeypatch):
+    """Once a candidate shipment is claimed for one txn, it's not offered to
+    another txn in the same walk -- it can't be two people's near-miss.
+    """
+    shared_candidate = _make_candidate(order_id="111-SHARED")
+    u1 = _make_unmatched(transaction_id="tx-1", candidate_shipments=[shared_candidate])
+    u2 = _make_unmatched(transaction_id="tx-2", candidate_shipments=[shared_candidate])
+    changeset = {
+        "amazon": {"unmatched_ynab": [u1, u2], "proposed_splits": []},
+        "non_amazon": {"proposals": []},
+    }
+    monkeypatch.setattr(decide, "_prompt_choice", lambda *a, **k: "c")
+    monkeypatch.setattr(decide, "_pick_category", lambda *a, **k: {"id": "cat-electronics", "name": "Electronics"})
+
+    decide._walk_unmatched_near_misses(changeset, categories=[], item_index={}, item_index_warning=None)
+
+    # tx-1 claimed the only candidate; tx-2 had nothing left to offer, so it
+    # stays in unmatched_ynab, unreviewed.
+    assert len(changeset["non_amazon"]["proposals"]) == 1
+    assert changeset["non_amazon"]["proposals"][0]["transaction_id"] == "tx-1"
+    assert changeset["amazon"]["unmatched_ynab"] == [u2]
+    assert not decide._has_review_decision(u2)
+
+
+def test_claimed_order_ids_reads_existing_near_miss_proposals():
+    """Resume must honor claims from a prior partial run, not just this one."""
+    changeset = {
+        "amazon": {"unmatched_ynab": [], "proposed_splits": []},
+        "non_amazon": {"proposals": [
+            {"tier": "near-miss", "near_miss_order_id": "111-ALREADY-CLAIMED"},
+            {"tier": "history", "category_id": "cat-1"},
+        ]},
+    }
+    assert decide._claimed_order_ids(changeset) == {"111-ALREADY-CLAIMED"}
 
 
 def test_walk_unmatched_near_misses_categorize_cancel_leaves_unmatched(monkeypatch):

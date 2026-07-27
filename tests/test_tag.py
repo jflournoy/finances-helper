@@ -929,8 +929,10 @@ class TestWriteUnifiedChangeset:
         assert by_id["t1"]["memo"] == "gift for mom"
         assert by_id["t2"]["memo"] is None
 
-    def test_write_unified_changeset_unmatched_amazon_includes_closest_shipment(self, tmp_path):
-        """unmatched_ynab entries carry the closest unmatched shipment as a near-miss hint."""
+    def test_write_unified_changeset_unmatched_amazon_includes_candidate_shipments(self, tmp_path):
+        """unmatched_ynab entries carry all in-window unmatched shipments as candidates,
+        sorted by date proximity then amount proximity -- not a single "closest" pick.
+        """
         from tag import write_unified_changeset
         from amazon_matcher import AmazonShipment, MatchResult
         from datetime import datetime
@@ -940,7 +942,7 @@ class TestWriteUnifiedChangeset:
 
         close_shipment = AmazonShipment(
             order_id="111-CLOSE",
-            ship_date=datetime(2026, 3, 3).date(),
+            ship_date=datetime(2026, 3, 2).date(),
             payment_method_raw="Visa - XXXX",
             payment_method_last4="0804",
             is_split_tender=False,
@@ -955,7 +957,7 @@ class TestWriteUnifiedChangeset:
         )
         far_shipment = AmazonShipment(
             order_id="111-FAR",
-            ship_date=datetime(2026, 1, 3).date(),
+            ship_date=datetime(2026, 1, 3).date(),  # far outside the +/-3 day window
             payment_method_raw="Visa - XXXX",
             payment_method_last4="0804",
             is_split_tender=False,
@@ -1001,13 +1003,170 @@ class TestWriteUnifiedChangeset:
         )
 
         unmatched_list = json.loads(json_path.read_text())["amazon"]["unmatched_ynab"]
-        closest = unmatched_list[0]["closest_shipment"]
-        assert closest["order_id"] == "111-CLOSE"
-        assert closest["amount_delta_dollars"] == "3.00"
-        assert closest["date_delta_days"] == 2
+        candidates = unmatched_list[0]["candidate_shipments"]
+        assert len(candidates) == 1
+        assert candidates[0]["order_id"] == "111-CLOSE"
+        assert candidates[0]["amount_delta_dollars"] == "3.00"
+        assert candidates[0]["date_delta_days"] == 1
 
-    def test_write_unified_changeset_unmatched_amazon_no_closest_shipment_when_none_unmatched(self, tmp_path):
-        """closest_shipment is None when there are no unmatched shipments to compare against."""
+    def test_write_unified_changeset_unmatched_amazon_multiple_candidates_sorted(self, tmp_path):
+        """Multiple in-window candidates are all returned, sorted by date proximity
+        then amount proximity -- the user picks, this doesn't crown a single winner.
+        """
+        from tag import write_unified_changeset
+        from amazon_matcher import AmazonShipment, MatchResult
+        from datetime import datetime
+
+        out_dir = tmp_path / "changesets"
+        now = datetime(2026, 4, 27, 14, 30, 0)
+
+        same_day_dollars_off = AmazonShipment(
+            order_id="111-SAMEDAY",
+            ship_date=datetime(2026, 6, 29).date(),
+            payment_method_raw="Visa - XXXX",
+            payment_method_last4="0804",
+            is_split_tender=False,
+            currency="USD",
+            item_subtotal=Decimal("180.05"),
+            tax=Decimal("13.95"),
+            shipping=Decimal("0"),
+            discounts=Decimal("0"),
+            total_amount=Decimal("196.70"),
+            items=[],
+            shipment_status="Shipped",
+        )
+        one_day_away_exact_amount = AmazonShipment(
+            order_id="111-ONEDAY-EXACT",
+            ship_date=datetime(2026, 6, 30).date(),
+            payment_method_raw="Visa - XXXX",
+            payment_method_last4="0804",
+            is_split_tender=False,
+            currency="USD",
+            item_subtotal=Decimal("180.00"),
+            tax=Decimal("13.92"),
+            shipping=Decimal("0"),
+            discounts=Decimal("0"),
+            total_amount=Decimal("193.92"),  # exact match to the txn amount
+            items=[],
+            shipment_status="Shipped",
+        )
+        outside_window = AmazonShipment(
+            order_id="111-OUTSIDE",
+            ship_date=datetime(2026, 7, 3).date(),  # 4 days away, outside +/-3
+            payment_method_raw="Visa - XXXX",
+            payment_method_last4="0804",
+            is_split_tender=False,
+            currency="USD",
+            item_subtotal=Decimal("193.92"),
+            tax=Decimal("0"),
+            shipping=Decimal("0"),
+            discounts=Decimal("0"),
+            total_amount=Decimal("193.92"),
+            items=[],
+            shipment_status="Shipped",
+        )
+
+        unmatched = [
+            (
+                {"id": "t1", "payee_name": "Amazon", "date": "2026-06-29", "amount": -193920, "memo": None},
+                "no matching shipment in dump",
+            ),
+        ]
+        match_result = MatchResult(
+            matched=[], unmatched_ynab=[],
+            unmatched_shipments=[outside_window, one_day_away_exact_amount, same_day_dollars_off],
+            excluded_shipments=[], parse_errors=[],
+        )
+
+        _, json_path = write_unified_changeset(
+            flat_results=[],
+            skipped=[],
+            unmatched_amazon=unmatched,
+            split_proposals=[],
+            source_txns=[],
+            budget_id="b123",
+            since_date="2026-03-28",
+            days_back=30,
+            K=312,
+            confidence_threshold=0.0096,
+            dump_path=None,
+            out_dir=out_dir,
+            match_result=match_result,
+            now=now,
+        )
+
+        unmatched_list = json.loads(json_path.read_text())["amazon"]["unmatched_ynab"]
+        candidates = unmatched_list[0]["candidate_shipments"]
+        # Both in-window shipments are present; outside-window is excluded.
+        order_ids = [c["order_id"] for c in candidates]
+        assert order_ids == ["111-SAMEDAY", "111-ONEDAY-EXACT"]
+
+    def test_write_unified_changeset_unmatched_amazon_excludes_whole_foods_candidates(self, tmp_path):
+        """Whole Foods / Amazon Fresh shipments are never offered as near-miss candidates.
+
+        They're routed to Groceries through a separate match-required special
+        case (AmazonShipment.is_wf), not real per-item dollar matching, and in
+        practice are large multi-item hauls that pollute same-day candidate
+        pools for unrelated small charges (seen in practice: a $412, 65-item
+        Whole Foods delivery surfaced as the "near miss" for a $39.42 charge
+        purely because it shipped the same day).
+        """
+        from tag import write_unified_changeset
+        from amazon_matcher import AmazonShipment, MatchResult
+        from datetime import datetime
+
+        out_dir = tmp_path / "changesets"
+        now = datetime(2026, 4, 27, 14, 30, 0)
+
+        wf_shipment = AmazonShipment(
+            order_id="113-WHOLEFOODS",
+            ship_date=datetime(2026, 7, 5).date(),
+            payment_method_raw="Not Available",
+            payment_method_last4=None,
+            is_split_tender=False,
+            currency="USD",
+            item_subtotal=Decimal("412.00"),
+            tax=Decimal("0"),
+            shipping=Decimal("0"),
+            discounts=Decimal("0"),
+            total_amount=Decimal("412.00"),
+            items=[],
+            shipment_status="Shipped",
+            website="panda01",
+        )
+
+        unmatched = [
+            (
+                {"id": "t1", "payee_name": "Amazon", "date": "2026-07-05", "amount": -39420, "memo": None},
+                "no matching shipment in dump",
+            ),
+        ]
+        match_result = MatchResult(
+            matched=[], unmatched_ynab=[], unmatched_shipments=[wf_shipment], excluded_shipments=[], parse_errors=[],
+        )
+
+        _, json_path = write_unified_changeset(
+            flat_results=[],
+            skipped=[],
+            unmatched_amazon=unmatched,
+            split_proposals=[],
+            source_txns=[],
+            budget_id="b123",
+            since_date="2026-03-28",
+            days_back=30,
+            K=312,
+            confidence_threshold=0.0096,
+            dump_path=None,
+            out_dir=out_dir,
+            match_result=match_result,
+            now=now,
+        )
+
+        unmatched_list = json.loads(json_path.read_text())["amazon"]["unmatched_ynab"]
+        assert unmatched_list[0]["candidate_shipments"] == []
+
+    def test_write_unified_changeset_unmatched_amazon_no_candidates_when_none_unmatched(self, tmp_path):
+        """candidate_shipments is [] when there are no unmatched shipments to compare against."""
         from tag import write_unified_changeset
         from amazon_matcher import MatchResult
         from datetime import datetime
@@ -1043,16 +1202,11 @@ class TestWriteUnifiedChangeset:
         )
 
         unmatched_list = json.loads(json_path.read_text())["amazon"]["unmatched_ynab"]
-        assert unmatched_list[0]["closest_shipment"] is None
+        assert unmatched_list[0]["candidate_shipments"] == []
 
-    def test_write_unified_changeset_unmatched_amazon_ignores_dollar_close_but_far_away_shipment(self, tmp_path):
-        """closest_shipment must not suggest a shipment weeks/months away just
-        because its amount happens to be dollar-close.
-
-        Regression: on a real multi-thousand-shipment dump, the naive
-        amount-first/date-tiebreak distance picked shipments 15-68 days away
-        because nothing closer in time happened to be closer in price. A
-        near-miss hint that's temporally implausible is actively misleading.
+    def test_write_unified_changeset_unmatched_amazon_no_candidates_outside_date_window(self, tmp_path):
+        """A shipment outside +/-NEAR_MISS_DATE_WINDOW_DAYS is never a candidate,
+        even with an exact amount match -- date gates candidacy, amount never does.
         """
         from tag import write_unified_changeset
         from amazon_matcher import AmazonShipment, MatchResult
@@ -1061,8 +1215,8 @@ class TestWriteUnifiedChangeset:
         out_dir = tmp_path / "changesets"
         now = datetime(2026, 4, 27, 14, 30, 0)
 
-        far_but_dollar_close = AmazonShipment(
-            order_id="111-FAR",
+        exact_amount_far_away = AmazonShipment(
+            order_id="111-EXACT-BUT-FAR",
             ship_date=datetime(2026, 5, 15).date(),  # 46 days from txn date
             payment_method_raw="Visa - XXXX",
             payment_method_last4="0804",
@@ -1084,7 +1238,7 @@ class TestWriteUnifiedChangeset:
             ),
         ]
         match_result = MatchResult(
-            matched=[], unmatched_ynab=[], unmatched_shipments=[far_but_dollar_close], excluded_shipments=[], parse_errors=[],
+            matched=[], unmatched_ynab=[], unmatched_shipments=[exact_amount_far_away], excluded_shipments=[], parse_errors=[],
         )
 
         _, json_path = write_unified_changeset(
@@ -1105,10 +1259,10 @@ class TestWriteUnifiedChangeset:
         )
 
         unmatched_list = json.loads(json_path.read_text())["amazon"]["unmatched_ynab"]
-        assert unmatched_list[0]["closest_shipment"] is None
+        assert unmatched_list[0]["candidate_shipments"] == []
 
-    def test_write_unified_changeset_markdown_unmatched_shows_memo_and_closest_shipment(self, tmp_path):
-        """Markdown 'Unmatched Amazon txns' section shows memo and near-miss hint per txn."""
+    def test_write_unified_changeset_markdown_unmatched_shows_memo_and_candidates(self, tmp_path):
+        """Markdown 'Unmatched Amazon txns' section shows memo and all near-miss candidates per txn."""
         from tag import write_unified_changeset
         from amazon_matcher import AmazonShipment, MatchResult
         from datetime import datetime
@@ -1118,7 +1272,7 @@ class TestWriteUnifiedChangeset:
 
         close_shipment = AmazonShipment(
             order_id="111-CLOSE",
-            ship_date=datetime(2026, 3, 3).date(),
+            ship_date=datetime(2026, 3, 2).date(),
             payment_method_raw="Visa - XXXX",
             payment_method_last4="0804",
             is_split_tender=False,
@@ -1161,7 +1315,7 @@ class TestWriteUnifiedChangeset:
 
         text = md_path.read_text()
         assert "memo: office supplies" in text
-        assert "closest unmatched shipment: order 111-CLOSE" in text
+        assert "candidate: order 111-CLOSE" in text
         assert "$3.00" in text
 
     def test_write_unified_changeset_markdown_per_txn_tables(self, tmp_path):

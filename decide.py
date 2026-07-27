@@ -20,6 +20,7 @@ import argparse
 import json
 import os
 import sys
+import webbrowser
 from datetime import datetime
 from pathlib import Path
 
@@ -347,57 +348,88 @@ def _walk_non_amazon(
     return None
 
 
+def _claimed_order_ids(changeset: dict) -> set[str]:
+    """Order IDs already assigned to a near-miss proposal in this changeset.
+
+    A candidate shipment never matches by amount (that's why it's sitting in
+    unmatched_shipments in the first place), so once a user picks it for one
+    txn it would otherwise keep reappearing as a candidate for every other
+    in-window txn forever. Reads existing near-miss proposals' recorded
+    order_id (parsed from the rationale, the only place it's stored) so this
+    also works correctly on resume, not just within one run.
+    """
+    claimed = set()
+    for p in changeset["non_amazon"]["proposals"]:
+        if p.get("tier") != "near-miss":
+            continue
+        order_id = p.get("near_miss_order_id")
+        if order_id:
+            claimed.add(order_id)
+    return claimed
+
+
 def _walk_unmatched_near_misses(
     changeset: dict,
     categories: list[dict],
     item_index: dict,
     item_index_warning: str | None,
 ) -> str | None:
-    """Walk unmatched Amazon txns that have a near-miss shipment candidate.
+    """Walk unmatched Amazon txns that have near-miss shipment candidates.
 
-    Only entries with a non-null closest_shipment are shown — an unmatched
-    txn with no candidate in the date window has nothing useful to offer
-    here. For each: show the txn, the candidate shipment and its items (if
-    the dump could be parsed), and let the user open the order in Amazon,
-    categorize the txn directly (written into non_amazon.proposals so
-    apply.py's existing flat-proposal path PATCHes it), or skip.
+    Only entries with a non-empty candidate_shipments list are shown — an
+    unmatched txn with no candidate in the date window has nothing useful to
+    offer here. For each: list every candidate (shipped within the matcher's
+    date window, not Whole Foods, amount deliberately not used to narrow or
+    rank them — see tag.py's _candidate_unmatched_shipments) with its items
+    (if the dump could be parsed), and let the user open one in Amazon,
+    categorize the txn against one of them (written into
+    non_amazon.proposals so apply.py's existing flat-proposal path PATCHes
+    it), or skip.
 
-    Skipped entries get a `review` block (same shape as the other walks) so
-    resume doesn't re-prompt for them. Returns 'quit' if the user quits,
-    else None.
+    A shipment claimed for one txn is removed from every other txn's
+    candidate list for the rest of this walk — it can't be two people's
+    near-miss. Skipped entries get a `review` block (same shape as the other
+    walks) so resume doesn't re-prompt for them. Returns 'quit' if the user
+    quits, else None.
     """
     unmatched = changeset["amazon"]["unmatched_ynab"]
-    candidates = [u for u in unmatched if u.get("closest_shipment") and not _has_review_decision(u)]
-    if not candidates:
+    entries = [u for u in unmatched if u.get("candidate_shipments") and not _has_review_decision(u)]
+    if not entries:
         return None
 
+    claimed = _claimed_order_ids(changeset)
+
     print()
-    print(f"=== Unmatched Amazon txns with a near-miss candidate ({len(candidates)}) ===")
+    print(f"=== Unmatched Amazon txns with near-miss candidates ({len(entries)}) ===")
     if item_index_warning:
         print(f"  Note: {item_index_warning}")
 
-    for i, u in enumerate(candidates, start=1):
-        closest = u["closest_shipment"]
-        print()
-        print(f"[{i}/{len(candidates)}] {u['payee_name']}  ${u['amount_dollars']}  {u['date']}")
-        print(
-            f"  Near-miss: order {closest['order_id']}, shipped {closest['ship_date']}, "
-            f"${closest['amount_dollars']} (Δ${closest['amount_delta_dollars']}, "
-            f"Δ{closest['date_delta_days']}d)"
-        )
-        shipment = item_index.get((closest["order_id"], closest["ship_date"]))
-        if shipment is not None and shipment.items:
-            print("  Items:")
-            for item in shipment.items:
-                print(f"    - {item.product_name}")
-        print(f"  Open in Amazon: {_amazon_order_url(closest['order_id'])}")
+    for i, u in enumerate(entries, start=1):
+        candidates = [c for c in u["candidate_shipments"] if c["order_id"] not in claimed]
+        if not candidates:
+            continue
 
-        choice = _prompt_choice("[o]pen  [c]ategorize  [s]kip  [q]uit", "ocsq")
+        print()
+        print(f"[{i}/{len(entries)}] {u['payee_name']}  ${u['amount_dollars']}  {u['date']}")
+        for j, c in enumerate(candidates, start=1):
+            print(
+                f"  {j}. order {c['order_id']}, shipped {c['ship_date']}, "
+                f"${c['amount_dollars']} (Δ${c['amount_delta_dollars']}, Δ{c['date_delta_days']}d)"
+            )
+            shipment = item_index.get((c["order_id"], c["ship_date"]))
+            if shipment is not None and shipment.items:
+                for item in shipment.items:
+                    print(f"       - {item.product_name}")
+
+        choice = _prompt_choice("[o]pen a candidate  [c]ategorize against one  [s]kip  [q]uit", "ocsq")
         if choice == "q":
             return "quit"
         if choice == "o":
-            import webbrowser
-            webbrowser.open(_amazon_order_url(closest["order_id"]))
+            pick = _prompt_choice(
+                f"  which candidate to open (1-{len(candidates)})",
+                "".join(str(n) for n in range(1, len(candidates) + 1)),
+            )
+            webbrowser.open(_amazon_order_url(candidates[int(pick) - 1]["order_id"]))
             choice = _prompt_choice("  [c]ategorize  [s]kip  [q]uit", "csq")
             if choice == "q":
                 return "quit"
@@ -405,6 +437,14 @@ def _walk_unmatched_near_misses(
             _mark_skipped(u)
             continue
         if choice == "c":
+            if len(candidates) == 1:
+                chosen = candidates[0]
+            else:
+                pick = _prompt_choice(
+                    f"  which candidate (1-{len(candidates)})",
+                    "".join(str(n) for n in range(1, len(candidates) + 1)),
+                )
+                chosen = candidates[int(pick) - 1]
             new_cat = _pick_category(categories, None)
             if new_cat is None:
                 print("  cancelled — leaving unreviewed; come back later")
@@ -418,12 +458,14 @@ def _walk_unmatched_near_misses(
                 "category_name": new_cat["name"],
                 "tier": "near-miss",
                 "confidence": 1.0,
-                "rationale": f"user-confirmed near-miss match to Amazon order {closest['order_id']}",
+                "rationale": f"user-confirmed near-miss match to Amazon order {chosen['order_id']}",
+                "near_miss_order_id": chosen["order_id"],
                 "prior_strength": None,
             }
             _mark_accepted(proposal)
             changeset["non_amazon"]["proposals"].append(proposal)
             unmatched.remove(u)
+            claimed.add(chosen["order_id"])
             print(f"  → {new_cat['name']}")
     return None
 
@@ -606,7 +648,7 @@ def run_review(
     claude, fuzzy, history, other = _partition_non_amazon(proposals)
     unmatched = changeset["amazon"]["unmatched_ynab"]
     near_miss_count = sum(
-        1 for u in unmatched if u.get("closest_shipment") and not _has_review_decision(u)
+        1 for u in unmatched if u.get("candidate_shipments") and not _has_review_decision(u)
     )
 
     print()

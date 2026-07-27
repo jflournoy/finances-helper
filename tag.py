@@ -56,62 +56,74 @@ def _amount_dollars_str(txn: dict) -> str | None:
     )
 
 
-NEAR_MISS_DATE_WINDOW_DAYS = 14
+NEAR_MISS_DATE_WINDOW_DAYS = 3
 
 
-def _closest_unmatched_shipment(txn: dict, unmatched_shipments: list) -> dict | None:
-    """Find the unmatched shipment closest to `txn` by amount, tiebreaking on date.
+def _candidate_unmatched_shipments(txn: dict, unmatched_shipments: list) -> list[dict]:
+    """List unmatched shipments plausible as a near-miss for `txn`, for a human to pick from.
 
-    Used to give the user a near-miss hint for a YNAB txn with no shipment
-    match ("no matching shipment in dump") — e.g. off by a few dollars or a
-    few days outside the match window. Only compares against shipments that
-    themselves went unmatched; a consumed shipment is an exact match to some
-    other txn, not a near-miss for this one.
+    Used to give the user near-miss candidates for a YNAB txn with no
+    shipment match ("no matching shipment in dump") — e.g. a shipment whose
+    cost Amazon split across this card charge and a points/gift-card
+    redemption of unpredictable size (seen in practice — a $196.70 shipment
+    charged as $193.92 to a card plus $2.78 in Amazon Visa points, a split
+    the order-history export has no record of). That gap has no bound, so
+    amount can't gate candidacy or rank a single "best" pick reliably.
 
-    Candidates outside NEAR_MISS_DATE_WINDOW_DAYS are excluded before ranking
-    by amount — on a large dump, an amount-only match can be weeks or months
-    away and is more misleading than useful (issue found via a real dump with
-    ~2900 shipments: closest-by-amount picks landed 15-68 days out).
+    Instead: gate on date (±NEAR_MISS_DATE_WINDOW_DAYS — matches the
+    matcher's own match window) and on the shipment being otherwise
+    unmatched, and return the whole plausible set for a human to read and
+    choose from — recall matters more than precision here, since a wrong
+    candidate costs one glance (its item list usually makes a false positive
+    obvious) while a missing true candidate strands the user back at
+    checking Amazon by hand. Whole Foods / Amazon Fresh deliveries are
+    excluded: they're routed to Groceries through a separate match-required
+    special case (`AmazonShipment.is_wf`) rather than real per-item dollar
+    matching, and in practice are large multi-item hauls that pollute
+    same-day pools for unrelated small charges without being genuine
+    candidates.
 
-    Returns None if there are no unmatched shipments, the txn has no date, or
-    none of the unmatched shipments fall within the date window.
+    Sorted by date proximity then amount proximity — display order only,
+    not a ranking meant to crown a winner.
+
+    Returns [] if there are no unmatched shipments, the txn has no date, or
+    none of the unmatched shipments (after excluding WF) ship within the
+    date window.
     """
     if not unmatched_shipments:
-        return None
+        return []
 
     txn_date_str = txn.get("date")
     if not txn_date_str:
-        return None
+        return []
     txn_date = date.fromisoformat(txn_date_str)
 
     milliunits = txn.get("amount")
     if not (isinstance(milliunits, int) and not isinstance(milliunits, bool)):
-        return None
+        return []
     txn_amount = abs(Decimal(milliunits)) / Decimal(1000)
 
     def _date_delta_days(shipment):
         if shipment.ship_date is None:
             return None
-        return abs((shipment.ship_date - txn_date).days)
+        return (shipment.ship_date - txn_date).days
 
     in_window = [
         s for s in unmatched_shipments
-        if (d := _date_delta_days(s)) is not None and d <= NEAR_MISS_DATE_WINDOW_DAYS
+        if not s.is_wf and (d := _date_delta_days(s)) is not None and abs(d) <= NEAR_MISS_DATE_WINDOW_DAYS
     ]
-    if not in_window:
-        return None
+    in_window.sort(key=lambda s: (abs(_date_delta_days(s)), abs(txn_amount - s.total_amount), s.order_id))
 
-    closest = min(in_window, key=lambda s: (abs(txn_amount - s.total_amount), _date_delta_days(s)))
-    amount_delta = abs(txn_amount - closest.total_amount)
-    date_delta = (closest.ship_date - txn_date).days
-
-    return {
-        "order_id": closest.order_id,
-        "ship_date": closest.ship_date.isoformat(),
-        "amount_dollars": format(closest.total_amount, "f"),
-        "amount_delta_dollars": format(amount_delta, "f"),
-        "date_delta_days": date_delta,
-    }
+    return [
+        {
+            "order_id": s.order_id,
+            "ship_date": s.ship_date.isoformat(),
+            "amount_dollars": format(s.total_amount, "f"),
+            "amount_delta_dollars": format(abs(txn_amount - s.total_amount), "f"),
+            "date_delta_days": _date_delta_days(s),
+        }
+        for s in in_window
+    ]
 
 
 def _summarize_split_items(subs: list) -> str:
@@ -316,7 +328,7 @@ def write_unified_changeset(
             "date": txn.get("date"),
             "memo": txn.get("memo"),
             "reason": reason,
-            "closest_shipment": _closest_unmatched_shipment(txn, unmatched_shipments_for_hints),
+            "candidate_shipments": _candidate_unmatched_shipments(txn, unmatched_shipments_for_hints),
         })
 
     def _parent_field(parent, field):
@@ -569,12 +581,12 @@ def write_unified_changeset(
                 if memo:
                     line += f" — memo: {_md_escape(memo)}"
                 markdown_lines.append(line)
-                closest = u.get("closest_shipment")
-                if closest:
+                candidates = u.get("candidate_shipments") or []
+                for candidate in candidates:
                     markdown_lines.append(
-                        f"    closest unmatched shipment: order {closest['order_id']} "
-                        f"${closest['amount_dollars']} shipped {closest['ship_date']} "
-                        f"(Δ${closest['amount_delta_dollars']}, Δ{closest['date_delta_days']}d)"
+                        f"    candidate: order {candidate['order_id']} "
+                        f"${candidate['amount_dollars']} shipped {candidate['ship_date']} "
+                        f"(Δ${candidate['amount_delta_dollars']}, Δ{candidate['date_delta_days']}d)"
                     )
             markdown_lines.append("")
 
