@@ -102,7 +102,7 @@ def normalize_item_name(name: str) -> str:
 # ---------------------------------------------------------------------------
 
 def _empty_profiles() -> dict:
-    return {"_version": PROFILES_VERSION, "categories": {}}
+    return {"_version": PROFILES_VERSION, "categories": {}, "_backfilled": {}}
 
 
 def load_profiles(path: str = DEFAULT_PROFILES_PATH) -> dict:
@@ -127,6 +127,10 @@ def load_profiles(path: str = DEFAULT_PROFILES_PATH) -> dict:
             f"in {path} (expected {PROFILES_VERSION})"
         )
     profiles.setdefault("categories", {})
+    # Ledger of already-ingested history subtransactions (see
+    # backfill_from_ynab_subtransactions). Absent in stores written before
+    # backfill became idempotent.
+    profiles.setdefault("_backfilled", {})
     return profiles
 
 
@@ -233,6 +237,43 @@ def dominant_item_category(profiles: dict, product_name: str) -> tuple:
     return (dom_id, dom_name)
 
 
+def _backfill_key(txn: dict, sub: dict, memo: str) -> str:
+    """Stable identity for one already-ingested historical subtransaction.
+
+    Keyed on the YNAB subtransaction id when present (the real identity), falling
+    back to parent txn id + memo for fixture/legacy rows that carry no sub id.
+
+    The category is deliberately NOT part of the key: one subtransaction is one
+    observation whose category can change. The recorded category is stored as the
+    ledger's value so a recategorization in YNAB is detected as a *revision* —
+    the stale count is retracted rather than left to compete with the new one.
+    """
+    sub_id = sub.get("id") or f"{txn.get('id')}:{memo}"
+    return str(sub_id)
+
+
+def _retract_item_categorization(
+    profiles: dict, product_name: str, category_id: str
+) -> None:
+    """Undo one previously recorded (item -> category) exemplar observation.
+
+    Used when a history subtransaction is re-read with a different category than
+    it was ingested under: the old observation is no longer true and must not
+    linger as a competing vote. Prunes emptied structures so a corrected item
+    leaves no zero-count residue.
+    """
+    norm = normalize_item_name(product_name)
+    for cat in profiles.get("categories", {}).values():
+        entry = cat.get("item_exemplars", {}).get(norm)
+        if not entry or category_id not in entry:
+            continue
+        entry[category_id]["count"] -= 1
+        if entry[category_id]["count"] <= 0:
+            del entry[category_id]
+        if not entry:
+            del cat["item_exemplars"][norm]
+
+
 def backfill_from_ynab_subtransactions(profiles: dict, transactions: list) -> int:
     """Seed item exemplars from already-split Amazon transactions in YNAB history.
 
@@ -242,13 +283,27 @@ def backfill_from_ynab_subtransactions(profiles: dict, transactions: list) -> in
     once, so a handful of fresh confirmations outvote a stale historical split,
     consistent with the "frequency-weighted, latest wins ties" policy.
 
+    IDEMPOTENT: build_profiles() runs this on every tag.py invocation over the
+    same YNAB history, so each ingested subtransaction is remembered in
+    profiles["_backfilled"] and re-observing it records nothing. Without this the
+    counts compound once per run — the real store reached count=42 for backfilled
+    items while genuinely confirmed splits sat at 1, exactly inverting the
+    weak-prior invariant above and letting stale history outvote the user's own
+    corrections.
+
+    Two SEPARATE historical splits of the same item remain two observations; only
+    re-reading the SAME subtransaction is suppressed. Recategorizing a split in
+    YNAB changes its key, so the corrected category is picked up.
+
     Non-Amazon transactions and subtransactions missing a category or memo are
     skipped.
 
-    Returns the number of exemplars recorded. Modifies `profiles` in place.
+    Returns the number of exemplars newly recorded. Modifies `profiles` in place.
     """
     # Imported lazily to avoid a hard import cycle at module load.
     from amazon_matcher import is_amazon_payee
+
+    seen = profiles.setdefault("_backfilled", {})
 
     recorded = 0
     for txn in transactions:
@@ -260,7 +315,16 @@ def backfill_from_ynab_subtransactions(profiles: dict, transactions: list) -> in
             memo = (sub.get("memo") or "").strip()
             if not cat_id or not memo:
                 continue
+            key = _backfill_key(txn, sub, memo)
+            prior_cat_id = seen.get(key)
+            if prior_cat_id == cat_id:
+                continue
+            if prior_cat_id is not None:
+                # Same row, different category: the user recategorized this split
+                # in YNAB. Retract the stale vote before recording the new one.
+                _retract_item_categorization(profiles, memo, prior_cat_id)
             record_item_categorization(profiles, memo, cat_id, cat_name or "")
+            seen[key] = cat_id
             recorded += 1
     return recorded
 

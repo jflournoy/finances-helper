@@ -258,6 +258,62 @@ class TestEnrichMain:
         assert mock_build.call_args.kwargs.get("regenerate") == "all"
         mock_cat.assert_not_called()
 
+    def test_refresh_does_not_backfill_before_clearing_corrections(self):
+        """--refresh-profiles must NOT ingest exemplars before regenerating.
+
+        Regeneration consumes the corrections queue (cat["corrections"] = []),
+        which is irreplaceable user evidence. Backfilling first means a run that
+        clears corrections also mutates exemplars in the same pass. Descriptions
+        are built from exemplar KEYS, not counts, so backfill contributes nothing
+        to a refresh — it is pure risk on the one destructive path.
+        """
+        from tag import build_profiles
+
+        with patch("tag.backfill_from_ynab_subtransactions") as mock_backfill, \
+             patch("tag.regenerate_stale", return_value=[]), \
+             patch("tag.save_profiles"), \
+             patch("tag.load_profiles", return_value={
+                 "_version": 1, "categories": {}, "_backfilled": {}}), \
+             patch("tag.build_merchant_map_from_cache", return_value={}), \
+             patch("tag.sync_merchants_into_profiles"):
+            build_profiles({}, [], "key", regenerate="stale")
+
+        mock_backfill.assert_not_called()
+
+    def test_normal_run_still_backfills(self):
+        """regenerate='none' (the enrich path) must still ingest exemplars."""
+        from tag import build_profiles
+
+        with patch("tag.backfill_from_ynab_subtransactions", return_value=0) as mock_backfill, \
+             patch("tag.save_profiles"), \
+             patch("tag.load_profiles", return_value={
+                 "_version": 1, "categories": {}, "_backfilled": {}}), \
+             patch("tag.build_merchant_map_from_cache", return_value={}), \
+             patch("tag.sync_merchants_into_profiles"):
+            build_profiles({}, [], "key", regenerate="none")
+
+        mock_backfill.assert_called_once()
+
+    def test_rebuild_still_backfills(self):
+        """regenerate='all' (--rebuild-profiles, the setup path) must backfill.
+
+        On a first-ever run the store is empty and exemplars have never been
+        ingested; skipping backfill here would generate descriptions with no item
+        evidence at all.
+        """
+        from tag import build_profiles
+
+        with patch("tag.backfill_from_ynab_subtransactions", return_value=0) as mock_backfill, \
+             patch("tag.regenerate_stale", return_value=[]), \
+             patch("tag.save_profiles"), \
+             patch("tag.load_profiles", return_value={
+                 "_version": 1, "categories": {}, "_backfilled": {}}), \
+             patch("tag.build_merchant_map_from_cache", return_value={}), \
+             patch("tag.sync_merchants_into_profiles"):
+            build_profiles({}, [], "key", regenerate="all")
+
+        mock_backfill.assert_called_once()
+
     def test_refresh_profiles_flag_regenerates_stale_and_exits(self, tmp_path, monkeypatch):
         """--refresh-profiles regenerates only flagged descriptions (regenerate='stale'), then exits 0."""
         monkeypatch.chdir(tmp_path)

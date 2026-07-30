@@ -634,9 +634,18 @@ def build_profiles(cache, history_txns, anthropic_key, *, regenerate="none"):
     merchant_map = build_merchant_map_from_cache(cache)
     sync_merchants_into_profiles(profiles, merchant_map)
 
-    n_backfilled = backfill_from_ynab_subtransactions(profiles, history_txns)
-    if n_backfilled:
-        logger.info("Backfilled %d item exemplars from split Amazon history", n_backfilled)
+    # Exemplar backfill is skipped ONLY on the "stale" (--refresh-profiles) path.
+    # That path consumes the corrections queue (cat["corrections"] = []), which is
+    # irreplaceable user evidence, and descriptions are built from exemplar KEYS,
+    # not counts (see _bootstrap_descriptions_batch) — so backfilling contributes
+    # nothing there while mutating exemplars in the same pass that clears
+    # corrections. "all" (--rebuild-profiles) is the setup path and DOES backfill:
+    # on a first-ever run the store is empty and exemplars have never been
+    # ingested, so skipping it would leave descriptions with no item evidence.
+    if regenerate != "stale":
+        n_backfilled = backfill_from_ynab_subtransactions(profiles, history_txns)
+        if n_backfilled:
+            logger.info("Backfilled %d item exemplars from split Amazon history", n_backfilled)
 
     if regenerate == "all":
         for cat in profiles["categories"].values():

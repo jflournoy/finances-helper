@@ -35,6 +35,7 @@ from category_profiles import (
     sync_merchants_into_profiles,
     backfill_from_ynab_subtransactions,
     record_confirmed_splits,
+    _all_exemplar_counts,
 )
 
 
@@ -434,6 +435,91 @@ def test_backfill_skips_subtransactions_without_memo_or_category():
     n = backfill_from_ynab_subtransactions(profiles, txns)
     assert n == 1
     assert dominant_item_category(profiles, "Batteries") == ("cat-home", "Home Goods")
+
+
+def test_backfill_is_idempotent_across_repeated_runs():
+    """Re-running backfill over the same history must NOT inflate exemplar counts.
+
+    build_profiles() calls backfill on EVERY tag.py run over the same YNAB
+    history, so a non-idempotent backfill compounds: the real store reached
+    count=42 for backfilled items while genuinely confirmed splits sat at 1,
+    inverting the weak-prior invariant this module promises.
+    """
+    profiles = _empty()
+    txns = [
+        _amazon_split_txn("Amazon", [
+            {"category_id": "cat-home", "category_name": "Home Goods", "memo": "USB Cable"},
+        ]),
+    ]
+
+    first = backfill_from_ynab_subtransactions(profiles, txns)
+    assert first == 1
+
+    for _ in range(5):
+        again = backfill_from_ynab_subtransactions(profiles, txns)
+        assert again == 0, "re-observing the same history must record nothing new"
+
+    counts = _all_exemplar_counts(profiles, "usb cable")
+    assert counts["cat-home"]["count"] == 1
+
+
+def test_backfill_stays_outvotable_by_confirmations_after_repeated_runs():
+    """The weak-prior invariant must survive many backfill runs.
+
+    This is the invariant the count inflation broke: two real confirmations
+    should outvote a historical prior no matter how many times tag.py has run.
+    """
+    profiles = _empty()
+    txns = [
+        _amazon_split_txn("Amazon", [
+            {"category_id": "cat-comp", "category_name": "Computer", "memo": "usb cable"},
+        ]),
+    ]
+    for _ in range(42):
+        backfill_from_ynab_subtransactions(profiles, txns)
+
+    record_item_categorization(profiles, "usb cable", "cat-home", "Home Goods")
+    record_item_categorization(profiles, "usb cable", "cat-home", "Home Goods")
+
+    assert dominant_item_category(profiles, "usb cable") == ("cat-home", "Home Goods")
+
+
+def test_backfill_records_distinct_history_rows_for_the_same_item():
+    """Two SEPARATE historical splits of the same item are two real observations.
+
+    Idempotency keys on the transaction/subtransaction identity, not the item
+    name — genuine repeat purchases must still accumulate weight.
+    """
+    profiles = _empty()
+    txns = [
+        {"id": "t1", "payee_name": "Amazon", "subtransactions": [
+            {"id": "s1", "category_id": "cat-home", "category_name": "Home Goods", "memo": "USB Cable"},
+        ]},
+        {"id": "t2", "payee_name": "Amazon", "subtransactions": [
+            {"id": "s2", "category_id": "cat-home", "category_name": "Home Goods", "memo": "USB Cable"},
+        ]},
+    ]
+    n = backfill_from_ynab_subtransactions(profiles, txns)
+    assert n == 2
+    assert _all_exemplar_counts(profiles, "usb cable")["cat-home"]["count"] == 2
+
+    assert backfill_from_ynab_subtransactions(profiles, txns) == 0
+    assert _all_exemplar_counts(profiles, "usb cable")["cat-home"]["count"] == 2
+
+
+def test_backfill_reingests_when_history_row_changes_category():
+    """If the user recategorizes a split in YNAB, backfill must pick up the change."""
+    profiles = _empty()
+    sub = {"id": "s1", "category_id": "cat-comp", "category_name": "Computer", "memo": "USB Cable"}
+    txns = [{"id": "t1", "payee_name": "Amazon", "subtransactions": [sub]}]
+    backfill_from_ynab_subtransactions(profiles, txns)
+
+    sub["category_id"] = "cat-home"
+    sub["category_name"] = "Home Goods"
+    n = backfill_from_ynab_subtransactions(profiles, txns)
+
+    assert n == 1
+    assert dominant_item_category(profiles, "usb cable") == ("cat-home", "Home Goods")
 
 
 def test_backfill_treats_history_as_weak_prior_outvoted_by_confirmations():
