@@ -131,6 +131,9 @@ def load_profiles(path: str = DEFAULT_PROFILES_PATH) -> dict:
     # backfill_from_ynab_subtransactions). Absent in stores written before
     # backfill became idempotent.
     profiles.setdefault("_backfilled", {})
+    # Hand-written guidance is absent in stores predating the field.
+    for cat in profiles["categories"].values():
+        cat.setdefault("guidance", "")
     return profiles
 
 
@@ -148,6 +151,7 @@ def _ensure_category(profiles: dict, category_id: str, category_name: str) -> di
         cats[category_id] = {
             "name": category_name,
             "description": "",
+            "guidance": "",
             "merchants": [],
             "item_exemplars": {},
             "corrections": [],
@@ -156,6 +160,75 @@ def _ensure_category(profiles: dict, category_id: str, category_name: str) -> di
     elif category_name and not cats[category_id].get("name"):
         cats[category_id]["name"] = category_name
     return cats[category_id]
+
+
+# ---------------------------------------------------------------------------
+# Guidance — hand-written rules that outrank and outlive learned descriptions
+# ---------------------------------------------------------------------------
+#
+# `description` is machine-generated and rewritten wholesale on every refresh, so
+# hand-editing it is futile: the next time the category goes dirty, the edit is
+# gone. `guidance` is the durable counterpart — written by the user, never
+# touched by regeneration, and injected into BOTH prompt paths:
+#
+#   - the categorization prompt, marked as a rule that overrides inference, so it
+#     steers live decisions ("a Leatherman is Home goods, not Household supplies")
+#   - the description-generation prompt, as authoritative context, so regenerated
+#     descriptions are consistent with it instead of drifting back
+#
+# This is the answer to "some categories are defined by a boundary no amount of
+# merchant history expresses."
+
+def set_guidance(
+    profiles: dict,
+    category_id: str,
+    text: str,
+    category_name: str = "",
+) -> None:
+    """Attach a durable, hand-written rule to a category.
+
+    The text is stored verbatim and survives every description regeneration.
+
+    Args:
+        category_id: YNAB category id to annotate.
+        text: The rule, in plain English. Written for Claude to read.
+        category_name: Required only when creating an entry for a category that
+                      isn't in the store yet.
+
+    Raises ValueError if `text` is blank, or if the category is unknown and no
+    category_name was supplied (NO SILENT FALLBACK: silently creating a nameless
+    category entry would produce an unusable profile).
+    """
+    if text is None or not text.strip():
+        raise ValueError("Guidance text cannot be empty or whitespace-only")
+
+    if category_id not in profiles.get("categories", {}) and not category_name:
+        raise ValueError(
+            f"set_guidance: unknown category_id {category_id!r} and no "
+            f"category_name given — refusing to create a nameless category entry"
+        )
+
+    cat = _ensure_category(profiles, category_id, category_name)
+    cat["guidance"] = text.strip()
+
+
+def get_guidance(profiles: dict, category_id: str) -> str:
+    """Return a category's hand-written guidance, or "" if it has none."""
+    cat = profiles.get("categories", {}).get(category_id)
+    if cat is None:
+        return ""
+    return cat.get("guidance", "")
+
+
+def clear_guidance(profiles: dict, category_id: str) -> None:
+    """Remove a category's hand-written guidance.
+
+    Raises ValueError if the category is unknown.
+    """
+    cat = profiles.get("categories", {}).get(category_id)
+    if cat is None:
+        raise ValueError(f"clear_guidance: unknown category_id {category_id!r}")
+    cat["guidance"] = ""
 
 
 # ---------------------------------------------------------------------------
@@ -677,6 +750,9 @@ def _bootstrap_descriptions_batch(profiles: dict, category_ids: list, api_key: s
             f"    merchants: {merchants}\n"
             f"    example items: {exemplars}"
         )
+        guidance = cat.get("guidance", "")
+        if guidance:
+            entry += f"\n    user rule (authoritative): {guidance}"
         corrections = cat.get("corrections", [])
         if corrections:
             # Surface the user's recent overrides so the new description fixes
@@ -700,6 +776,12 @@ Some categories include "user corrections": cases where an automated
 categorizer guessed this category but the user moved the item elsewhere (or
 moved it INTO this category from elsewhere). Treat these as authoritative
 boundary corrections — the new description MUST be consistent with them.
+
+Some categories include a "user rule": an explicit, hand-written statement of
+what belongs in the category. This is the highest authority available — it
+outranks the merchants and example items, which may contradict it. The new
+description MUST be consistent with the rule, and should incorporate its
+substance so the boundary it draws survives in the description itself.
 
 Respond with ONLY a JSON array, one object per category, in any order:
 [{"category_id": "<id>", "description": "<one sentence>"}]"""
@@ -821,16 +903,24 @@ def format_profiles_for_prompt(
     cat_profiles = profiles.get("categories", {})
 
     # Precompute, per category, the exemplar item names where it is dominant.
+    # An item filed under several categories appears in each one's exemplar map,
+    # so resolve each DISTINCT item once — otherwise it is emitted once per
+    # storing category, double-weighting it against MAX_EXEMPLARS_PER_CATEGORY
+    # and silently crowding genuine examples out of the prompt.
     dominant_items: dict = {}
     if include_exemplars:
-        for cat in cat_profiles.values():
-            for norm_item in cat.get("item_exemplars", {}):
-                dom_id, _ = dominant_item_category(profiles, norm_item)
-                if dom_id is None:
-                    continue
-                counts = _all_exemplar_counts(profiles, norm_item)
-                total = counts[dom_id]["count"]
-                dominant_items.setdefault(dom_id, []).append((total, norm_item))
+        all_items = {
+            norm_item
+            for cat in cat_profiles.values()
+            for norm_item in cat.get("item_exemplars", {})
+        }
+        for norm_item in all_items:
+            dom_id, _ = dominant_item_category(profiles, norm_item)
+            if dom_id is None:
+                continue
+            counts = _all_exemplar_counts(profiles, norm_item)
+            total = counts[dom_id]["count"]
+            dominant_items.setdefault(dom_id, []).append((total, norm_item))
 
     out_lines = []
     for group in categories:
@@ -840,16 +930,26 @@ def format_profiles_for_prompt(
             profile = cat_profiles.get(cat_id)
             description = profile.get("description") if profile else None
 
+            guidance = profile.get("guidance") if profile else None
+
             if not description:
-                logger.warning(
-                    "Category %r (id %s) has no learned profile description; "
-                    "categorization will rely on the bare name. Run a "
-                    "profile bootstrap to teach Claude what this category means.",
-                    name, cat_id,
-                )
+                # A category with hand-written guidance is deliberately defined,
+                # not neglected — don't nag about a missing learned description.
+                if not guidance:
+                    logger.warning(
+                        "Category %r (id %s) has no learned profile description; "
+                        "categorization will rely on the bare name. Run a "
+                        "profile bootstrap to teach Claude what this category means.",
+                        name, cat_id,
+                    )
                 out_lines.append(f"- {name} (ID: {cat_id})")
             else:
                 out_lines.append(f"- {name} (ID: {cat_id}): {description}")
+
+            if guidance:
+                # Marked as a RULE so Claude treats it as overriding its own
+                # inference from the description and exemplars below.
+                out_lines.append(f"    RULE (user-defined, overrides inference): {guidance}")
 
             if include_exemplars:
                 examples = dominant_items.get(cat_id, [])

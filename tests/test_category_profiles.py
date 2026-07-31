@@ -18,6 +18,7 @@ from unittest.mock import patch, Mock
 
 from category_profiles import (
     PROFILES_VERSION,
+    MAX_EXEMPLARS_PER_CATEGORY,
     normalize_item_name,
     load_profiles,
     save_profiles,
@@ -36,6 +37,10 @@ from category_profiles import (
     backfill_from_ynab_subtransactions,
     record_confirmed_splits,
     _all_exemplar_counts,
+    _ensure_category,
+    set_guidance,
+    get_guidance,
+    clear_guidance,
 )
 
 
@@ -387,6 +392,162 @@ def test_build_merchant_map_raises_on_non_uuid_category_id():
     }
     with pytest.raises(ValueError, match="is not a UUID|non-UUID"):
         build_merchant_map_from_cache(payee_cache)
+
+
+# ---------------------------------------------------------------------------
+# guidance — hand-written rules that survive description regeneration
+# ---------------------------------------------------------------------------
+
+def test_set_guidance_persists_on_the_category():
+    profiles = _empty()
+    _ensure_category(profiles, "cat-home", "Home goods")
+    set_guidance(profiles, "cat-home", "Multitools and small appliances belong here.")
+    assert get_guidance(profiles, "cat-home") == "Multitools and small appliances belong here."
+
+
+def test_set_guidance_creates_category_if_absent():
+    profiles = _empty()
+    set_guidance(profiles, "cat-new", "Tools go here.", category_name="Home goods")
+    assert profiles["categories"]["cat-new"]["name"] == "Home goods"
+    assert get_guidance(profiles, "cat-new") == "Tools go here."
+
+
+def test_set_guidance_rejects_unknown_category_without_a_name():
+    """NO SILENT FALLBACK: creating a nameless category entry is a bug, not a default."""
+    profiles = _empty()
+    with pytest.raises(ValueError, match="unknown category_id"):
+        set_guidance(profiles, "cat-nope", "Tools go here.")
+
+
+def test_clear_guidance_removes_the_rule():
+    profiles = _empty()
+    _ensure_category(profiles, "cat-home", "Home goods")
+    set_guidance(profiles, "cat-home", "Tools go here.")
+    clear_guidance(profiles, "cat-home")
+    assert get_guidance(profiles, "cat-home") == ""
+
+
+def test_guidance_survives_description_regeneration():
+    """The whole point: regeneration must NEVER overwrite hand-written guidance."""
+    profiles = _empty()
+    _ensure_category(profiles, "cat-home", "Home goods")
+    set_guidance(profiles, "cat-home", "Multitools and small appliances belong here.")
+
+    mock_client = Mock()
+    mock_client.messages.create.return_value = Mock(
+        content=[Mock(text=json.dumps([
+            {"category_id": "cat-home", "description": "Furniture and decor."}
+        ]))],
+        stop_reason="end_turn",
+    )
+    with patch("category_profiles.anthropic.Anthropic", return_value=mock_client):
+        bootstrap_descriptions(profiles, ["cat-home"], "key")
+
+    assert profiles["categories"]["cat-home"]["description"] == "Furniture and decor."
+    assert get_guidance(profiles, "cat-home") == "Multitools and small appliances belong here."
+
+
+def test_guidance_is_shown_to_the_description_generator():
+    """Guidance is authoritative context, so regenerated descriptions agree with it."""
+    profiles = _empty()
+    _ensure_category(profiles, "cat-home", "Home goods")
+    set_guidance(profiles, "cat-home", "Multitools and small appliances belong here.")
+
+    mock_client = Mock()
+    mock_client.messages.create.return_value = Mock(
+        content=[Mock(text=json.dumps([
+            {"category_id": "cat-home", "description": "Furniture, decor, tools, small appliances."}
+        ]))],
+        stop_reason="end_turn",
+    )
+    with patch("category_profiles.anthropic.Anthropic", return_value=mock_client):
+        bootstrap_descriptions(profiles, ["cat-home"], "key")
+
+    sent = mock_client.messages.create.call_args
+    assert "Multitools and small appliances belong here." in sent.kwargs["messages"][0]["content"]
+
+
+def test_guidance_appears_in_categorization_prompt():
+    profiles = _empty()
+    _ensure_category(profiles, "cat-home", "Home goods")
+    profiles["categories"]["cat-home"]["description"] = "Furniture and decor."
+    set_guidance(profiles, "cat-home", "Multitools and small appliances belong here.")
+
+    categories = [{"name": "Group", "categories": [{"id": "cat-home", "name": "Home goods"}]}]
+    out = format_profiles_for_prompt(categories, profiles)
+
+    assert "Furniture and decor." in out
+    assert "Multitools and small appliances belong here." in out
+
+
+def test_guidance_shows_even_when_description_is_missing():
+    """An undescribed category must still surface its hand-written rule."""
+    profiles = _empty()
+    _ensure_category(profiles, "cat-home", "Home goods")
+    set_guidance(profiles, "cat-home", "Tools go here.")
+
+    categories = [{"name": "Group", "categories": [{"id": "cat-home", "name": "Home goods"}]}]
+    out = format_profiles_for_prompt(categories, profiles)
+
+    assert "Tools go here." in out
+
+
+def test_exemplar_stored_under_two_categories_is_listed_once():
+    """An item held by two categories must not be emitted twice in the prompt.
+
+    dominant_items is built by looping over every category's exemplars, so an
+    item stored under N categories was visited N times and appended N times to
+    the SAME dominant list — wasting prompt space and double-weighting one item
+    against the MAX_EXEMPLARS_PER_CATEGORY cap, which silently crowds out other
+    genuine examples.
+    """
+    profiles = _empty()
+    # Same item filed under two categories, dominant in the first.
+    record_item_categorization(profiles, "painters tape", "cat-house", "Household supplies")
+    record_item_categorization(profiles, "painters tape", "cat-house", "Household supplies")
+    record_item_categorization(profiles, "painters tape", "cat-gifts", "Gifts")
+
+    categories = [{"name": "G", "categories": [
+        {"id": "cat-house", "name": "Household supplies"},
+        {"id": "cat-gifts", "name": "Gifts"},
+    ]}]
+    out = format_profiles_for_prompt(categories, profiles)
+
+    assert out.count("painters tape") == 1
+
+
+def test_exemplar_cap_counts_distinct_items(_unused=None):
+    """The top-N cap must select N distinct items, not N list slots."""
+    profiles = _empty()
+    # One duplicated item plus enough others to exceed the cap.
+    record_item_categorization(profiles, "dupe item", "cat-a", "A")
+    record_item_categorization(profiles, "dupe item", "cat-b", "B")
+    for i in range(MAX_EXEMPLARS_PER_CATEGORY + 2):
+        record_item_categorization(profiles, f"item {i}", "cat-a", "A")
+
+    categories = [{"name": "G", "categories": [{"id": "cat-a", "name": "A"}]}]
+    out = format_profiles_for_prompt(categories, profiles)
+
+    examples_line = [l for l in out.splitlines() if "examples:" in l][0]
+    listed = [s.strip() for s in examples_line.split("examples:")[1].split(",")]
+    assert len(listed) == len(set(listed))
+
+
+def test_guidance_round_trips_through_save_and_load(tmp_path):
+    path = tmp_path / "profiles.json"
+    profiles = _empty()
+    _ensure_category(profiles, "cat-home", "Home goods")
+    set_guidance(profiles, "cat-home", "Tools go here.")
+    save_profiles(profiles, str(path))
+
+    assert get_guidance(load_profiles(str(path)), "cat-home") == "Tools go here."
+
+
+def test_set_guidance_rejects_empty_text():
+    profiles = _empty()
+    _ensure_category(profiles, "cat-home", "Home goods")
+    with pytest.raises(ValueError, match="empty"):
+        set_guidance(profiles, "cat-home", "   ")
 
 
 # ---------------------------------------------------------------------------
