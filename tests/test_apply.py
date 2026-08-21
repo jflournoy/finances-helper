@@ -800,6 +800,53 @@ def test_apply_skips_proposals_with_applied_at(apply_changeset_path, mock_client
     assert len(sent_updates) == expected_applyable
 
 
+def test_apply_skips_parent_already_split_in_ynab(apply_changeset_path, mock_client, tmp_path):
+    """A parent already split in YNAB is skipped, and the rest of the batch still applies.
+
+    YNAB rejects `subtransactions` on an existing split parent with a 400 that aborts
+    the entire batch PATCH, so one stale proposal would otherwise zero out every other
+    applyable item in the changeset.
+    """
+    from apply import apply_changeset
+    cs = _read_changeset(apply_changeset_path)
+    split_proposal = cs["amazon"]["proposed_splits"][0]
+    split_proposal["parent_ynab_transaction"]["subtransactions"] = [
+        {"id": "sub-1", "amount": -25000, "category_id": "cccccccc-0000-0000-0000-000000000001", "deleted": False},
+        {"id": "sub-2", "amount": -25000, "category_id": "cccccccc-0000-0000-0000-000000000001", "deleted": False},
+    ]
+    apply_changeset_path.write_text(json.dumps(cs))
+    expected_applyable = _applyable_count(cs) - 1
+
+    report = apply_changeset(apply_changeset_path, mock_client, "budget-1", report_dir=tmp_path)
+
+    assert not report.aborted
+    skipped_ids = {s["txn_id"]: s["reason"] for s in report.skipped}
+    assert split_proposal["transaction_id"] in skipped_ids
+    assert "already split" in skipped_ids[split_proposal["transaction_id"]]
+    assert mock_client.update_transactions.call_count == 1
+    sent_updates = mock_client.update_transactions.call_args_list[0][0][1]
+    assert len(sent_updates) == expected_applyable
+    assert all(u["id"] != split_proposal["transaction_id"] for u in sent_updates)
+
+
+def test_apply_applies_parent_whose_split_was_removed(apply_changeset_path, mock_client, tmp_path):
+    """Deleted subtransactions are not an existing split — the proposal still applies."""
+    from apply import apply_changeset
+    cs = _read_changeset(apply_changeset_path)
+    split_proposal = cs["amazon"]["proposed_splits"][0]
+    split_proposal["parent_ynab_transaction"]["subtransactions"] = [
+        {"id": "sub-1", "amount": -25000, "category_id": "cccccccc-0000-0000-0000-000000000001", "deleted": True},
+    ]
+    apply_changeset_path.write_text(json.dumps(cs))
+    expected_applyable = _applyable_count(cs)
+
+    apply_changeset(apply_changeset_path, mock_client, "budget-1", report_dir=tmp_path)
+
+    sent_updates = mock_client.update_transactions.call_args_list[0][0][1]
+    assert len(sent_updates) == expected_applyable
+    assert any(u["id"] == split_proposal["transaction_id"] for u in sent_updates)
+
+
 def test_apply_skips_proposals_with_null_category(apply_changeset_path, mock_client, tmp_path):
     from apply import apply_changeset
     cs = _read_changeset(apply_changeset_path)

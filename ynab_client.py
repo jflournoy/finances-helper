@@ -72,6 +72,16 @@ def _with_amount_dollars(txn: dict) -> dict:
     return out
 
 
+def has_live_subtransactions(txn: dict) -> bool:
+    """True if the transaction is currently split in YNAB.
+
+    YNAB reports a split parent with category_id=None, so a split transaction is
+    indistinguishable from an uncategorized one by category alone. It keeps deleted
+    subtransactions in the array after an un-split, so only non-deleted entries count.
+    """
+    return any(not s.get("deleted") for s in txn.get("subtransactions") or [])
+
+
 def filter_uncategorized_writable(ynab_txns: list[dict]) -> list[dict]:
     """Return unapproved transactions the YNAB API allows us to write to.
 
@@ -79,12 +89,16 @@ def filter_uncategorized_writable(ynab_txns: list[dict]) -> list[dict]:
     - approved is True (already human-reviewed)
     - cleared == "reconciled" (locked, API rejects edits)
     - deleted is True
+    - already split (YNAB rejects both a category_id and a new subtransactions
+      array on an existing split parent, and a rejected item aborts the whole
+      batch PATCH)
     """
     return [
         t for t in ynab_txns
         if t.get("approved") is not True
         and t.get("cleared") != "reconciled"
         and t.get("deleted") is not True
+        and not has_live_subtransactions(t)
     ]
 
 

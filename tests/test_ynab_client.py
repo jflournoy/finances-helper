@@ -561,6 +561,42 @@ class TestFilterUncategorizedWritable:
         # approved missing → not True → included
         assert result == [txn]
 
+    def test_excludes_existing_split(self):
+        """A transaction already split in YNAB is excluded.
+
+        YNAB reports a split parent with category_id=None, which otherwise looks
+        like an uncategorized transaction. Re-proposing a split for it produces a
+        400 ("subtransactions cannot be updated on an existing split transaction")
+        that aborts the whole batch PATCH.
+        """
+        txn = {
+            "id": "t1", "approved": False, "cleared": "cleared", "deleted": False,
+            "category_id": None,
+            "subtransactions": [
+                {"id": "s1", "amount": -1000, "category_id": "cat-a", "deleted": False},
+                {"id": "s2", "amount": -2000, "category_id": "cat-b", "deleted": False},
+            ],
+        }
+        result = filter_uncategorized_writable([txn])
+        assert result == []
+
+    def test_includes_txn_whose_split_was_removed(self):
+        """Deleted subtransactions do not count: an un-split txn is writable again."""
+        txn = {
+            "id": "t1", "approved": False, "cleared": "cleared", "deleted": False,
+            "subtransactions": [
+                {"id": "s1", "amount": -1000, "category_id": "cat-a", "deleted": True},
+            ],
+        }
+        result = filter_uncategorized_writable([txn])
+        assert result == [txn]
+
+    def test_includes_txn_with_empty_subtransactions(self):
+        """An empty subtransactions list is the normal shape for a flat txn."""
+        txn = {"id": "t1", "approved": False, "cleared": "cleared", "deleted": False, "subtransactions": []}
+        result = filter_uncategorized_writable([txn])
+        assert result == [txn]
+
 
 # Issue #155: Sandbox initialization refactor
 

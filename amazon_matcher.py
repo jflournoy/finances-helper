@@ -615,6 +615,8 @@ def filter_amazon_transactions(ynab_txns: list[dict]) -> list[dict]:
     - approved is not True (not yet human-reviewed)
     - cleared != "reconciled" (reconciled cannot be edited via API)
     - deleted is not True
+    - not already split in YNAB (a split parent reports category_id=None, so it
+      looks uncategorized; re-proposing a split makes YNAB reject the whole batch)
 
     Args:
         ynab_txns: List of YNAB transaction dicts
@@ -622,6 +624,8 @@ def filter_amazon_transactions(ynab_txns: list[dict]) -> list[dict]:
     Returns:
         List of filtered transactions
     """
+    from ynab_client import has_live_subtransactions
+
     result = []
 
     for txn in ynab_txns:
@@ -635,6 +639,9 @@ def filter_amazon_transactions(ynab_txns: list[dict]) -> list[dict]:
             continue
 
         if txn.get("deleted") is True:
+            continue
+
+        if has_live_subtransactions(txn):
             continue
 
         result.append(txn)

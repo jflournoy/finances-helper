@@ -984,6 +984,33 @@ class TestFilterAmazonTransactions:
         result = filter_amazon_transactions(txns)
         assert len(result) == 1
 
+    def test_filter_existing_split(self):
+        """Exclude transactions already split in YNAB.
+
+        A split parent reports category_id=None, so it looks uncategorized. Re-proposing
+        a split for it makes YNAB reject the entire batch PATCH with
+        "subtransactions cannot be updated on an existing split transaction".
+        """
+        txns = [{
+            "payee_name": "Amazon", "approved": False, "cleared": "uncleared", "deleted": False,
+            "category_id": None,
+            "subtransactions": [
+                {"id": "s1", "amount": -1000, "category_id": "cat-a", "deleted": False},
+                {"id": "s2", "amount": -2000, "category_id": "cat-b", "deleted": False},
+            ],
+        }]
+        result = filter_amazon_transactions(txns)
+        assert len(result) == 0
+
+    def test_filter_keeps_txn_whose_split_was_removed(self):
+        """Deleted subtransactions do not count as an existing split."""
+        txns = [{
+            "payee_name": "Amazon", "approved": False, "cleared": "uncleared", "deleted": False,
+            "subtransactions": [{"id": "s1", "amount": -1000, "category_id": "cat-a", "deleted": True}],
+        }]
+        result = filter_amazon_transactions(txns)
+        assert len(result) == 1
+
 
 # ============================================================================
 # Matcher Tests: Shipment-to-Transaction Matching

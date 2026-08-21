@@ -408,7 +408,7 @@ def apply_changeset(
     """
     from ynab_client import (
         YNABNotFoundError, YNABConflictError, YNABValidationError,
-        YNABRateLimitError, YNABAPIError,
+        YNABRateLimitError, YNABAPIError, has_live_subtransactions,
     )
 
     if client.sandbox_mode:
@@ -453,6 +453,17 @@ def apply_changeset(
             continue
 
         if source == "amazon":
+            parent = proposal.get("parent_ynab_transaction") or {}
+            if has_live_subtransactions(parent):
+                n_subs = sum(1 for s in parent["subtransactions"] if not s.get("deleted"))
+                skipped.append({
+                    "txn_id": txn_id,
+                    "reason": (
+                        f"already split in YNAB ({n_subs} subtransactions) — "
+                        f"YNAB rejects a new split on an existing split parent"
+                    ),
+                })
+                continue
             patch_body = proposal_to_patch_body(proposal)
             uncategorized_reason = "contains uncategorized items"
         else:
