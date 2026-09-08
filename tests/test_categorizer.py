@@ -3034,3 +3034,259 @@ class TestUpdateCacheFromClaudeResults:
             assert mock_record.call_count == 1
             call_kwargs = mock_record.call_args[1]
             assert call_kwargs["source"] == "claude"
+
+
+# ============================================================================
+# Phase 5: order rollup — one order billed once but shipped in several parcels
+# ============================================================================
+
+
+def _make_parcel(
+    *,
+    order_id="113-4262513-5433000",
+    ship_date=date(2026, 8, 6),
+    subtotal="59.99",
+    tax="4.65",
+    total="64.64",
+    last4="5219",
+    status="Shipped",
+    website="Amazon.com",
+    carrier="AMZN_US(TBA1)",
+    product_name="See Kai Run Sneaker",
+    asin="B0FMW3M89N",
+    row_index=2,
+):
+    """One parcel of a multi-parcel Amazon order, shaped like the real dump."""
+    item = AmazonItem(
+        order_id=order_id,
+        ship_date=ship_date,
+        asin=asin,
+        product_name=product_name,
+        quantity=1,
+        unit_price=Decimal(subtotal),
+        unit_price_tax=Decimal(tax),
+        raw_row_index=row_index,
+    )
+    return AmazonShipment(
+        order_id=order_id,
+        ship_date=ship_date,
+        payment_method_raw=f"Visa - {last4}",
+        payment_method_last4=last4,
+        is_split_tender=False,
+        currency="USD",
+        item_subtotal=Decimal(subtotal),
+        tax=Decimal(tax),
+        shipping=Decimal("0"),
+        discounts=Decimal("0"),
+        total_amount=Decimal(total),
+        items=[item],
+        shipment_status=status,
+        website=website,
+        carrier=carrier,
+    )
+
+
+def _sneaker_parcel(**kw):
+    return _make_parcel(**kw)
+
+
+def _shorts_parcel(**kw):
+    base = dict(
+        subtotal="18",
+        tax="1.4",
+        total="19.4",
+        product_name="Amazon Essentials Boys Shorts",
+        asin="B0DNFLML4B",
+        carrier="AMZN_US(TBA2)",
+        row_index=3,
+    )
+    base.update(kw)
+    return _make_parcel(**base)
+
+
+def _charge(amount_milliunits=-84040, txn_date="2026-08-07", txn_id="amz-84"):
+    return {
+        "id": txn_id,
+        "payee_name": "Amazon",
+        "amount": amount_milliunits,
+        "date": txn_date,
+    }
+
+
+def test_order_rollup_matches_two_parcels_summing_to_one_charge():
+    """Real order 113-4262513-5433000: $64.64 + $19.40 parcels, one $84.04 charge.
+
+    Neither parcel equals the charge, so per-shipment matching leaves both
+    sides unmatched. The order sum does equal it.
+    """
+    txn = _charge()
+    result = match_shipments_to_transactions(
+        [txn], [_sneaker_parcel(), _shorts_parcel()]
+    )
+
+    assert len(result.matched) == 1
+    match = result.matched[0]
+    assert match.ynab_txn["id"] == "amz-84"
+    assert match.shipment.total_amount == Decimal("84.04")
+    assert match.shipment.order_id == "113-4262513-5433000"
+    assert result.unmatched_ynab == []
+    assert result.unmatched_shipments == []
+
+
+def test_order_rollup_merged_shipment_carries_every_parcels_items():
+    """The fused shipment is what the splits get built from — it must be complete."""
+    result = match_shipments_to_transactions(
+        [_charge()], [_shorts_parcel(), _sneaker_parcel()]
+    )
+
+    merged = result.matched[0].shipment
+    assert [i.product_name for i in merged.items] == [
+        "See Kai Run Sneaker",
+        "Amazon Essentials Boys Shorts",
+    ]
+    assert merged.item_subtotal == Decimal("77.99")
+    assert merged.tax == Decimal("6.05")
+    assert merged.expected_charge == merged.total_amount
+    assert "TBA1" in merged.carrier and "TBA2" in merged.carrier
+
+
+def test_order_rollup_merged_shipment_allocates_without_error():
+    """A merged shipment must survive the allocator the split proposal calls."""
+    from amazon_matcher import allocate_shipment_to_items
+
+    merged = match_shipments_to_transactions(
+        [_charge()], [_sneaker_parcel(), _shorts_parcel()]
+    ).matched[0].shipment
+
+    allocations = allocate_shipment_to_items(merged)
+
+    assert sum(a.allocated_amount for a in allocations) == Decimal("84.04")
+
+
+def test_order_rollup_uses_earliest_ship_date_for_the_date_window():
+    """Amazon bills when the first parcel leaves, so the window keys off that."""
+    early = _sneaker_parcel(ship_date=date(2026, 8, 6))
+    late = _shorts_parcel(ship_date=date(2026, 8, 12))
+
+    result = match_shipments_to_transactions(
+        [_charge(txn_date="2026-08-07")], [early, late], date_window_days=3
+    )
+
+    assert len(result.matched) == 1
+    assert result.matched[0].shipment.ship_date == date(2026, 8, 6)
+    assert result.matched[0].date_delta_days == -1
+
+
+def test_order_rollup_skips_parcel_that_already_matched_its_own_charge():
+    """A parcel billed on its own is spoken for; it must not also feed an order sum."""
+    own_charge = _charge(amount_milliunits=-64640, txn_date="2026-08-07", txn_id="amz-64")
+    order_charge = _charge(amount_milliunits=-84040, txn_date="2026-08-07", txn_id="amz-84")
+
+    result = match_shipments_to_transactions(
+        [own_charge, order_charge], [_sneaker_parcel(), _shorts_parcel()]
+    )
+
+    assert [m.ynab_txn["id"] for m in result.matched] == ["amz-64"]
+    assert result.matched[0].shipment.total_amount == Decimal("64.64")
+    assert [t["id"] for t, _ in result.unmatched_ynab] == ["amz-84"]
+    assert [s.total_amount for s in result.unmatched_shipments] == [Decimal("19.4")]
+
+
+def test_order_rollup_does_not_subset_sum():
+    """Two of three parcels summing to the charge is ambiguous — leave it unmatched."""
+    third = _make_parcel(
+        subtotal="30.00", tax="0", total="30.00",
+        product_name="Third Thing", asin="B0THIRD", carrier="AMZN_US(TBA3)", row_index=4,
+    )
+
+    result = match_shipments_to_transactions(
+        [_charge()], [_sneaker_parcel(), _shorts_parcel(), third]
+    )
+
+    assert result.matched == []
+    assert len(result.unmatched_shipments) == 3
+    assert [t["id"] for t, _ in result.unmatched_ynab] == ["amz-84"]
+
+
+def test_order_rollup_refuses_when_parcels_used_different_cards():
+    """Two cards means two charges — fusing them would invent a charge that isn't there."""
+    result = match_shipments_to_transactions(
+        [_charge()], [_sneaker_parcel(last4="5219"), _shorts_parcel(last4="0804")]
+    )
+
+    assert result.matched == []
+    assert len(result.unmatched_shipments) == 2
+
+
+def test_order_rollup_refuses_when_one_parcel_is_whole_foods():
+    """Whole Foods parcels route to Groceries wholesale; they must not be fused in."""
+    wf = _shorts_parcel(website="PrimeNow-US")
+
+    result = match_shipments_to_transactions([_charge()], [_sneaker_parcel(), wf])
+
+    assert result.matched == []
+    assert len(result.unmatched_shipments) == 2
+
+
+def test_order_rollup_does_not_fuse_parcels_of_different_orders():
+    """The sum must belong to one order; two unrelated orders summing is coincidence."""
+    other = _shorts_parcel(order_id="112-9999999-9999999")
+
+    result = match_shipments_to_transactions([_charge()], [_sneaker_parcel(), other])
+
+    assert result.matched == []
+    assert len(result.unmatched_shipments) == 2
+
+
+def test_order_rollup_does_not_steal_a_contended_charge():
+    """A charge two shipments are fighting over stays contended, not silently rolled up."""
+    contender_a = _make_parcel(
+        order_id="112-AAA", total="84.04", subtotal="84.04", tax="0",
+        product_name="Contender A", asin="B0AAA", row_index=10,
+    )
+    contender_b = _make_parcel(
+        order_id="112-BBB", total="84.04", subtotal="84.04", tax="0",
+        product_name="Contender B", asin="B0BBB", row_index=11,
+    )
+
+    result = match_shipments_to_transactions(
+        [_charge()], [contender_a, contender_b, _sneaker_parcel(), _shorts_parcel()]
+    )
+
+    assert [t["id"] for t, _ in result.unmatched_ynab] == ["amz-84"]
+    assert result.unmatched_ynab[0][1].startswith("contended")
+    assert result.matched == []
+
+
+def test_order_rollup_picks_nearest_charge_when_two_charges_share_the_amount():
+    """Two identical charges in window: pick by date proximity, same rule as Phase 3."""
+    near = _charge(txn_date="2026-08-07", txn_id="amz-near")
+    far = _charge(txn_date="2026-08-09", txn_id="amz-far")
+
+    result = match_shipments_to_transactions(
+        [far, near], [_sneaker_parcel(), _shorts_parcel()]
+    )
+
+    assert [m.ynab_txn["id"] for m in result.matched] == ["amz-near"]
+    assert [t["id"] for t, _ in result.unmatched_ynab] == ["amz-far"]
+
+
+def test_order_rollup_refuses_when_parcels_are_in_different_currencies():
+    """Summing across currencies would produce a number that means nothing."""
+    foreign = _shorts_parcel()
+    foreign.currency = "CAD"
+
+    result = match_shipments_to_transactions([_charge()], [_sneaker_parcel(), foreign])
+
+    assert result.matched == []
+    assert len(result.unmatched_shipments) == 2
+
+
+def test_order_rollup_refuses_when_parcels_have_different_shipment_status():
+    """A merged shipment needs one status; picking a parcel's would be invented data."""
+    result = match_shipments_to_transactions(
+        [_charge()], [_sneaker_parcel(status="Shipped"), _shorts_parcel(status="Delivered")]
+    )
+
+    assert result.matched == []
+    assert len(result.unmatched_shipments) == 2

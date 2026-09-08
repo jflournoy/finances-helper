@@ -473,6 +473,65 @@ def parse_order_history(csv_text: str) -> tuple[list[AmazonShipment], list[Parse
 # ============================================================================
 
 
+def _merge_order_shipments(shipments: list[AmazonShipment]) -> AmazonShipment:
+    """Fuse several shipments of one order into the single charge Amazon made.
+
+    Amazon splits an order into parcels but bills the order total once, so the
+    dump's per-parcel rows have no counterpart in YNAB. This builds the row
+    that would have existed: money fields summed, items concatenated in CSV
+    order, ship_date the earliest (Amazon charges when the first parcel
+    leaves), carrier a join of every tracking string so the merge stays
+    auditable.
+
+    Callers must have already established that the group is homogeneous in
+    the fields not summable here (payment method, currency, split-tender,
+    Whole Foods, shipment status) — this function does not re-check, and
+    silently taking the first member's value for a field that differs would
+    put invented data into a real-money split.
+    """
+    ordered = sorted(shipments, key=lambda s: min(i.raw_row_index for i in s.items))
+    first = ordered[0]
+    return AmazonShipment(
+        order_id=first.order_id,
+        ship_date=min(s.ship_date for s in ordered),
+        payment_method_raw=first.payment_method_raw,
+        payment_method_last4=first.payment_method_last4,
+        is_split_tender=first.is_split_tender,
+        currency=first.currency,
+        item_subtotal=sum((s.item_subtotal for s in ordered), start=Decimal("0")),
+        tax=sum((s.tax for s in ordered), start=Decimal("0")),
+        shipping=sum((s.shipping for s in ordered), start=Decimal("0")),
+        discounts=sum((s.discounts for s in ordered), start=Decimal("0")),
+        total_amount=sum((s.total_amount for s in ordered), start=Decimal("0")),
+        items=[item for s in ordered for item in sorted(s.items, key=lambda i: i.raw_row_index)],
+        shipment_status=first.shipment_status,
+        website=first.website,
+        carrier=" + ".join(s.carrier for s in ordered if s.carrier),
+    )
+
+
+def _order_rollup_blocker(shipments: list[AmazonShipment]) -> str | None:
+    """Reason this order's parcels must not be fused, or None if they may be.
+
+    Anything that differs across parcels and cannot be summed blocks the
+    merge: two payment cards, two currencies, a Whole Foods parcel mixed with
+    a regular one. Refusing is the safe outcome — the order simply stays
+    unmatched and reaches the near-miss walk, exactly as before this pass
+    existed.
+    """
+    checks = (
+        ("payment method", {s.payment_method_last4 for s in shipments}),
+        ("currency", {s.currency for s in shipments}),
+        ("split-tender flag", {s.is_split_tender for s in shipments}),
+        ("Whole Foods flag", {s.is_wf for s in shipments}),
+        ("shipment status", {s.shipment_status for s in shipments}),
+    )
+    for label, values in checks:
+        if len(values) > 1:
+            return f"{label} differs across parcels ({sorted(map(str, values))})"
+    return None
+
+
 @dataclass
 class MatchCandidate:
     """A potential match between a YNAB transaction and an Amazon shipment."""
@@ -664,6 +723,9 @@ def match_shipments_to_transactions(
     - Phase 2: Iteratively resolve singletons (no contention)
     - Phase 3: Case A - tiebreak for multi-candidate shipments
     - Phase 4: Classify remaining unresolved shipments (Case B error)
+    - Phase 5: Order rollup - fuse the parcels of one order whose totals sum
+      to a still-unconsumed charge (Amazon bills the order once even when it
+      ships in two boxes, so no single parcel row ever equals the charge)
     """
     if parse_errors is None:
         parse_errors = []
@@ -800,6 +862,98 @@ def match_shipments_to_transactions(
             f"Shipments: {all_shipment_ids}. Reason: check for missing charge or duplicate."
         )
 
+    contended_txn_ids = set()
+    for shipment, cands in case_b_shipments:
+        for t, _ in cands:
+            contended_txn_ids.add(t["id"])
+
+    # Zero-candidate shipments come from two places: any still sitting in
+    # unresolved_indices with no candidates (shouldn't happen post-loop, but
+    # kept for safety), plus every index Phase 2 already evicted for having
+    # zero candidates (zero_candidate_removed_indices) — those left
+    # unresolved_indices immediately and would otherwise be lost.
+    zero_candidate_indices = {idx for idx in unresolved_indices if len(candidates[idx][1]) == 0}
+    zero_candidate_indices |= zero_candidate_removed_indices
+
+    # Phase 5: Order rollup.
+    #
+    # Amazon charges an order once but ships it in as many parcels as it
+    # likes, and the order-history export records a row group per parcel. No
+    # single parcel total then equals the card charge, so Phases 1-4 leave
+    # both sides unmatched. Fuse the parcels of one order when their totals
+    # sum exactly to a charge nobody else claimed.
+    #
+    # Scope guards, deliberately narrow — this pass invents a shipment that
+    # is not in the dump, so it only fires where the arithmetic is
+    # unambiguous:
+    #   - only shipments that matched nothing on their own. A parcel that
+    #     equalled its own charge is already spoken for and must not be
+    #     double-counted into an order sum.
+    #   - the FULL order only. If three parcels are unmatched and two of them
+    #     sum to a charge, that is a subset-sum with more than one possible
+    #     answer and the order stays unmatched.
+    #   - the group must be homogeneous in every field that cannot be summed
+    #     (see _order_rollup_blocker).
+    #   - the charge must be unconsumed and uncontended, and dated within the
+    #     window of the EARLIEST ship date, since that is when Amazon bills.
+    rollup_matches = []
+    rolled_up_indices = set()
+    indices_by_order = {}
+    for idx in zero_candidate_indices:
+        indices_by_order.setdefault(candidates[idx][0].order_id, []).append(idx)
+
+    for order_id in sorted(indices_by_order):
+        group_indices = sorted(indices_by_order[order_id])
+        if len(group_indices) < 2:
+            continue
+
+        group = [candidates[idx][0] for idx in group_indices]
+        blocker = _order_rollup_blocker(group)
+        if blocker is not None:
+            logger.warning(
+                "Order rollup skipped for %s (%d parcels): %s",
+                order_id, len(group), blocker,
+            )
+            continue
+
+        merged = _merge_order_shipments(group)
+        rollup_candidates = []
+        for txn in ynab_txns:
+            if txn["id"] in consumed_txn_ids or txn["id"] in contended_txn_ids:
+                continue
+            txn_amt = abs(Decimal(txn["amount"])) / Decimal(1000)
+            if txn_amt != merged.total_amount:
+                continue
+            date_delta = (merged.ship_date - date.fromisoformat(txn["date"])).days
+            if abs(date_delta) <= date_window_days:
+                rollup_candidates.append((txn, date_delta))
+
+        if not rollup_candidates:
+            continue
+
+        # Same tiebreak as Phase 3, so a repeat run picks the same charge.
+        txn, date_delta = sorted(
+            rollup_candidates, key=lambda c: (abs(c[1]), c[0]["date"], c[0]["id"])
+        )[0]
+        if len(rollup_candidates) > 1:
+            logger.info(
+                "Order rollup for %s had %d equal-amount charges in window; "
+                "picked %s by date proximity.",
+                order_id, len(rollup_candidates), txn["id"],
+            )
+
+        logger.info(
+            "Order rollup: %d parcels of %s totalling %s matched charge %s (%s).",
+            len(group), order_id, merged.total_amount, txn["id"], txn["date"],
+        )
+        rollup_matches.append(
+            MatchCandidate(ynab_txn=txn, shipment=merged, date_delta_days=date_delta)
+        )
+        consumed_txn_ids.add(txn["id"])
+        rolled_up_indices.update(group_indices)
+
+    zero_candidate_indices -= rolled_up_indices
+
     # Build matched list
     for idx, (txn, date_delta) in resolved.items():
         shipment, _ = candidates[idx]
@@ -809,13 +963,10 @@ def match_shipments_to_transactions(
             date_delta_days=date_delta,
         )
         matched.append(match)
+    matched.extend(rollup_matches)
 
     # Unmatched YNAB transactions
     matched_txn_ids = {m.ynab_txn["id"] for m in matched}
-    contended_txn_ids = set()
-    for shipment, cands in case_b_shipments:
-        for t, _ in cands:
-            contended_txn_ids.add(t["id"])
 
     for txn in ynab_txns:
         if txn["id"] not in matched_txn_ids:
@@ -825,14 +976,8 @@ def match_shipments_to_transactions(
                 reason = "no matching shipment in dump"
             unmatched_ynab.append((txn, reason))
 
-    # Unmatched shipments = those with zero candidates OR Case B contention.
-    # Zero-candidate shipments come from two places: any still sitting in
-    # unresolved_indices with no candidates (shouldn't happen post-loop, but
-    # kept for safety), plus every index Phase 2 already evicted for having
-    # zero candidates (zero_candidate_removed_indices) — those left
-    # unresolved_indices immediately and would otherwise be lost.
-    zero_candidate_indices = {idx for idx in unresolved_indices if len(candidates[idx][1]) == 0}
-    zero_candidate_indices |= zero_candidate_removed_indices
+    # Unmatched shipments = those with zero candidates (less any fused into an
+    # order rollup) OR Case B contention.
     zero_candidate_shipments = [candidates[idx][0] for idx in zero_candidate_indices]
     case_b_unmatched = [s for s, _ in case_b_shipments]
     unmatched_shipments = zero_candidate_shipments + case_b_unmatched

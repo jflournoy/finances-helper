@@ -134,6 +134,10 @@ Matching is by exact amount + a date window (default ±3 days). Digital charges
 (Prime Video, tips, subscriptions) have no shipment row and are reported as
 unmatched — that's expected.
 
+When Amazon ships one order as several parcels it still bills the order once, so no
+single parcel row equals the charge. The matcher fuses that order's unmatched parcels
+and matches their sum — the full order only, never a subset.
+
 ## Project structure
 
 ```
