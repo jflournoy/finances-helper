@@ -1,0 +1,94 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(*)",
+      "WebSearch",
+      "mcp__claude_ai_PubMed__get_article_metadata",
+      "Bash(claude --version)",
+      "Bash(quarto render *)",
+      "Bash(uv run *)",
+      "Skill(commit)",
+      "Skill(commit:*)"
+    ],
+    "ask": [
+      "Bash(git push --force*)",
+      "Bash(git push -f*)",
+      "Bash(git push*--force*)",
+      "Bash(git push*--delete*)",
+      "Bash(git push* :*)",
+      "Bash(rm -rf*)",
+      "Bash(rm -fr*)",
+      "Bash(rm -r -f*)",
+      "Bash(rm *-rf*)",
+      "Bash(git reset --hard*)",
+      "Bash(git reset*--hard*)",
+      "Bash(git clean -f*)",
+      "Bash(git clean*-f*)",
+      "Bash(*curl*| sh*)",
+      "Bash(*curl*|sh*)",
+      "Bash(*curl*| bash*)",
+      "Bash(*curl*|bash*)",
+      "Bash(*wget*| sh*)",
+      "Bash(*wget*|sh*)",
+      "Bash(*wget*| bash*)",
+      "Bash(*wget*|bash*)",
+      "Bash(git checkout .*)",
+      "Bash(git checkout -- *)",
+      "Bash(git restore .*)",
+      "Bash(git restore --*)",
+      "Bash(git stash drop*)",
+      "Bash(git stash clear*)",
+      "Bash(git rebase*)",
+      "Bash(git filter-branch*)",
+      "Bash(git branch -D*)",
+      "Bash(git branch -d*)",
+      "Bash(git tag -d*)",
+      "Bash(*--no-verify*)",
+      "Read(secrets/**)",
+      "Read(./secrets/**)",
+      "Bash(cat secrets/*)",
+      "Bash(cat ./secrets/*)",
+      "Bash(cat *salt*)",
+      "Bash(*secrets/deid_salt*)"
+    ],
+    "additionalDirectories": [
+      "/tmp"
+    ]
+  },
+  "hooks": {
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash \"$CLAUDE_PROJECT_DIR/.claude/hooks/vexp-hint.sh\"",
+            "timeout": 5
+          }
+        ]
+      }
+    ],
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash \"$CLAUDE_PROJECT_DIR/.claude/hooks/vexp-restore.sh\"",
+            "timeout": 5
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "Edit|Write",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node \"$CLAUDE_PROJECT_DIR/.claude/hooks/reviewer-dispatch.cjs\"",
+            "timeout": 10
+          }
+        ]
+      }
+    ]
+  }
+}

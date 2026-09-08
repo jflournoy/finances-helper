@@ -2,9 +2,9 @@
 !/CLAUDE.md
 !/CLAUDE_*.md
 
-# Project-shared Claude config: commands/, agents/, guides/ and the reviewer
-# dispatch hook are tracked. Everything else under .claude/ (CLAUDE.md,
-# settings.json, the vexp hooks, learnings/, metrics.json, locks, installer
+# Project-shared Claude config: commands/, agents/, guides/, CLAUDE.md,
+# settings.json and the reviewer dispatch hook are tracked. The rest of
+# .claude/ (the vexp hooks, learnings/, metrics.json, locks, installer
 # baselines and agent-generated reports) is personal or machine-local.
 !.claude/
 !.claude/commands/
@@ -14,8 +14,6 @@
 !.claude/guides/
 !.claude/guides/**
 .claude/agents/reports/
-.claude/CLAUDE.md
-.claude/settings.json
 .claude/hooks/*
 !.claude/hooks/reviewer-dispatch.cjs
 .claude/.baseline/
