@@ -1,8 +1,7 @@
 ---
-agent-type: general-purpose
-allowed-tools: [Read, Bash, Grep, Glob]
+name: next-priorities
 description: Analyzes project state to recommend next development priorities and actions
-last-updated: 2025-08-18
+tools: Read, Bash, Grep, Glob
 ---
 
 # Next Priorities Agent
@@ -12,25 +11,17 @@ Perform intelligent analysis of the current project state across multiple dimens
 
 ## Required Commands
 Use these specific commands to gather information:
-- `cat .plan-execute/current.json 2>/dev/null` - Check for active plan-execute workflow
 - `gh issue list --state open --limit 50` - Get open issues
 - `gh issue list --label "priority:high" --state open` - High priority issues
 - `gh issue list --label "status:blocked" --state open` - Blocked issues
 - `gh issue list --state closed --limit 10` - Recently closed issues
 - `git status --short` - Current repository state
-- `npm run hygiene --silent` - Project health check
+- `/hygiene` - project health check, if the project provides one
 - `gh run list --limit 5` - Recent CI runs
 
 ## Task Instructions
 
 ### Phase 0: Active Workflow Check
-**Before anything else**, check for an active plan-execute workflow:
-- Run `cat .plan-execute/current.json 2>/dev/null`
-- If a workflow is active, **immediately surface it as the top priority**:
-  - Show the current stage, required model, and what needs to be done
-  - Tell the user: "You have an active plan-execute workflow in the [STAGE] stage. Switch to [model] with `/model [model]` and run `/plan-execute status` to continue."
-  - Include this at the very top of the output before any other analysis.
-
 ### Phase 1: Project State Discovery
 1. **Repository Analysis**
    - Check git status (uncommitted changes, unpushed commits)
@@ -74,7 +65,6 @@ Use these specific commands to gather information:
    - Technical debt that's slowing development
    - Testing infrastructure that prevents bugs
    - Documentation that enables collaboration
-   - New features or significant refactors that would benefit from structured planning — suggest `/plan-execute start "description"` for these
 
 ### Phase 3: Context-Aware Recommendations
 1. **Time-Based Optimization**
@@ -216,10 +206,9 @@ Generate structured recommendations in `.claude/agents/reports/next-priorities-[
 Based on current state, these commands will be most helpful:
 
 1. **`/[command]`** - [why this command now]
-2. **`npm run [script]`** - [what this will accomplish]
+2. **`[shell command]`** - [what this will accomplish]
 3. **`gh issue create --title "[title]"`** - [if new work identified]
 4. **Use [agent] agent** - [for complex analysis needs]
-5. **`/plan-execute start "[description]"`** - suggest for any feature, refactor, or architectural change that would benefit from structured multi-model planning
 
 ## Issue Management Recommendations
 - **Issues to Create**: [new tasks discovered during analysis]
@@ -255,7 +244,7 @@ Based on current state, these commands will be most helpful:
 - Gracefully handle missing files or tools
 
 ## Integration Points
-- Use `npm run hygiene` for health assessment
+- Use `/hygiene` for health assessment
 - Use `gh issue list` for task context and priorities
 - Use `gh issue view [number]` for detailed task information
 - Leverage git history for activity patterns

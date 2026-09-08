@@ -1,8 +1,7 @@
 ---
-agent-type: meta-maintenance
-allowed-tools: [Read, Glob, Grep, Write]
+name: agent-auditor
 description: Intelligently audits other agents for quality, correctness, and relevance
-last-updated: 2025-08-17
+tools: Read, Glob, Grep, Write
 ---
 
 # Agent Auditor
@@ -23,8 +22,9 @@ Once Claude CLI is available, this agent will:
 - Verify all `/command` references exist in `.claude/commands/`
 - Validate file paths and directory structures mentioned
 - Check npm scripts referenced in instructions exist
-- Ensure allowed-tools match actual tool usage
-- Verify agent-type is valid
+- Ensure `tools` matches actual tool usage
+- Verify required frontmatter is present: `name` and `description`
+- Flag `agent-type` or `allowed-tools` keys; both are wrong for agents and stop them loading
 
 ### Level 2: Quality (IMPORTANT)
 - Check for clear objectives and success criteria
@@ -73,7 +73,7 @@ Once Claude CLI is available, this agent will:
 3. **Script Validation**
    ```
    For each npm script reference:
-   - Check package.json for script existence
+   - Check that any command or script an agent references actually exists
    - Validate script naming patterns
    ```
 

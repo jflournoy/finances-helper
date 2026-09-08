@@ -45,7 +45,7 @@ git commit -m "${COMMIT_TYPE}: ${MESSAGE}
 
 Co-Authored-By: Claude <noreply@anthropic.com>"
 
-echo "💡 Use 'npm run git:status:summary' to verify"
+echo "💡 Branch: $(git branch --show-current) | Remaining changes: $(git status --porcelain | wc -l | xargs)"
 ```
 
 ## Notes

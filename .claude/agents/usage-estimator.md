@@ -1,8 +1,8 @@
 ---
-agent-type: general-purpose
-allowed-tools: [Read, Bash, Grep, Glob]
+name: usage-estimator
 description: Analyzes project context to provide intelligent Claude usage estimates for development tasks
-last-updated: 2025-08-17---
+tools: Read, Bash, Grep, Glob
+---
 
 # Usage Estimator Agent
 
@@ -49,7 +49,7 @@ Analyze project characteristics, complexity, and development context to provide 
 
 ### Phase 3: Historical Pattern Analysis
 1. **Session History Review**
-   - Analyze session-history files for actual usage patterns
+   - Analyze transcripts under ~/.claude/projects/ for actual usage patterns
    - Compare estimated vs actual usage from previous sessions
    - Identify user's efficiency patterns and learning curves
    - Detect task types that consistently over/under-run estimates
