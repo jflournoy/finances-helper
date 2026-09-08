@@ -19,7 +19,7 @@ from categorizer import (
 from amazon_matcher import (
     is_amazon_payee, is_whole_foods_payee, find_latest_dump, extract_order_history_csv,
     parse_order_history, match_shipments_to_transactions, filter_shipments_to_window,
-    check_dump_schema_drift,
+    filter_already_billed_amazon_transactions, check_dump_schema_drift,
     _json_default, _md_escape, _next_free_path,
     _merge_order_shipments, _order_rollup_blocker,
 )
@@ -60,7 +60,33 @@ def _amount_dollars_str(txn: dict) -> str | None:
 NEAR_MISS_DATE_WINDOW_DAYS = 3
 
 
-def _candidate_unmatched_shipments(txn: dict, unmatched_shipments: list) -> list[dict]:
+def _already_billed_by_order(already_billed: list) -> dict[str, list[dict]]:
+    """Index settled parcels by order, for annotating that order's near-miss candidates.
+
+    `already_billed` is MatchResult.already_billed — parcels claimed by charges
+    this run cannot write to. Knowing an order had a parcel billed on its own
+    is what tells a reviewer that a surviving parcel is the *remainder* of the
+    order rather than the whole of it, which is the one fact the order-history
+    export never states and the reviewer would otherwise fetch from Amazon by
+    hand.
+    """
+    by_order: dict[str, list[dict]] = {}
+    for m in already_billed:
+        by_order.setdefault(m.shipment.order_id, []).append({
+            "ship_date": m.shipment.ship_date.isoformat() if m.shipment.ship_date else None,
+            "amount_dollars": format(m.shipment.total_amount, "f"),
+            "charge_date": m.ynab_txn.get("date"),
+        })
+    for entries in by_order.values():
+        entries.sort(key=lambda e: (e["ship_date"] or "", e["amount_dollars"]))
+    return by_order
+
+
+def _candidate_unmatched_shipments(
+    txn: dict,
+    unmatched_shipments: list,
+    already_billed_by_order: dict[str, list[dict]] | None = None,
+) -> list[dict]:
     """List unmatched shipments plausible as a near-miss for `txn`, for a human to pick from.
 
     Used to give the user near-miss candidates for a YNAB txn with no
@@ -86,6 +112,12 @@ def _candidate_unmatched_shipments(txn: dict, unmatched_shipments: list) -> list
 
     Sorted by date proximity then amount proximity — display order only,
     not a ranking meant to crown a winner.
+
+    `already_billed_by_order` (from `_already_billed_by_order`) annotates a
+    candidate whose order had other parcels billed on their own charges, as
+    `order_billed_elsewhere`. That is the decisive fact when an order was
+    billed twice: it says this parcel is the remainder, and it says the
+    whole-order sum is not what Amazon charged.
 
     Returns [] if there are no unmatched shipments, the txn has no date, or
     none of the unmatched shipments (after excluding WF) ship within the
@@ -130,6 +162,9 @@ def _candidate_unmatched_shipments(txn: dict, unmatched_shipments: list) -> list
             # can't look its items up by the candidate's own key. Record the
             # constituent parcels' keys instead — they do have rows.
             candidate["parcel_keys"] = [_shipment_key(m) for m in members]
+        billed = (already_billed_by_order or {}).get(shipment.order_id)
+        if billed:
+            candidate["order_billed_elsewhere"] = billed
         return candidate
 
     eligible = [s for s in unmatched_shipments if not s.is_wf and s.ship_date is not None]
@@ -364,6 +399,9 @@ def write_unified_changeset(
     # Serialize unmatched Amazon (txn, reason) tuples — sorted by reason then date then id
     # unmatched_amazon is list of (txn: dict, reason: str) tuples, so x[0] is the txn dict
     unmatched_shipments_for_hints = match_result.unmatched_shipments if match_result else []
+    already_billed_by_order = _already_billed_by_order(
+        match_result.already_billed if match_result else []
+    )
     unmatched_ynab = []
     for txn, reason in sorted(unmatched_amazon, key=lambda x: (x[1], x[0].get('date', '9999-12-31'), x[0].get('id', ''))):
         unmatched_ynab.append({
@@ -373,7 +411,9 @@ def write_unified_changeset(
             "date": txn.get("date"),
             "memo": txn.get("memo"),
             "reason": reason,
-            "candidate_shipments": _candidate_unmatched_shipments(txn, unmatched_shipments_for_hints),
+            "candidate_shipments": _candidate_unmatched_shipments(
+                txn, unmatched_shipments_for_hints, already_billed_by_order
+            ),
         })
 
     def _parent_field(parent, field):
@@ -447,6 +487,7 @@ def write_unified_changeset(
     # Serialize match_result if provided
     unmatched_shipments = []
     excluded_shipments = []
+    already_billed_shipments = []
     parse_errors = []
     if match_result:
         from datetime import date as _date
@@ -470,6 +511,22 @@ def write_unified_changeset(
         unmatched_shipments = [
             _shipment_dict(s)
             for s in sorted(match_result.unmatched_shipments, key=_ship_sort)
+        ]
+
+        # Parcels claimed by charges this run can't write to. Recorded so the
+        # near-miss list's omissions are auditable — a parcel missing from the
+        # candidates should be findable here, not simply gone.
+        already_billed_shipments = [
+            {
+                "shipment": _shipment_dict(m.shipment),
+                "charge": {
+                    "transaction_id": m.ynab_txn.get("id"),
+                    "date": m.ynab_txn.get("date"),
+                    "amount_dollars": _amount_dollars_str(m.ynab_txn),
+                    "category_name": m.ynab_txn.get("category_name"),
+                },
+            }
+            for m in sorted(match_result.already_billed, key=lambda m: _ship_sort(m.shipment))
         ]
 
         # excluded_shipments is list[tuple[shipment, reason]]
@@ -521,6 +578,7 @@ def write_unified_changeset(
             "proposed_splits": proposed_splits,
             "unmatched_ynab": unmatched_ynab,
             "unmatched_shipments": unmatched_shipments,
+            "already_billed_shipments": already_billed_shipments,
             "excluded_shipments": excluded_shipments,
             "parse_errors": parse_errors,
         },
@@ -891,11 +949,26 @@ def main(argv=None):
             date_window_days=date_window_days,
         )
 
+        # Charges already settled — approved, reconciled, or split by an earlier
+        # run. Not writable, so never proposals; passed in so the parcels they
+        # paid for leave the near-miss pool instead of haunting it forever.
+        # Drawn from txns_window, the same fetch `writable` came from: no extra
+        # API call.
+        amazon_already_billed = filter_already_billed_amazon_transactions(
+            txns_window, writable
+        )
+
         match_result = match_shipments_to_transactions(
             amazon_writable, shipments_in_window,
             parse_errors=parse_errors_list,
             date_window_days=date_window_days,
+            already_billed_txns=amazon_already_billed,
         )
+        if match_result.already_billed:
+            print(
+                f"{len(match_result.already_billed)} shipment(s) matched charges "
+                f"already settled — excluded from near-miss candidates."
+            )
 
         # Warn if dump is stale
         warning = _dump_freshness_warning(shipments, since_date, args.days)

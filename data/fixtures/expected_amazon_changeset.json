@@ -423,6 +423,7 @@
     }
   ],
   "summary": {
+    "already_billed_shipments": 0,
     "excluded_shipments": 4,
     "parse_errors": 1,
     "proposed_splits": 6,

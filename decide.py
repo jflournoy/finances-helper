@@ -550,6 +550,12 @@ def _walk_unmatched_near_misses(
                 f"  {j}. order {c['order_id']}{label}, shipped {c['ship_date']}, "
                 f"${c['amount_dollars']} (Δ${c['amount_delta_dollars']}, Δ{c['date_delta_days']}d)"
             )
+            for billed in c.get("order_billed_elsewhere", []):
+                print(
+                    f"       * order's other parcel (${billed['amount_dollars']}, "
+                    f"shipped {billed['ship_date']}) was billed separately on "
+                    f"{billed['charge_date']} — this candidate is the remainder"
+                )
             sources, note = _candidate_item_source(item_index, c)
             for shipment in sources:
                 for item in shipment.items:

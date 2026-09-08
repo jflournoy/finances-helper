@@ -2356,6 +2356,9 @@ class TestITEnrich:
         ynab_txns = [
             {"id": "amz1", "payee_name": "Amazon.com", "amount_dollars": "10.50", "date": "2026-04-13", "category_id": None, "cleared": "cleared", "deleted": False, "approved": False, "account_id": "acct-1"},
             {"id": "amz2", "payee_name": "Amazon.com", "amount_dollars": "25.00", "date": "2026-04-12", "category_id": None, "cleared": "cleared", "deleted": False, "approved": False, "account_id": "acct-1"},
+            # Settled on an earlier run: approved, so not writable. Its parcel is
+            # still spoken for, so the matcher has to be told about it.
+            {"id": "amz_settled", "payee_name": "Amazon.com", "amount_dollars": "99.18", "date": "2026-04-11", "category_id": "dddddddd-0000-0000-0000-000000000001", "cleared": "cleared", "deleted": False, "approved": True, "account_id": "acct-1"},
             {"id": "non_amz1", "payee_name": "Whole Foods", "amount_dollars": "50.00", "date": "2026-04-13", "category_id": None, "cleared": "cleared", "deleted": False, "approved": False},
             {"id": "non_amz2", "payee_name": "Whole Foods", "amount_dollars": "30.00", "date": "2026-04-12", "category_id": None, "cleared": "cleared", "deleted": False, "approved": False},
             {"id": "non_amz_novel", "payee_name": "Novel Store", "amount_dollars": "15.00", "date": "2026-04-11", "category_id": None, "cleared": "cleared", "deleted": False, "approved": False},
@@ -2393,6 +2396,7 @@ class TestITEnrich:
         mock_match_result.unmatched_ynab = []
         mock_match_result.excluded_shipments = []
         mock_match_result.parse_errors = []
+        mock_match_result.already_billed = []
 
         from tag import main
 
@@ -2415,16 +2419,29 @@ class TestITEnrich:
             ),
         ]
 
+        match_calls = []
+
+        def spy_match(*args, **kwargs):
+            match_calls.append(kwargs)
+            return mock_match_result
+
         with patch("tag.datetime") as mock_datetime:
             mock_datetime.now.return_value = today
             mock_datetime.side_effect = lambda *args, **kw: datetime(*args, **kw)
-            with patch("tag.match_shipments_to_transactions", return_value=mock_match_result):
+            with patch("tag.match_shipments_to_transactions", side_effect=spy_match):
                 with patch("tag.categorize_transactions", return_value=(mock_category_results, [], [], [])):
                     with patch("tag.load_payee_cache", return_value=payee_cache):
                         with patch("tag.save_payee_cache"):
                             result = main(["--days", "30", "--out-dir", str(out_dir)])
 
         assert result == 0, "Assertion #1: result == 0"
+
+        # Assertion #1b: the run hands the matcher the Amazon charges it may not
+        # write to. Without them a parcel settled on an earlier run stays
+        # "unmatched" forever and pollutes every later near-miss list.
+        assert len(match_calls) == 1, "matcher called exactly once"
+        billed_ids = [t["id"] for t in match_calls[0]["already_billed_txns"]]
+        assert billed_ids == ["amz_settled"], f"settled charges passed through (got {billed_ids})"
 
         assert get_transactions_calls.count(window_start) == 1, f"Assertion #2: window call"
         assert get_transactions_calls.count(k_start) == 1, f"Assertion #3: k_window call"
@@ -2530,6 +2547,7 @@ class TestITEnrich:
         mock_match_result.unmatched_ynab = []
         mock_match_result.excluded_shipments = []
         mock_match_result.parse_errors = []
+        mock_match_result.already_billed = []
 
         mock_category_results = [
             CategoryResult(
@@ -2650,6 +2668,7 @@ class TestITEnrich:
         ]
         mock_match_result.excluded_shipments = []
         mock_match_result.parse_errors = []
+        mock_match_result.already_billed = []
 
         with patch("tag.datetime") as mock_datetime:
             mock_datetime.now.return_value = today

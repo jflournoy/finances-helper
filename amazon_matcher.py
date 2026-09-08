@@ -8,7 +8,8 @@ import csv
 import json
 import logging
 import re
-from dataclasses import dataclass, asdict
+from collections import Counter
+from dataclasses import dataclass, asdict, field
 from datetime import date, datetime, timedelta
 from decimal import Decimal, InvalidOperation, ROUND_HALF_EVEN
 from pathlib import Path
@@ -550,6 +551,12 @@ class MatchResult:
     unmatched_shipments: list[AmazonShipment]
     excluded_shipments: list[tuple[AmazonShipment, str]]  # (shipment, reason)
     parse_errors: list[ParseError]
+    # Shipments claimed by a charge this run cannot write to (already approved,
+    # reconciled, or split by an earlier run). Not proposals — nothing here is
+    # ever PATCHed. They exist so the parcel is off the board: it is not offered
+    # as a near-miss candidate for some other charge, and it cannot be fused
+    # into a whole-order rollup that the order never actually incurred.
+    already_billed: list[MatchCandidate] = field(default_factory=list)
 
 
 def collect_dump_status_values(csv_text: str) -> tuple[set[str], set[str]]:
@@ -708,27 +715,182 @@ def filter_amazon_transactions(ynab_txns: list[dict]) -> list[dict]:
     return result
 
 
+def filter_already_billed_amazon_transactions(
+    ynab_txns: list[dict], writable_txns: list[dict]
+) -> list[dict]:
+    """Amazon charges in the window that this run cannot write to.
+
+    The complement, within `ynab_txns`, of whatever the caller settled on as
+    writable: approved, reconciled, or already split by an earlier run. Deleted
+    transactions are dropped — they are not charges at all.
+
+    These are not proposals and never get PATCHed. They go to
+    `match_shipments_to_transactions(already_billed_txns=...)` so the parcels
+    they paid for stop being offered as near-miss candidates for other charges,
+    and stop being fused into whole-order rollups the order never incurred.
+
+    Both lists must come from the same fetch. Handing this the full window and
+    a writable list drawn from a different one silently mislabels charges.
+    """
+    writable_ids = {t["id"] for t in writable_txns}
+    return [
+        t for t in ynab_txns
+        if is_amazon_payee(t.get("payee_name"))
+        and t.get("deleted") is not True
+        and t["id"] not in writable_ids
+    ]
+
+
+def _consume_already_billed(
+    shipments: list[AmazonShipment],
+    already_billed_txns: list[dict],
+    date_window_days: int,
+) -> tuple[list[AmazonShipment], list[MatchCandidate]]:
+    """Retire parcels paid for by charges this run cannot write to.
+
+    Takes the parcels no writable charge wanted, and the settled charges, and
+    pairs them ONLY where the pairing is mutually unambiguous: this parcel is
+    the settled charge's sole candidate and that charge is the parcel's sole
+    candidate. Repeated to a fixpoint, since retiring one pair can make
+    another pair unique.
+
+    The mutual-uniqueness rule is the whole point, and it is stricter than the
+    nearest-date tiebreak Phases 2-5 use on writable charges. The reason is
+    the asymmetry of being wrong. A writable charge that takes the wrong
+    parcel produces a proposal the user reads and can reject. A settled charge
+    that takes the wrong parcel produces nothing to read: the parcel simply
+    stops being offered, and the charge it really belonged to loses its only
+    lead. That is exactly how a greedy version of this pass failed in
+    practice — three same-price parcels and two settled charges, and
+    "resolve singletons first" spent the one parcel that was still needed.
+
+    So where several settled charges could explain a parcel, or one settled
+    charge could explain several parcels, nothing is consumed and every parcel
+    stays on the board for a human to choose between. Leaving noise in the
+    candidate list costs a glance; removing the right answer costs the match.
+
+    Returns (parcels still unmatched, matches against settled charges).
+    """
+    if not already_billed_txns or not shipments:
+        return list(shipments), []
+
+    remaining = list(shipments)
+    consumed: list[MatchCandidate] = []
+    available = list(already_billed_txns)
+
+    def _pairs():
+        """(shipment index, txn index, date_delta) for every plausible pairing."""
+        out = []
+        for si, s in enumerate(remaining):
+            if s.ship_date is None:
+                continue
+            for ti, t in enumerate(available):
+                if abs(Decimal(t["amount"])) / Decimal(1000) != s.total_amount:
+                    continue
+                delta = (s.ship_date - date.fromisoformat(t["date"])).days
+                if abs(delta) <= date_window_days:
+                    out.append((si, ti, delta))
+        return out
+
+    while True:
+        pairs = _pairs()
+        if not pairs:
+            break
+
+        ship_degree = Counter(si for si, _, _ in pairs)
+        txn_degree = Counter(ti for _, ti, _ in pairs)
+        mutual = [p for p in pairs if ship_degree[p[0]] == 1 and txn_degree[p[1]] == 1]
+        if not mutual:
+            ambiguous = sorted({remaining[si].order_id for si, _, _ in pairs})
+            logger.info(
+                "Already-billed consumption stopped: %d pairing(s) left, none "
+                "mutually unique. Parcels kept as near-miss candidates. Orders: %s",
+                len(pairs), ambiguous,
+            )
+            break
+
+        for si, ti, delta in mutual:
+            consumed.append(
+                MatchCandidate(
+                    ynab_txn=available[ti], shipment=remaining[si], date_delta_days=delta
+                )
+            )
+        # Rebuild rather than delete in place — mutual pairs touch distinct
+        # indices in both lists, but deleting from one shifts the other's.
+        taken_ships = {si for si, _, _ in mutual}
+        taken_txns = {ti for _, ti, _ in mutual}
+        remaining = [s for i, s in enumerate(remaining) if i not in taken_ships]
+        available = [t for i, t in enumerate(available) if i not in taken_txns]
+
+    if consumed:
+        logger.info(
+            "Already billed: %d parcel(s) retired against settled charges. Orders: %s",
+            len(consumed), sorted({m.shipment.order_id for m in consumed}),
+        )
+    consumed.sort(key=lambda m: (m.shipment.order_id, m.ynab_txn["id"]))
+    return remaining, consumed
+
+
 def match_shipments_to_transactions(
     ynab_txns: list[dict],
     shipments: list[AmazonShipment],
     parse_errors: list[ParseError] | None = None,
     date_window_days: int = 3,
+    already_billed_txns: list[dict] | None = None,
 ) -> MatchResult:
     """Match Amazon shipments to YNAB transactions using shipment-pivoted algorithm.
-    
+
     No account_last4_map required. Matches by amount + date window.
-    
+
+    `ynab_txns` are the charges this run may propose against — writable and
+    not yet approved. Phases 1-5 see only those, so their behaviour is
+    unchanged by anything below.
+
+    `already_billed_txns` are Amazon charges in the same window that this run
+    must NOT write to: approved, reconciled, or already split by an earlier
+    run. They never compete for a parcel in Phases 1-5 and never become a
+    proposal; they get one conservative pass of their own at the end, and
+    leave through `MatchResult.already_billed`.
+
+    Passing them matters because a parcel whose charge was settled on an
+    earlier run otherwise stays "unmatched" forever, with two consequences:
+    it pollutes every later charge's near-miss candidate list, and — worse —
+    it lets Phase 5 fuse an order whose parcels were in fact billed
+    separately, offering a whole-order sum that was never charged. Omitting
+    them (the default) restores exactly the old, blinkered behaviour; callers
+    that have the full window should pass it.
+
     Algorithm: Two-pass "resolve-easy-first"
     - Phase 1: Enumerate candidates for each matchable shipment
     - Phase 2: Iteratively resolve singletons (no contention)
     - Phase 3: Case A - tiebreak for multi-candidate shipments
     - Phase 4: Classify remaining unresolved shipments (Case B error)
+    - Phase 4b: Already-billed consumption - retire parcels paid for by a
+      settled charge, but only where the pairing is mutually unambiguous
+      (see _consume_already_billed). Runs before the rollup so a parcel that
+      is already paid for can never be counted into an order sum.
     - Phase 5: Order rollup - fuse the parcels of one order whose totals sum
       to a still-unconsumed charge (Amazon bills the order once even when it
       ships in two boxes, so no single parcel row ever equals the charge)
+
+    Raises:
+        ValueError: If a transaction appears in both lists. A charge is either
+            writable this run or it is not; being told both is a caller bug,
+            and silently picking one would decide by accident whether that
+            charge can be written to.
     """
     if parse_errors is None:
         parse_errors = []
+    if already_billed_txns is None:
+        already_billed_txns = []
+
+    writable_txn_ids = {t["id"] for t in ynab_txns}
+    overlap = sorted(writable_txn_ids & {t["id"] for t in already_billed_txns})
+    if overlap:
+        raise ValueError(
+            f"Transaction(s) passed as both writable and already-billed: {overlap}. "
+            f"A charge is one or the other — fix the caller's partition."
+        )
 
     matched = []
     unmatched_ynab = []
@@ -875,6 +1037,26 @@ def match_shipments_to_transactions(
     zero_candidate_indices = {idx for idx in unresolved_indices if len(candidates[idx][1]) == 0}
     zero_candidate_indices |= zero_candidate_removed_indices
 
+    # Phase 4b: Already-billed consumption.
+    #
+    # Runs BEFORE the rollup, and only over parcels no writable charge wanted.
+    # Before, because a parcel already paid for must not be counted into an
+    # order sum: an order billed as two charges never incurred the sum of its
+    # parcels, and fusing it would invent a charge and split against it. A
+    # Case B parcel is left alone — a writable charge is already contending
+    # for it, and that contention is not this pass's to resolve.
+    #
+    # Only mutually unambiguous pairings are taken (see _consume_already_billed).
+    zero_candidate_ordered = [candidates[idx][0] for idx in sorted(zero_candidate_indices)]
+    _, already_billed_matches = _consume_already_billed(
+        zero_candidate_ordered, already_billed_txns, date_window_days
+    )
+    consumed_shipment_ids = {id(m.shipment) for m in already_billed_matches}
+    zero_candidate_indices = {
+        idx for idx in zero_candidate_indices
+        if id(candidates[idx][0]) not in consumed_shipment_ids
+    }
+
     # Phase 5: Order rollup.
     #
     # Amazon charges an order once but ships it in as many parcels as it
@@ -988,6 +1170,7 @@ def match_shipments_to_transactions(
         unmatched_shipments=unmatched_shipments,
         excluded_shipments=excluded_shipments_list,
         parse_errors=parse_errors,
+        already_billed=already_billed_matches,
     )
 
 
@@ -1315,6 +1498,7 @@ def _build_json_payload(
             "proposed_splits": len(split_proposals),
             "unmatched_ynab": len(unmatched_amazon),
             "unmatched_shipments": len(match_result.unmatched_shipments),
+            "already_billed_shipments": len(match_result.already_billed),
             "excluded_shipments": len(match_result.excluded_shipments),
             "parse_errors": len(match_result.parse_errors),
         },
@@ -1473,6 +1657,12 @@ def _render_markdown(
 
     md += f"## Unmatched Amazon shipments ({summary['unmatched_shipments']})\n\n"
     md += "These are Amazon shipments in the dump with no matching YNAB charge. Usually means YNAB hasn't synced recently or the transaction is in a closed account.\n\n"
+    if summary.get("already_billed_shipments"):
+        md += (
+            f"A further {summary['already_billed_shipments']} shipment(s) are not listed here: "
+            "they match Amazon charges this run can't write to (approved, reconciled, or split "
+            "on an earlier run), so they are settled rather than unmatched.\n\n"
+        )
     for ship in payload["unmatched_shipments"]:
         order_id = ship["order_id"]
         ship_date = ship["ship_date"] or "?"
@@ -1762,10 +1952,15 @@ def main(argv: list[str] | None = None) -> int:
     confidence_threshold = compute_confidence_threshold(K)
     recent_categories = filter_categories_by_usage(categories, k_txns)
 
+    already_billed = filter_already_billed_amazon_transactions(txns, filtered)
+    if already_billed:
+        print(f"Consuming parcels against {len(already_billed)} already-billed Amazon charge(s)")
+
     match_result = match_shipments_to_transactions(
         filtered, shipments,
         parse_errors=parse_errors_list,
         date_window_days=date_window_days,
+        already_billed_txns=already_billed,
     )
 
     cache = load_payee_cache()
