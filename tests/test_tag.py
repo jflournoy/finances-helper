@@ -2738,3 +2738,171 @@ class TestITEnrich:
         cache_path = cache_dir / "payee_lookup.json"
         assert not cache_path.exists(), \
             f"Assertion #16: tag.py must not write to the payee cache (found {cache_path})"
+
+
+# ============================================================================
+# Whole-order near-miss candidates
+# ============================================================================
+
+
+class TestWholeOrderNearMissCandidates:
+    """_candidate_unmatched_shipments offers the fused order, not just its parcels.
+
+    An order billed once but shipped in several parcels has no parcel whose
+    amount is near the charge, so before this the walk could only offer
+    numbers that were all obviously wrong.
+    """
+
+    @staticmethod
+    def _parcel(
+        *,
+        order_id="113-4262513-5433000",
+        ship_date=(2026, 8, 6),
+        total="64.64",
+        last4="5219",
+        website="Amazon.com",
+        product_name="See Kai Run Sneaker",
+        row_index=2,
+    ):
+        from datetime import date as _d
+        from decimal import Decimal as _D
+        from amazon_matcher import AmazonItem, AmazonShipment
+
+        shipped = _d(*ship_date)
+        item = AmazonItem(
+            order_id=order_id,
+            ship_date=shipped,
+            asin=f"B0{row_index}",
+            product_name=product_name,
+            quantity=1,
+            unit_price=_D(total),
+            unit_price_tax=_D("0"),
+            raw_row_index=row_index,
+        )
+        return AmazonShipment(
+            order_id=order_id,
+            ship_date=shipped,
+            payment_method_raw=f"Visa - {last4}",
+            payment_method_last4=last4,
+            is_split_tender=False,
+            currency="USD",
+            item_subtotal=_D(total),
+            tax=_D("0"),
+            shipping=_D("0"),
+            discounts=_D("0"),
+            total_amount=_D(total),
+            items=[item],
+            shipment_status="Shipped",
+            website=website,
+            carrier=f"AMZN_US(TBA{row_index})",
+        )
+
+    @staticmethod
+    def _txn(amount_milliunits=-81260, txn_date="2026-08-07"):
+        return {"id": "tx-1", "payee_name": "Amazon", "amount": amount_milliunits, "date": txn_date}
+
+    def _candidates(self, shipments, txn=None):
+        from tag import _candidate_unmatched_shipments
+
+        return _candidate_unmatched_shipments(txn or self._txn(), shipments)
+
+    def test_two_parcel_order_gets_a_whole_order_candidate(self):
+        """$64.64 + $19.40 parcels, an $81.26 charge: the order total is the near miss."""
+        parcels = [self._parcel(), self._parcel(total="19.4", product_name="Shorts", row_index=3)]
+
+        candidates = self._candidates(parcels)
+
+        whole = [c for c in candidates if c.get("parcels", 1) > 1]
+        assert len(whole) == 1
+        assert whole[0]["amount_dollars"] == "84.04"
+        assert whole[0]["parcels"] == 2
+        assert whole[0]["parcel_keys"] == [
+            ["113-4262513-5433000", "2026-08-06", "64.64"],
+            ["113-4262513-5433000", "2026-08-06", "19.4"],
+        ]
+
+    def test_individual_parcels_are_still_offered_alongside_it(self):
+        parcels = [self._parcel(), self._parcel(total="19.4", product_name="Shorts", row_index=3)]
+
+        amounts = sorted(c["amount_dollars"] for c in self._candidates(parcels))
+
+        assert amounts == ["19.4", "64.64", "84.04"]
+
+    def test_whole_order_candidate_sorts_ahead_of_a_worse_parcel(self):
+        """Display order is amount proximity — the order total is closest here."""
+        parcels = [self._parcel(), self._parcel(total="19.4", product_name="Shorts", row_index=3)]
+
+        assert self._candidates(parcels)[0]["amount_dollars"] == "84.04"
+
+    def test_single_parcel_order_gets_no_whole_order_candidate(self):
+        candidates = self._candidates([self._parcel()])
+
+        assert all(c.get("parcels", 1) == 1 for c in candidates)
+        assert all("parcel_keys" not in c for c in candidates)
+
+    def test_no_whole_order_candidate_when_parcels_used_different_cards(self):
+        """Two cards means two charges — the same guard the matcher's rollup uses."""
+        parcels = [
+            self._parcel(last4="5219"),
+            self._parcel(total="19.4", last4="0804", product_name="Shorts", row_index=3),
+        ]
+
+        assert all(c.get("parcels", 1) == 1 for c in self._candidates(parcels))
+
+    def test_no_whole_order_candidate_when_the_merged_ship_date_is_out_of_window(self):
+        """The window keys off the earliest ship date, since that's when Amazon bills."""
+        parcels = [
+            self._parcel(ship_date=(2026, 7, 1)),
+            self._parcel(ship_date=(2026, 7, 1), total="19.4", product_name="Shorts", row_index=3),
+        ]
+
+        assert self._candidates(parcels) == []
+
+    def test_whole_foods_parcels_never_form_a_whole_order_candidate(self):
+        parcels = [
+            self._parcel(website="PrimeNow-US"),
+            self._parcel(website="PrimeNow-US", total="19.4", product_name="Shorts", row_index=3),
+        ]
+
+        assert self._candidates(parcels) == []
+
+    def test_parcels_of_different_orders_are_not_fused(self):
+        parcels = [
+            self._parcel(order_id="113-AAA"),
+            self._parcel(order_id="112-BBB", total="19.4", product_name="Shorts", row_index=3),
+        ]
+
+        assert all(c.get("parcels", 1) == 1 for c in self._candidates(parcels))
+
+    def test_markdown_report_labels_the_whole_order_candidate(self, tmp_path):
+        """Two lines for one order at different amounts need saying which is which."""
+        from datetime import datetime
+        from tag import write_unified_changeset
+        from amazon_matcher import MatchResult
+
+        parcels = [self._parcel(), self._parcel(total="19.4", product_name="Shorts", row_index=3)]
+        unmatched = [(self._txn() | {"memo": None}, "no matching shipment in dump")]
+
+        md_path, _ = write_unified_changeset(
+            flat_results=[],
+            skipped=[],
+            unmatched_amazon=unmatched,
+            split_proposals=[],
+            source_txns=[],
+            budget_id="b123",
+            since_date="2026-08-01",
+            days_back=30,
+            K=312,
+            confidence_threshold=0.0096,
+            dump_path=None,
+            out_dir=tmp_path / "changesets",
+            match_result=MatchResult(
+                matched=[], unmatched_ynab=[], unmatched_shipments=parcels,
+                excluded_shipments=[], parse_errors=[],
+            ),
+            now=datetime(2026, 8, 10, 9, 0, 0),
+        )
+
+        markdown = md_path.read_text()
+        assert "order 113-4262513-5433000 [whole order, 2 parcels] $84.04" in markdown
+        assert "order 113-4262513-5433000 $64.64" in markdown

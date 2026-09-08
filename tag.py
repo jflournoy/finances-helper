@@ -21,6 +21,7 @@ from amazon_matcher import (
     parse_order_history, match_shipments_to_transactions, filter_shipments_to_window,
     check_dump_schema_drift,
     _json_default, _md_escape, _next_free_path,
+    _merge_order_shipments, _order_rollup_blocker,
 )
 from category_profiles import (
     load_profiles, save_profiles, build_merchant_map_from_cache,
@@ -108,22 +109,66 @@ def _candidate_unmatched_shipments(txn: dict, unmatched_shipments: list) -> list
             return None
         return (shipment.ship_date - txn_date).days
 
-    in_window = [
-        s for s in unmatched_shipments
-        if not s.is_wf and (d := _date_delta_days(s)) is not None and abs(d) <= NEAR_MISS_DATE_WINDOW_DAYS
-    ]
-    in_window.sort(key=lambda s: (abs(_date_delta_days(s)), abs(txn_amount - s.total_amount), s.order_id))
+    def _shipment_key(shipment):
+        return [
+            shipment.order_id,
+            shipment.ship_date.isoformat(),
+            format(shipment.total_amount, "f"),
+        ]
 
-    return [
-        {
-            "order_id": s.order_id,
-            "ship_date": s.ship_date.isoformat(),
-            "amount_dollars": format(s.total_amount, "f"),
-            "amount_delta_dollars": format(abs(txn_amount - s.total_amount), "f"),
-            "date_delta_days": _date_delta_days(s),
+    def _as_candidate(shipment, members):
+        candidate = {
+            "order_id": shipment.order_id,
+            "ship_date": shipment.ship_date.isoformat(),
+            "amount_dollars": format(shipment.total_amount, "f"),
+            "amount_delta_dollars": format(abs(txn_amount - shipment.total_amount), "f"),
+            "date_delta_days": _date_delta_days(shipment),
+            "parcels": len(members),
         }
-        for s in in_window
+        if len(members) > 1:
+            # A fused order has no row of its own in the dump, so the reviewer
+            # can't look its items up by the candidate's own key. Record the
+            # constituent parcels' keys instead — they do have rows.
+            candidate["parcel_keys"] = [_shipment_key(m) for m in members]
+        return candidate
+
+    eligible = [s for s in unmatched_shipments if not s.is_wf and s.ship_date is not None]
+
+    candidates = [
+        _as_candidate(s, [s])
+        for s in eligible
+        if abs(_date_delta_days(s)) <= NEAR_MISS_DATE_WINDOW_DAYS
     ]
+
+    # Whole-order candidates. An order that ships in several parcels is billed
+    # once, so when the charge is a near miss (a points or gift-card
+    # redemption the export doesn't record) no single parcel is anywhere near
+    # it — the order total is. Offer the same fusion the matcher's Phase 5
+    # would have accepted had the amount been exact, so the walk isn't asking
+    # the user to pick between two numbers that are both wrong.
+    by_order = {}
+    for s in eligible:
+        by_order.setdefault(s.order_id, []).append(s)
+
+    for order_id in sorted(by_order):
+        group = by_order[order_id]
+        if len(group) < 2 or _order_rollup_blocker(group) is not None:
+            continue
+        merged = _merge_order_shipments(group)
+        if abs(_date_delta_days(merged)) > NEAR_MISS_DATE_WINDOW_DAYS:
+            continue
+        candidates.append(_as_candidate(merged, group))
+
+    # Display order only — date proximity, then amount proximity, then order
+    # ID to keep repeat runs stable. Not a ranking meant to crown a winner.
+    candidates.sort(
+        key=lambda c: (
+            abs(c["date_delta_days"]),
+            Decimal(c["amount_delta_dollars"]),
+            c["order_id"],
+        )
+    )
+    return candidates
 
 
 def _summarize_split_items(subs: list) -> str:
@@ -583,8 +628,10 @@ def write_unified_changeset(
                 markdown_lines.append(line)
                 candidates = u.get("candidate_shipments") or []
                 for candidate in candidates:
+                    parcels = candidate.get("parcels", 1)
+                    label = f" [whole order, {parcels} parcels]" if parcels > 1 else ""
                     markdown_lines.append(
-                        f"    candidate: order {candidate['order_id']} "
+                        f"    candidate: order {candidate['order_id']}{label} "
                         f"${candidate['amount_dollars']} shipped {candidate['ship_date']} "
                         f"(Δ${candidate['amount_delta_dollars']}, Δ{candidate['date_delta_days']}d)"
                     )
