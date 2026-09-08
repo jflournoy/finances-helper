@@ -2,7 +2,7 @@
 
 ## Claude Usage Guidelines
 
-- Use `/estimate` before starting any non-trivial task
+- Use the `usage-estimator` agent before starting any non-trivial task
 - Track actual Claude interactions vs estimates
 - Optimize for message efficiency in complex tasks
 - Budget Claude usage for different project phases
@@ -17,7 +17,7 @@
 
 - Always add Claude as co-author on commits
 - Run `/hygiene` before asking for help
-- Use `/todo` for quick task capture
-- Document learnings with `/learn`
-- Regular `/reflect` sessions for insights
+- Use the built-in todo tracking for task capture, or `gh issue` for anything that outlives the session
+- Record durable facts in the memory system, not in a file this repo maintains
+- Use `/next` when deciding what to pick up
 

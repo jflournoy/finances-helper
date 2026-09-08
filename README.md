@@ -75,6 +75,26 @@ they are **not** regenerated on every run:
   categories flagged stale: new categories, or ones where you overrode Claude's
   guess during review (a rejection teaches the boundary that was mis-drawn).
 
+#### Durable guidance (rules that survive regeneration)
+
+A category's generated `description` is rewritten wholesale on every refresh, so
+hand-editing it does not stick. For boundaries that merchant history will never
+express on its own — "a Leatherman is Home goods, not Household supplies" — write
+a **rule** instead. Rules are never touched by regeneration, and are injected both
+into the categorization prompt (marked as overriding Claude's inference) and into
+the description generator (so regenerated descriptions agree with them).
+
+```bash
+uv run python scripts/category_guidance.py list
+uv run python scripts/category_guidance.py list --all
+uv run python scripts/category_guidance.py set "Home goods" \
+    "Hand tools, multitools, and portable appliances belong here."
+uv run python scripts/category_guidance.py clear "Home goods"
+```
+
+State both sides of a boundary — a rule on the category that should *win* and a
+matching "NOT this" on the one that keeps over-claiming.
+
 This **does not write to YNAB**. It produces a reviewable changeset under
 `data/cache/enrich-changeset-*.json` (+ a Markdown summary).
 

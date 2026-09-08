@@ -234,31 +234,23 @@ I want to understand how my development practices have evolved. Use the session-
 
 The key question: "Am I doing this the same way every time (command) or do I need analysis and insights (agent)?"
 
-## vexp <!-- vexp v2.1.6 -->
+## vexp - Context-Aware AI Coding <!-- vexp v3.1.2 -->
 
-**MANDATORY: use `run_pipeline` - do NOT grep or glob the codebase.**
-vexp returns pre-indexed, graph-ranked context in a single call.
+### Context strategy: call run_pipeline ONCE at task start
+If the task already names the files/symbols to touch, SKIP vexp. Otherwise one
+`run_pipeline({ "task": "..." })` returns ranked pivot files with line ranges and
+blast radius. Do NOT open files one by one to find your way around - every extra
+tool call costs a turn. Call it again ONLY when the task moves to a new area.
+`get_skeleton` for files to understand, not edit. `verify_done` before calling a
+multi-file task complete, then RUN the tests it names.
 
-### Workflow
-1. `run_pipeline` with your task description - ALWAYS FIRST (replaces all other tools)
-2. Make targeted changes based on the context returned
-3. `run_pipeline` again only if you need more context
+### Query shape (do this)
+Anchor the task on real identifiers (ClassName, functionName) or file paths:
+`run_pipeline({ "task": "fix JWT expiry in AuthService.validateToken" })`
 
-### Available MCP tools
-- `run_pipeline` - **PRIMARY TOOL**. Runs capsule + impact + memory in 1 call.
-  Auto-detects intent. Includes file content. Example: `run_pipeline({ "task": "fix auth bug" })`
-- `get_skeleton` - compact file structure
-- `index_status` - indexing status
-- `expand_vexp_ref` - expand V-REF placeholders in v2 output
-
-### Agentic search
-- Do NOT use built-in file search, grep, or codebase indexing - always call `run_pipeline` first
-- If you spawn sub-agents or background tasks, pass them the context from `run_pipeline`
-  rather than letting them search the codebase independently
-
-### Smart Features
-Intent auto-detection, hybrid ranking, session memory, auto-expanding budget.
-
-### Multi-Repo
-`run_pipeline` auto-queries all indexed repos. Use `repos: ["alias"]` to scope. Run `index_status` to see aliases.
+vexp runs entirely on this machine, index in `.vexp/`;
+`run_pipeline` transmits nothing to any external service.
+On `status: "degraded"` or 0 pivots the index is still building - use your own tools.
+For literal string sweeps use your native search - do NOT route text sweeps through vexp.
+Repo SOURCE only: logs, dist/, node_modules/ and files outside the repo are NOT indexed.
 <!-- /vexp -->

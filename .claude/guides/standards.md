@@ -31,12 +31,11 @@
 - **Syntax validation** - Uses remark-lint to ensure valid markdown syntax
 - **Consistent formatting** - Enforces consistent list markers, emphasis, and code blocks
 - **Link validation** - Checks that internal links point to existing files
-- **Auto-fix available** - Run `npm run markdown:fix` to auto-correct formatting issues
+- **Auto-fix available** - `npx --no-install remark . --output` where remark is present
 
 ### Markdown Quality Checks
 
-- `npm run markdown:lint` - Validate all markdown files
-- `npm run markdown:fix` - Auto-fix formatting issues
+- Markdown linting is the project's business, not this config's; use whatever the project provides
 - Included in `hygiene:quick` and `commit:check` scripts
 - CI validates markdown on every push/PR
 
@@ -60,7 +59,7 @@
 
 - Test coverage: 60% minimum
 - Documentation: All features documented
-- Error handling: Graceful failures with clear messages
+- Error handling: Fail fast with clear error messages — no silent fallbacks that hide problems (see the NO SILENT FALLBACKS rule in `CLAUDE.md`)
 - Performance: Monitor code complexity and file sizes
 - ALWAYS use atomic commits
 - Use emojis judiciously

@@ -1,6 +1,9 @@
-# CLAUDE.md - Project AI Guidelines
+# CLAUDE.md — AI Guidelines
 
-> **Note to Claude:** This file contains critical rules and commands that apply to all work. For task-specific guidance, consult the guides listed below (TDD, standards, workflow). Load them based on what you're working on—don't assume you need everything.
+> **Note to Claude:** This file holds rules that apply to all work in scope for it — every
+> project when it is installed globally, this project alone when it is vendored into one. For
+> task-specific guidance, consult the guides listed at the bottom (TDD, standards, Bayesian
+> modeling, writing voice). Load them based on what you're working on—don't assume you need everything.
 
 ## Critical Rules (Always Apply)
 
@@ -40,6 +43,35 @@ The only acceptable fallback pattern is one where:
 2. You have raised your objection to it on the record, AND
 3. The fallback produces a **visible, logged warning** every time it fires.
 
+### TEST INTEGRITY — NEVER MAKE A TEST PASS BY WEAKENING IT
+
+**Never change a test solely to make it pass.** A failing test is information. Suppressing it
+destroys the information and leaves the bug.
+
+When a test fails after a change:
+
+1. **Stop and report it.** Say which test, and what the failure actually says.
+2. **Explain why it is failing** — did the change break behavior, or did it correctly change
+   behavior the test still encodes?
+3. **Ask which it is.** That judgment is the user's, not yours.
+
+**Allowed without asking:** adding tests for new behavior; renaming or reorganizing tests
+without changing what they assert; fixing a test that is itself provably wrong, saying so.
+
+**Forbidden without explicit approval:** changing an expected value; loosening an assertion;
+adding a tolerance to make a comparison pass; marking a test skipped, pending, or `.only`
+elsewhere; deleting a failing test; wrapping a failing call so the error is swallowed.
+
+This applies with full force when the number is the deliverable. A weakened assertion in
+analysis code is a published wrong result with a green check mark next to it.
+
+### ENFORCEMENT BEATS DOCUMENTATION
+
+A rule with no mechanism behind it does not happen — it just looks like it does. If a rule
+here matters, prefer a hook, a test, or a script that enforces it over a paragraph asking for
+it. And **the enforcement mechanism is production code**: it gets a test like anything else.
+An unverified gate is worse than no gate, because people stop checking the thing themselves.
+
 ### ALWAYS use `date` command for dates
 
 Never assume or guess dates. Always run `date "+%Y-%m-%d"` when you need the current date for documentation, commits, or any other purpose.
@@ -64,55 +96,34 @@ Examples of honest responses:
 - "That's technically feasible but violates [principle] because..."
 - "I'm concerned about [issue]. Let me explain why this won't work as written..."
 
-## Quick Command Reference
+## Commands
 
-**Core Workflow**
-- `/tdd` - Test-driven development cycle
-- `/commit` - Quality-checked atomic commits
-- `/push` - Push commits to remote
+- `/commit` — atomic commits with quality checks
+- `/push` — push, after checking CI is not already red
+- `/hygiene` — project health: detects R, Python or Node and uses that project's runner
+- `/next` — priorities, via the `next-priorities` agent
+- `/refactor` — refactoring analysis for code a human reads
+- `/refactor-verified` — refactoring analysis for code nobody reads, where checks replace review
 
-**Development & Code Quality**
-- `/hygiene` - Project health check
-- `/todo` - Task management via GitHub Issues
-- `/markdown-lint` - Validate and fix markdown files
-- `/refactor` - Deep refactoring analysis
-- `/maintainability` - Code maintainability review
+Claude Code now covers natively what the rest of this repo's commands used to do:
+transcripts and `--resume` replace session capture, the memory system replaces learning
+capture, `TodoWrite` and `gh` replace todo management, `/loop` and `/schedule` replace
+monitoring, and `/code-review` and `/simplify` replace the quality commands. They were
+removed rather than maintained in parallel.
 
-**Analysis & Planning**
-- `/next` - AI-recommended priorities
-- `/plan-execute` - Multi-model plan-and-execute workflow
-- `/causal-design` - Causal study design workflow
-- `/timeline` - Generate timeline from git history
-
-**Documentation & Learning**
-- `/learn` - Capture insights and learnings
-- `/docs` - Update and validate documentation
-- `/docs-explain` - Educational documentation guide
-- `/reflect` - Pause and reflect on current work
-- `/retrospective` - Capture session metadata for analysis
-- `/session-history` - Save and manage conversation transcripts
-
-**Utilities**
-- `/render-report` - Render analysis reports for GitHub Pages
-- `/monitor` - Monitor GitHub repository for test failures/PRs
-- `/continue` - Efficiently resume work from prior session
-- `/condense` - Archive old content from current status
-- `/clean-state` - Reset state tracking file for fresh session
-- `/fix-permissions` - Fix Docker file ownership permissions
-
-See [CLAUDE_workflow.md](CLAUDE_workflow.md) for full collaboration guidelines.
+See [.claude/guides/workflow.md](.claude/guides/workflow.md) for full collaboration guidelines.
 
 ## When to Consult Each Guide
 
 ### 🔴 Load for Feature/Bug Work
 
-- [CLAUDE_tdd.md](CLAUDE_tdd.md) — When implementing features, fixing bugs, or refactoring
+- [.claude/guides/tdd.md](.claude/guides/tdd.md) — When implementing features, fixing bugs, or refactoring
   - Defines how to write tests first, then code
   - Required for any non-trivial code change
 
 ### 📋 Load for General Development
 
-- [CLAUDE_standards.md](CLAUDE_standards.md) — Code quality expectations, testing strategy
+- [.claude/guides/standards.md](.claude/guides/standards.md) — Code quality expectations, testing strategy
   - Consult when: running tests, committing code, reviewing architecture
   - Covers: complexity limits, test standards, markdown validation, architecture principles
 
@@ -164,4 +175,50 @@ When Claude categorizes transactions, always include a **confidence score** and 
 2. Amazon "Request My Data" — official but slow (3-5 days), JSON format
 3. Skip item-level enrichment — route all Amazon to a single category via payee history
 
-See [CLAUDE_project-spec.md](CLAUDE_project-spec.md) for full details on trade-offs.
+See [.claude/guides/project-spec.md](.claude/guides/project-spec.md) for full details on trade-offs.
+
+  - Covers: complexity limits, test standards, markdown validation, architecture principles
+
+### 📊 Load for Statistical / Modeling Work
+
+- [.claude/guides/bayesian-production.md](.claude/guides/bayesian-production.md) — When working
+  on Bayesian models, Stan code, MCMC diagnostics, or time-series inference
+  - Covers: Kalman filters, Pathfinder, reparameterization, correlation-matrix priors,
+    regularized horseshoe, warm-starting, R̂/ESS thresholds
+  - Stan snippets are compile-checked; the R (cmdstanr) and Python (cmdstanpy) calls differ
+
+## Review Agents
+
+Two fire automatically. A `PostToolUse` hook (`hooks/reviewer-dispatch.cjs`) routes an
+edited file to its reviewer:
+
+| Edited | Agent |
+|---|---|
+| `*.stan` | `stan-reviewer` — silent-wrong-answer bugs, geometry, wasted cycles |
+| `*.R` `*.Rmd` `*.qmd` | `r-analysis-reviewer` — joins, coercion, non-determinism, claims |
+
+Three are on demand — ask for them by name:
+
+- `statistical-analysis-reviewer` — skeptical peer review of a finished analysis, before it
+  is shared. Design, assumptions, inference, and whether the conclusion is supported.
+- `determinism-reviewer` — finds work done by model reasoning that tested code could do.
+- `voice-authenticator` — checks prose against [.claude/guides/voice.md](.claude/guides/voice.md).
+
+All of them report findings and never edit. Silence them for a session with
+`CLAUDE_REVIEWER_DISPATCH=0`. Adding a file type is one entry in `RULES` plus a test.
+
+### 📐 Load for R Work
+
+- [.claude/guides/r-development.md](.claude/guides/r-development.md) — Writing R:
+  data.table over tidyverse, targets pipelines, testthat with reference semantics
+  - Covers: approved packages, the tidyverse→data.table substitution table, arrow I/O
+  - Includes the cmdstanr/posterior rule: the rstan-backed brms accessors can hard-crash
+    R with SIGABRT in a container where rstan is broken
+
+### ✍️ Load for Reader-Facing Prose
+
+- [.claude/guides/voice.md](.claude/guides/voice.md) — Before writing or editing any prose a reader will see.
+  The guide is the craft; each project declares in its own `CLAUDE.md` which files it covers
+  and where they sit on the register dial
+  - Report `.qmd` files, figure captions, README and docs pages, supplements
+  - Defines the register dial (paper / commentary / conversational) and the rules for each
