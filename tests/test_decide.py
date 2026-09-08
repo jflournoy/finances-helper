@@ -383,10 +383,125 @@ def test_build_shipment_item_index_parses_real_dump(tmp_path):
     index, warning = decide._build_shipment_item_index(str(zip_path))
     assert warning is None
     assert len(index) > 0
-    # Sample fixture's first order: 111-0000001-0000001, shipped 2024-01-16
-    key = ("111-0000001-0000001", "2024-01-16")
+    # Sample fixture's first order: 111-0000001-0000001, shipped 2024-01-16, $37.09
+    key = decide._shipment_index_key("111-0000001-0000001", "2024-01-16", "37.09")
     assert key in index
-    assert index[key].items[0].product_name == "Test Widget"
+    assert [s.items[0].product_name for s in index[key]] == ["Test Widget"]
+
+
+def _two_parcel_dump_zip(tmp_path: Path) -> Path:
+    """A dump where one order ships as two same-day parcels of different amounts.
+
+    Mirrors real Amazon order 113-4262513-5433000: two tracking numbers, one
+    ship date, two totals that sum to the single card charge.
+    """
+    from zipfile import ZipFile
+
+    header = Path("data/fixtures/amazon_order_history_sample.csv").read_text().splitlines()[0]
+    rows = [
+        "B0FMW3M89N,REDACTED,AMZN_US(TBA333474726036),USD,,,,,2026-08-06,113-4262513-5433000,"
+        "Closed,1,Visa - 5219,New,See Kai Run Sneaker,,2026-08-06,59.99,4.65,Shipped,REDACTED,"
+        "0,Not Applicable,64.64,0,59.99,4.65,Amazon.com",
+        "B0DNFLML4B,REDACTED,AMZN_US(TBA333475400228),USD,,,,,2026-08-06,113-4262513-5433000,"
+        "Closed,1,Visa - 5219,New,Amazon Essentials Boys Shorts,,2026-08-06,18,1.4,Shipped,REDACTED,"
+        "0,Not Applicable,19.4,0,18,1.4,Amazon.com",
+    ]
+    zip_path = tmp_path / "amazon-order-history-2026-08-10.zip"
+    with ZipFile(zip_path, "w") as zf:
+        zf.writestr("Your Amazon Orders/Order History.csv", "\n".join([header] + rows) + "\n")
+    return zip_path
+
+
+def test_build_shipment_item_index_keeps_both_same_day_parcels_of_one_order(tmp_path):
+    """Two parcels of one order, same ship date: neither may overwrite the other.
+
+    Keying on (order_id, ship_date) alone silently dropped one and showed the
+    survivor's items under both amounts.
+    """
+    index, warning = decide._build_shipment_item_index(str(_two_parcel_dump_zip(tmp_path)))
+    assert warning is None
+
+    sneaker_key = decide._shipment_index_key("113-4262513-5433000", "2026-08-06", "64.64")
+    shorts_key = decide._shipment_index_key("113-4262513-5433000", "2026-08-06", "19.4")
+    assert [s.items[0].product_name for s in index[sneaker_key]] == ["See Kai Run Sneaker"]
+    assert [s.items[0].product_name for s in index[shorts_key]] == ["Amazon Essentials Boys Shorts"]
+
+
+def test_walk_near_misses_shows_each_parcels_own_items(tmp_path, monkeypatch, capsys):
+    """Each candidate's item list is the one belonging to that candidate's amount."""
+    index, _ = decide._build_shipment_item_index(str(_two_parcel_dump_zip(tmp_path)))
+    changeset = {
+        "amazon": {
+            "unmatched_ynab": [
+                _make_unmatched(
+                    amount_dollars="-84.04",
+                    date="2026-08-07",
+                    candidate_shipments=[
+                        _make_candidate(
+                            order_id="113-4262513-5433000",
+                            ship_date="2026-08-06",
+                            amount_dollars="64.64",
+                            amount_delta_dollars="19.40",
+                            date_delta_days=-1,
+                        ),
+                        _make_candidate(
+                            order_id="113-4262513-5433000",
+                            ship_date="2026-08-06",
+                            amount_dollars="19.4",
+                            amount_delta_dollars="64.64",
+                            date_delta_days=-1,
+                        ),
+                    ],
+                )
+            ]
+        },
+        "non_amazon": {"proposals": []},
+    }
+    monkeypatch.setattr(decide, "_prompt_choice", lambda *a, **k: "s")
+
+    decide._walk_unmatched_near_misses(
+        changeset, categories=[], item_index=index, item_index_warning=None
+    )
+
+    lines = [ln.strip() for ln in capsys.readouterr().out.splitlines() if ln.strip()]
+    numbered = [i for i, ln in enumerate(lines) if ln.startswith(("1. order", "2. order"))]
+    first, second = numbered
+    assert "$64.64 (" in lines[first]
+    assert lines[first + 1] == "- See Kai Run Sneaker"
+    assert "$19.4 (" in lines[second]
+    assert lines[second + 1] == "- Amazon Essentials Boys Shorts"
+
+
+def test_walk_near_misses_flags_ambiguity_instead_of_showing_wrong_items(tmp_path, monkeypatch, capsys):
+    """If two shipments still collide on the key, show neither item list — say so."""
+    shipment = decide.parse_order_history(
+        Path("data/fixtures/amazon_order_history_sample.csv").read_text()
+    )[0][0]
+    key = decide._shipment_index_key("113-DUP", "2026-08-06", "64.64")
+    index = {key: [shipment, shipment]}
+    changeset = {
+        "amazon": {
+            "unmatched_ynab": [
+                _make_unmatched(
+                    candidate_shipments=[
+                        _make_candidate(
+                            order_id="113-DUP", ship_date="2026-08-06", amount_dollars="64.64"
+                        )
+                    ]
+                )
+            ]
+        },
+        "non_amazon": {"proposals": []},
+    }
+    monkeypatch.setattr(decide, "_prompt_choice", lambda *a, **k: "s")
+
+    decide._walk_unmatched_near_misses(
+        changeset, categories=[], item_index=index, item_index_warning=None
+    )
+
+    out = capsys.readouterr().out
+    assert "item detail is ambiguous" in out
+    assert "Test Widget" not in out
 
 
 def test_walk_unmatched_near_misses_skips_entries_without_candidates():
@@ -529,7 +644,9 @@ def test_claimed_order_ids_reads_existing_near_miss_proposals():
             {"tier": "history", "category_id": "cat-1"},
         ]},
     }
-    assert decide._claimed_order_ids(changeset) == {"111-ALREADY-CLAIMED"}
+    claimed_keys, claimed_orders = decide._claimed_near_misses(changeset)
+    assert claimed_keys == set()
+    assert claimed_orders == {"111-ALREADY-CLAIMED"}
 
 
 def test_walk_unmatched_near_misses_categorize_cancel_leaves_unmatched(monkeypatch):
@@ -620,3 +737,212 @@ def test_near_miss_proposal_schema_satisfies_apply_load_changeset(tmp_path, monk
     proposal = loaded["non_amazon"]["proposals"][0]
     body = apply.flat_proposal_to_patch_body(proposal)
     assert body == {"category_id": "cat-electronics"}
+
+
+# ============================================================================
+# Near-miss claiming: per-parcel vs whole-order grain
+# ============================================================================
+
+
+def _parcel_candidate(**kw) -> dict:
+    base = {
+        "order_id": "113-4262513-5433000",
+        "ship_date": "2026-08-06",
+        "amount_dollars": "64.64",
+        "amount_delta_dollars": "16.62",
+        "date_delta_days": -1,
+        "parcels": 1,
+    }
+    base.update(kw)
+    return base
+
+
+def _whole_order_candidate(**kw) -> dict:
+    base = {
+        "order_id": "113-4262513-5433000",
+        "ship_date": "2026-08-06",
+        "amount_dollars": "84.04",
+        "amount_delta_dollars": "2.78",
+        "date_delta_days": -1,
+        "parcels": 2,
+        "parcel_keys": [
+            ["113-4262513-5433000", "2026-08-06", "64.64"],
+            ["113-4262513-5433000", "2026-08-06", "19.4"],
+        ],
+    }
+    base.update(kw)
+    return base
+
+
+def test_claimed_near_misses_parcel_pick_claims_only_that_parcel():
+    changeset = {
+        "non_amazon": {"proposals": [{
+            "tier": "near-miss",
+            "near_miss_order_id": "113-ORDER",
+            "near_miss_shipment_key": ["113-ORDER", "2026-08-06", "64.64"],
+            "near_miss_parcel_count": 1,
+        }]},
+    }
+    claimed_keys, claimed_orders = decide._claimed_near_misses(changeset)
+    assert claimed_keys == {("113-ORDER", "2026-08-06", "64.64")}
+    assert claimed_orders == set()
+
+
+def test_claimed_near_misses_whole_order_pick_claims_the_order():
+    changeset = {
+        "non_amazon": {"proposals": [{
+            "tier": "near-miss",
+            "near_miss_order_id": "113-ORDER",
+            "near_miss_shipment_key": ["113-ORDER", "2026-08-06", "84.04"],
+            "near_miss_parcel_count": 2,
+        }]},
+    }
+    claimed_keys, claimed_orders = decide._claimed_near_misses(changeset)
+    assert claimed_keys == set()
+    assert claimed_orders == {"113-ORDER"}
+
+
+def test_claiming_one_parcel_leaves_its_sibling_available():
+    """Parcels that shipped on different days are billed separately.
+
+    Claiming one for a charge must not hide the other from the charge that
+    actually paid for it — the bug order-ID-grained claiming had.
+    """
+    claimed_keys = {("113-4262513-5433000", "2026-08-06", "64.64")}
+    sibling = _parcel_candidate(ship_date="2026-08-09", amount_dollars="19.4")
+
+    assert decide._candidate_is_claimed(_parcel_candidate(), claimed_keys, set())
+    assert not decide._candidate_is_claimed(sibling, claimed_keys, set())
+
+
+def test_claiming_one_parcel_kills_the_whole_order_candidate():
+    """The order total includes the claimed parcel; offering it would double-spend."""
+    claimed_keys = {("113-4262513-5433000", "2026-08-06", "64.64")}
+
+    assert decide._candidate_is_claimed(_whole_order_candidate(), claimed_keys, set())
+
+
+def test_claiming_the_whole_order_kills_every_parcel_of_it():
+    claimed_orders = {"113-4262513-5433000"}
+
+    assert decide._candidate_is_claimed(_parcel_candidate(), set(), claimed_orders)
+    assert decide._candidate_is_claimed(_whole_order_candidate(), set(), claimed_orders)
+    assert not decide._candidate_is_claimed(
+        _parcel_candidate(order_id="112-OTHER"), set(), claimed_orders
+    )
+
+
+def test_walk_near_misses_parcel_pick_records_the_shipment_key(monkeypatch):
+    changeset = {
+        "amazon": {"unmatched_ynab": [
+            _make_unmatched(candidate_shipments=[_parcel_candidate()])
+        ]},
+        "non_amazon": {"proposals": []},
+    }
+    monkeypatch.setattr(decide, "_prompt_choice", lambda *a, **k: "c")
+    monkeypatch.setattr(decide, "_pick_category", lambda *a, **k: {"id": "c1", "name": "Clothing"})
+
+    decide._walk_unmatched_near_misses(
+        changeset, categories=[], item_index={}, item_index_warning=None
+    )
+
+    proposal = changeset["non_amazon"]["proposals"][0]
+    assert proposal["near_miss_shipment_key"] == ["113-4262513-5433000", "2026-08-06", "64.64"]
+    assert proposal["near_miss_parcel_count"] == 1
+    assert "parcel shipped 2026-08-06" in proposal["rationale"]
+
+
+def test_walk_near_misses_whole_order_pick_records_the_parcel_count(monkeypatch):
+    changeset = {
+        "amazon": {"unmatched_ynab": [
+            _make_unmatched(candidate_shipments=[_whole_order_candidate()])
+        ]},
+        "non_amazon": {"proposals": []},
+    }
+    monkeypatch.setattr(decide, "_prompt_choice", lambda *a, **k: "c")
+    monkeypatch.setattr(decide, "_pick_category", lambda *a, **k: {"id": "c1", "name": "Clothing"})
+
+    decide._walk_unmatched_near_misses(
+        changeset, categories=[], item_index={}, item_index_warning=None
+    )
+
+    proposal = changeset["non_amazon"]["proposals"][0]
+    assert proposal["near_miss_parcel_count"] == 2
+    assert "whole order, 2 parcels" in proposal["rationale"]
+
+
+def test_walk_near_misses_sibling_parcel_survives_an_earlier_parcel_pick(monkeypatch):
+    """End to end: pick parcel A for one charge, parcel B is still offered for the next."""
+    changeset = {
+        "amazon": {"unmatched_ynab": [
+            _make_unmatched(
+                transaction_id="tx-a",
+                candidate_shipments=[_parcel_candidate()],
+            ),
+            _make_unmatched(
+                transaction_id="tx-b",
+                candidate_shipments=[
+                    _parcel_candidate(ship_date="2026-08-09", amount_dollars="19.4")
+                ],
+            ),
+        ]},
+        "non_amazon": {"proposals": []},
+    }
+    monkeypatch.setattr(decide, "_prompt_choice", lambda *a, **k: "c")
+    monkeypatch.setattr(decide, "_pick_category", lambda *a, **k: {"id": "c1", "name": "Clothing"})
+
+    decide._walk_unmatched_near_misses(
+        changeset, categories=[], item_index={}, item_index_warning=None
+    )
+
+    picked = [p["near_miss_shipment_key"] for p in changeset["non_amazon"]["proposals"]]
+    assert picked == [
+        ["113-4262513-5433000", "2026-08-06", "64.64"],
+        ["113-4262513-5433000", "2026-08-09", "19.4"],
+    ]
+
+
+def test_walk_near_misses_whole_order_candidate_shows_every_parcels_items(tmp_path, monkeypatch, capsys):
+    index, _ = decide._build_shipment_item_index(str(_two_parcel_dump_zip(tmp_path)))
+    changeset = {
+        "amazon": {"unmatched_ynab": [
+            _make_unmatched(candidate_shipments=[_whole_order_candidate()])
+        ]},
+        "non_amazon": {"proposals": []},
+    }
+    monkeypatch.setattr(decide, "_prompt_choice", lambda *a, **k: "s")
+
+    decide._walk_unmatched_near_misses(
+        changeset, categories=[], item_index=index, item_index_warning=None
+    )
+
+    out = capsys.readouterr().out
+    assert "[whole order, 2 parcels]" in out
+    assert "See Kai Run Sneaker" in out
+    assert "Amazon Essentials Boys Shorts" in out
+
+
+def test_walk_near_misses_whole_order_with_an_unresolvable_parcel_shows_no_items(
+    tmp_path, monkeypatch, capsys
+):
+    """A partial list under a whole-order total reads as complete — show none instead."""
+    index, _ = decide._build_shipment_item_index(str(_two_parcel_dump_zip(tmp_path)))
+    candidate = _whole_order_candidate(
+        parcel_keys=[
+            ["113-4262513-5433000", "2026-08-06", "64.64"],
+            ["113-4262513-5433000", "2026-08-06", "99.99"],
+        ]
+    )
+    changeset = {
+        "amazon": {"unmatched_ynab": [_make_unmatched(candidate_shipments=[candidate])]},
+        "non_amazon": {"proposals": []},
+    }
+    monkeypatch.setattr(decide, "_prompt_choice", lambda *a, **k: "s")
+
+    decide._walk_unmatched_near_misses(
+        changeset, categories=[], item_index=index, item_index_warning=None
+    )
+
+    out = capsys.readouterr().out
+    assert "is missing from the dump" in out
+    assert "See Kai Run Sneaker" not in out

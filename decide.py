@@ -124,11 +124,32 @@ def _pick_category(categories: list[dict], current_name: str | None) -> dict | N
         return by_name[matches[int(choice) - 1][0]]
 
 
+def _shipment_index_key(order_id: str, ship_date: str | None, amount_dollars: str) -> tuple:
+    """Key for the near-miss item index.
+
+    Order ID alone is not unique: one Amazon order routinely ships as two
+    parcels with different tracking numbers, and the dump records each as a
+    separate row group. Order ID + ship date is not unique either — those
+    two parcels usually leave the warehouse the same day. Including the
+    shipment total disambiguates them, and matches what the changeset
+    already records per candidate (`amount_dollars`, written by tag.py with
+    the same `format(Decimal, "f")`), so no changeset schema change is
+    needed and changesets built by older runs still resolve.
+    """
+    return (order_id, ship_date, amount_dollars)
+
+
 def _build_shipment_item_index(dump_path: str | None) -> tuple[dict, str | None]:
-    """Parse an Amazon dump once into a {(order_id, ship_date_iso): AmazonShipment} index.
+    """Parse an Amazon dump once into a {shipment key: [AmazonShipment]} index.
 
     Used to look up item-level detail for a near-miss candidate without
     re-parsing the (potentially 10k+ row) dump per transaction.
+
+    Values are lists, not single shipments: if two shipments still collide
+    on the key, both are kept so the caller can say "ambiguous" rather than
+    display one shipment's items under another shipment's amount. Silently
+    overwriting here put the wrong item list in front of a real-money
+    categorization decision.
 
     Args:
         dump_path: changeset["metadata"]["dump_path"], as recorded when the
@@ -156,11 +177,56 @@ def _build_shipment_item_index(dump_path: str | None) -> tuple[dict, str | None]
     except Exception as e:
         return {}, f"could not parse dump {dump_path}: {e} — showing order IDs only."
 
-    index = {
-        (s.order_id, s.ship_date.isoformat() if s.ship_date else None): s
-        for s in shipments
-    }
+    index: dict[tuple, list] = {}
+    for s in shipments:
+        key = _shipment_index_key(
+            s.order_id,
+            s.ship_date.isoformat() if s.ship_date else None,
+            format(s.total_amount, "f"),
+        )
+        index.setdefault(key, []).append(s)
     return index, None
+
+
+def _candidate_item_source(item_index: dict, candidate: dict) -> tuple[list, str | None]:
+    """Shipments whose items belong to `candidate`, or a note saying why none.
+
+    A whole-order candidate is resolved through its constituent parcels'
+    keys, since the fused order has no row of its own in the dump. Any parcel
+    that doesn't resolve to exactly one shipment aborts the whole list: a
+    partial item list under a whole-order total reads as complete and would
+    mislead a real-money categorization.
+
+    Returns (shipments, note). A note is user-facing and means "items
+    deliberately not shown"; an empty list with no note means the dump simply
+    had nothing for this candidate (item_index_warning already explains why).
+    """
+    parcel_keys = candidate.get("parcel_keys")
+    if parcel_keys:
+        resolved = []
+        for order_id, ship_date, amount in parcel_keys:
+            hits = item_index.get(_shipment_index_key(order_id, ship_date, amount), [])
+            if len(hits) != 1:
+                what = "is ambiguous in" if hits else "is missing from"
+                return [], (
+                    f"parcel shipped {ship_date} (${amount}) {what} the dump — "
+                    f"item detail is incomplete, not shown"
+                )
+            resolved.append(hits[0])
+        return resolved, None
+
+    hits = item_index.get(
+        _shipment_index_key(
+            candidate["order_id"], candidate["ship_date"], candidate["amount_dollars"]
+        ),
+        [],
+    )
+    if len(hits) > 1:
+        return [], (
+            f"{len(hits)} shipments in the dump share this order, ship date and "
+            f"amount — item detail is ambiguous, not shown"
+        )
+    return hits, None
 
 
 def _amazon_order_url(order_id: str) -> str:
@@ -348,24 +414,68 @@ def _walk_non_amazon(
     return None
 
 
-def _claimed_order_ids(changeset: dict) -> set[str]:
-    """Order IDs already assigned to a near-miss proposal in this changeset.
+def _claimed_near_misses(changeset: dict) -> tuple[set[tuple], set[str]]:
+    """What earlier near-miss picks have already spoken for, read from the changeset.
 
-    A candidate shipment never matches by amount (that's why it's sitting in
-    unmatched_shipments in the first place), so once a user picks it for one
-    txn it would otherwise keep reappearing as a candidate for every other
-    in-window txn forever. Reads existing near-miss proposals' recorded
-    order_id (parsed from the rationale, the only place it's stored) so this
-    also works correctly on resume, not just within one run.
+    A candidate never matches by amount (that's why it's in
+    unmatched_shipments at all), so once a user picks it for one txn it would
+    otherwise keep reappearing for every other in-window txn forever. Reading
+    it back off the proposals makes that hold across a resume, not just
+    within one run.
+
+    Two grains, because Amazon captures per shipment:
+      - picking one parcel claims that parcel only. Its siblings shipped on
+        other days may have been billed separately, making them another
+        charge's near miss.
+      - picking a whole-order candidate claims the entire order, siblings
+        included — that one charge is the whole order.
+
+    Returns (claimed_shipment_keys, claimed_order_ids). Proposals written
+    before shipment keys were recorded carry only `near_miss_order_id`; those
+    claim the whole order, which is what they meant at the time.
     """
-    claimed = set()
+    claimed_keys: set[tuple] = set()
+    claimed_orders: set[str] = set()
     for p in changeset["non_amazon"]["proposals"]:
         if p.get("tier") != "near-miss":
             continue
-        order_id = p.get("near_miss_order_id")
-        if order_id:
-            claimed.add(order_id)
-    return claimed
+        key = p.get("near_miss_shipment_key")
+        if key and p.get("near_miss_parcel_count", 1) == 1:
+            claimed_keys.add(tuple(key))
+        elif p.get("near_miss_order_id"):
+            claimed_orders.add(p["near_miss_order_id"])
+    return claimed_keys, claimed_orders
+
+
+def _candidate_is_claimed(candidate: dict, claimed_keys: set[tuple], claimed_orders: set[str]) -> bool:
+    """True if an earlier pick already accounts for this candidate.
+
+    A whole-order candidate is also dead once any one of its parcels is
+    claimed: its total includes that parcel, so offering it again would let
+    the same dollars be spent twice.
+    """
+    order_id = candidate["order_id"]
+    if order_id in claimed_orders:
+        return True
+    if _shipment_index_key(order_id, candidate["ship_date"], candidate["amount_dollars"]) in claimed_keys:
+        return True
+    if candidate.get("parcels", 1) > 1:
+        return any(k[0] == order_id for k in claimed_keys)
+    return False
+
+
+def _near_miss_rationale(candidate: dict) -> str:
+    """Audit line for a user-confirmed near miss, naming what was actually picked."""
+    parcels = candidate.get("parcels", 1)
+    if parcels > 1:
+        return (
+            f"user-confirmed near-miss match to Amazon order {candidate['order_id']} "
+            f"(whole order, {parcels} parcels, ${candidate['amount_dollars']})"
+        )
+    return (
+        f"user-confirmed near-miss match to Amazon order {candidate['order_id']} "
+        f"(parcel shipped {candidate['ship_date']}, ${candidate['amount_dollars']})"
+    )
 
 
 def _walk_unmatched_near_misses(
@@ -397,7 +507,7 @@ def _walk_unmatched_near_misses(
     if not entries:
         return None
 
-    claimed = _claimed_order_ids(changeset)
+    claimed_keys, claimed_orders = _claimed_near_misses(changeset)
 
     print()
     print(f"=== Unmatched Amazon txns with near-miss candidates ({len(entries)}) ===")
@@ -405,21 +515,28 @@ def _walk_unmatched_near_misses(
         print(f"  Note: {item_index_warning}")
 
     for i, u in enumerate(entries, start=1):
-        candidates = [c for c in u["candidate_shipments"] if c["order_id"] not in claimed]
+        candidates = [
+            c for c in u["candidate_shipments"]
+            if not _candidate_is_claimed(c, claimed_keys, claimed_orders)
+        ]
         if not candidates:
             continue
 
         print()
         print(f"[{i}/{len(entries)}] {u['payee_name']}  ${u['amount_dollars']}  {u['date']}")
         for j, c in enumerate(candidates, start=1):
+            parcels = c.get("parcels", 1)
+            label = f" [whole order, {parcels} parcels]" if parcels > 1 else ""
             print(
-                f"  {j}. order {c['order_id']}, shipped {c['ship_date']}, "
+                f"  {j}. order {c['order_id']}{label}, shipped {c['ship_date']}, "
                 f"${c['amount_dollars']} (Δ${c['amount_delta_dollars']}, Δ{c['date_delta_days']}d)"
             )
-            shipment = item_index.get((c["order_id"], c["ship_date"]))
-            if shipment is not None and shipment.items:
+            sources, note = _candidate_item_source(item_index, c)
+            for shipment in sources:
                 for item in shipment.items:
                     print(f"       - {item.product_name}")
+            if note:
+                print(f"       ! {note}")
 
         while True:
             choice = _prompt_choice("[o]pen a candidate  [c]hoose candidate  [s]kip  [q]uit", "ocsq")
@@ -458,14 +575,27 @@ def _walk_unmatched_near_misses(
                 "category_name": new_cat["name"],
                 "tier": "near-miss",
                 "confidence": 1.0,
-                "rationale": f"user-confirmed near-miss match to Amazon order {chosen['order_id']}",
+                "rationale": _near_miss_rationale(chosen),
                 "near_miss_order_id": chosen["order_id"],
+                "near_miss_shipment_key": list(
+                    _shipment_index_key(
+                        chosen["order_id"], chosen["ship_date"], chosen["amount_dollars"]
+                    )
+                ),
+                "near_miss_parcel_count": chosen.get("parcels", 1),
                 "prior_strength": None,
             }
             _mark_accepted(proposal)
             changeset["non_amazon"]["proposals"].append(proposal)
             unmatched.remove(u)
-            claimed.add(chosen["order_id"])
+            if chosen.get("parcels", 1) > 1:
+                claimed_orders.add(chosen["order_id"])
+            else:
+                claimed_keys.add(
+                    _shipment_index_key(
+                        chosen["order_id"], chosen["ship_date"], chosen["amount_dollars"]
+                    )
+                )
             print(f"  → {new_cat['name']}")
     return None
 
