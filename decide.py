@@ -241,12 +241,31 @@ def _amazon_order_url(order_id: str) -> str:
 
 
 def _prompt_choice(prompt: str, valid: str) -> str:
-    """Single-letter prompt, lowercased. Re-prompts until one of `valid` is entered."""
+    """Single-letter prompt, lowercased. Re-prompts until one of `valid` is entered.
+
+    The length check is load-bearing: `resp in valid` is a substring test, so
+    without it a bare Enter ("" is a substring of everything) returns a value
+    matching no branch and the entry falls through unreviewed and unannounced.
+    """
     while True:
         resp = input(f"  {prompt} [{'/'.join(valid)}]: ").strip().lower()
-        if resp in valid:
+        if len(resp) == 1 and resp in valid:
             return resp
         print(f"  invalid; expected one of: {', '.join(valid)}")
+
+
+def _prompt_number(prompt: str, n: int) -> int:
+    """Prompt for a 1-based pick from a list of `n` items. Re-prompts until valid.
+
+    Not `_prompt_choice`: that one validates by substring against a string of
+    allowed characters, which cannot express a two-digit range. Lists of more
+    than nine candidates are routine here.
+    """
+    while True:
+        resp = input(f"  {prompt} (1-{n}): ").strip()
+        if resp.isdigit() and 1 <= int(resp) <= n:
+            return int(resp)
+        print(f"  invalid; expected a number from 1 to {n}")
 
 
 def _has_review_decision(proposal: dict) -> bool:
@@ -543,11 +562,8 @@ def _walk_unmatched_near_misses(
             if choice == "q":
                 return "quit"
             if choice == "o":
-                pick = _prompt_choice(
-                    f"  which candidate to open (1-{len(candidates)})",
-                    "".join(str(n) for n in range(1, len(candidates) + 1)),
-                )
-                webbrowser.open(_amazon_order_url(candidates[int(pick) - 1]["order_id"]))
+                pick = _prompt_number("which candidate to open", len(candidates))
+                webbrowser.open(_amazon_order_url(candidates[pick - 1]["order_id"]))
                 continue
             break
         if choice == "s":
@@ -557,11 +573,7 @@ def _walk_unmatched_near_misses(
             if len(candidates) == 1:
                 chosen = candidates[0]
             else:
-                pick = _prompt_choice(
-                    f"  which candidate (1-{len(candidates)})",
-                    "".join(str(n) for n in range(1, len(candidates) + 1)),
-                )
-                chosen = candidates[int(pick) - 1]
+                chosen = candidates[_prompt_number("which candidate", len(candidates)) - 1]
             new_cat = _pick_category(categories, None)
             if new_cat is None:
                 print("  cancelled — leaving unreviewed; come back later")

@@ -557,8 +557,9 @@ def test_walk_unmatched_near_misses_categorize_multiple_candidates_prompts_for_p
         "amazon": {"unmatched_ynab": [u], "proposed_splits": []},
         "non_amazon": {"proposals": []},
     }
-    responses = iter(["c", "2"])
-    monkeypatch.setattr(decide, "_prompt_choice", lambda *a, **k: next(responses))
+    monkeypatch.setattr(decide, "_prompt_choice", lambda *a, **k: "c")
+    picks = iter([2])
+    monkeypatch.setattr(decide, "_prompt_number", lambda *a, **k: next(picks))
     monkeypatch.setattr(decide, "_pick_category", lambda *a, **k: {"id": "cat-electronics", "name": "Electronics"})
 
     decide._walk_unmatched_near_misses(changeset, categories=[], item_index={}, item_index_warning=None)
@@ -581,8 +582,10 @@ def test_walk_unmatched_near_misses_open_loops_back_to_full_menu(monkeypatch):
     }
     opened = []
     monkeypatch.setattr(decide.webbrowser, "open", lambda url: opened.append(url))
-    responses = iter(["o", "1", "o", "2", "c", "2"])
+    responses = iter(["o", "o", "c"])
     monkeypatch.setattr(decide, "_prompt_choice", lambda *a, **k: next(responses))
+    picks = iter([1, 2, 2])
+    monkeypatch.setattr(decide, "_prompt_number", lambda *a, **k: next(picks))
     monkeypatch.setattr(decide, "_pick_category", lambda *a, **k: {"id": "cat-electronics", "name": "Electronics"})
 
     result = decide._walk_unmatched_near_misses(changeset, categories=[], item_index={}, item_index_warning=None)
@@ -602,8 +605,9 @@ def test_walk_unmatched_near_misses_quit_after_open_returns_quit(monkeypatch):
         "non_amazon": {"proposals": []},
     }
     monkeypatch.setattr(decide.webbrowser, "open", lambda url: None)
-    responses = iter(["o", "1", "q"])
+    responses = iter(["o", "q"])
     monkeypatch.setattr(decide, "_prompt_choice", lambda *a, **k: next(responses))
+    monkeypatch.setattr(decide, "_prompt_number", lambda *a, **k: 1)
 
     result = decide._walk_unmatched_near_misses(changeset, categories=[], item_index={}, item_index_warning=None)
 
@@ -946,3 +950,67 @@ def test_walk_near_misses_whole_order_with_an_unresolvable_parcel_shows_no_items
     out = capsys.readouterr().out
     assert "is missing from the dump" in out
     assert "See Kai Run Sneaker" not in out
+
+
+def _feed_input(monkeypatch, responses):
+    """Drive the real prompt helpers by scripting stdin."""
+    it = iter(responses)
+    monkeypatch.setattr("builtins.input", lambda *a, **k: next(it))
+
+
+def test_prompt_choice_rejects_empty_input(monkeypatch, capsys):
+    """Bare Enter is not a choice -- it must re-prompt, not fall through.
+
+    `resp in valid` treats "" as a member of every string, so an accidental
+    Enter used to return "" and match no branch: the entry was silently left
+    unreviewed with no message.
+    """
+    _feed_input(monkeypatch, ["", "s"])
+
+    assert decide._prompt_choice("[a]ccept  [s]kip", "as") == "s"
+    assert "invalid" in capsys.readouterr().out
+
+
+def test_prompt_choice_rejects_multi_letter_substring(monkeypatch, capsys):
+    """"as" is a substring of "as" but is not one of the choices."""
+    _feed_input(monkeypatch, ["as", "a"])
+
+    assert decide._prompt_choice("[a]ccept  [s]kip", "as") == "a"
+    assert "invalid" in capsys.readouterr().out
+
+
+def test_prompt_number_accepts_two_digit_pick(monkeypatch):
+    """Candidate lists routinely run past 9; picking 13 of 13 must work."""
+    _feed_input(monkeypatch, ["13"])
+
+    assert decide._prompt_number("which candidate", 13) == 13
+
+
+def test_prompt_number_rejects_out_of_range_and_junk(monkeypatch, capsys):
+    """Zero, past-the-end, non-numeric and empty all re-prompt rather than
+    crashing or silently selecting the wrong candidate.
+
+    Under the old substring check "0" was accepted (indexing the *last*
+    candidate) and "21" was accepted out of a 13-item list (IndexError).
+    """
+    _feed_input(monkeypatch, ["0", "21", "abc", "", "7"])
+
+    assert decide._prompt_number("which candidate", 13) == 7
+    assert capsys.readouterr().out.count("invalid") == 4
+
+
+def test_prompt_number_lists_the_range_not_every_digit(monkeypatch):
+    """The prompt shows "1-13", not the concatenated-digit garbage the old
+    call site produced ("[1/2/3/4/5/6/7/8/9/1/0/1/1/1/2/1/3]").
+    """
+    seen = []
+
+    def fake_input(prompt):
+        seen.append(prompt)
+        return "1"
+
+    monkeypatch.setattr("builtins.input", fake_input)
+    decide._prompt_number("which candidate to open", 13)
+
+    assert "1-13" in seen[0]
+    assert "1/2/3" not in seen[0]
